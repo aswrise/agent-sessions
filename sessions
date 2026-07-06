@@ -1,0 +1,738 @@
+#!/usr/bin/env python3
+"""Claude Code / Codex 会话工具箱。
+
+用法:
+  sessions                         活跃会话快照（读 last-active.txt）
+  sessions list [-n 20] [claude|codex]   最近 session（跨全路径）
+  sessions find <关键词> [-n 20]         全文搜索（rg 扫全部历史）
+  sessions star <id前缀> [备注...]        标记重要
+  sessions unstar <id前缀>               取消标记
+  sessions stars                         列出已标记
+  sessions dash [--no-open]              打开 dashboard（localhost 常驻服务，页内可点★）
+  sessions dash --stop                   停止 dashboard 服务
+"""
+import json
+import re
+import subprocess
+import sys
+import threading
+import time
+from datetime import datetime
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+
+CLAUDE_DIR = Path.home() / ".claude" / "projects"
+CODEX_DIR = Path.home() / ".codex" / "sessions"
+PI_DIR = Path.home() / ".pi" / "agent" / "sessions"
+DATA_DIR = Path.home() / ".local" / "share" / "session-snapshots"
+STARS_FILE = DATA_DIR / "stars.json"
+MIN_SIZE = 2048
+MAX_HEAD_LINES = 400
+DASH_PORT = 7867
+INDEX_TTL = 30
+
+
+# ─── 元数据收集 ───────────────────────────────
+
+def load_claude_names():
+    """会话名称：jsonl 里的 custom-title（/rename 手动命名）优先，其次 ai-title（自动生成）"""
+    ai, custom = {}, {}
+    try:
+        out = subprocess.run(
+            ["rg", "-N", "--no-messages", "--no-ignore", "--hidden",
+             '"type":"(ai|custom)-title"', str(CLAUDE_DIR)],
+            capture_output=True, text=True, timeout=60,
+        ).stdout
+        for line in out.splitlines():
+            try:
+                rec = json.loads(line.split(":", 1)[1])
+            except (json.JSONDecodeError, IndexError):
+                continue
+            sid = rec.get("sessionId")
+            if not sid:
+                continue
+            # 同一文件多条记录，rg 按文件内顺序输出，后写的覆盖先写的
+            if rec.get("type") == "custom-title" and rec.get("customTitle"):
+                custom[sid] = rec["customTitle"]
+            elif rec.get("aiTitle"):
+                ai[sid] = rec["aiTitle"]
+    except FileNotFoundError:
+        pass
+    # 旧版 sessions-index.json 里的 customTitle（历史遗留，仅补充）
+    for idx in CLAUDE_DIR.glob("*/sessions-index.json"):
+        try:
+            for e in json.loads(idx.read_text()).get("entries", []):
+                if e.get("customTitle"):
+                    custom.setdefault(e["sessionId"], e["customTitle"])
+        except Exception:
+            pass
+    ai.update(custom)
+    return ai
+
+
+def iso2epoch(ts):
+    try:
+        return datetime.fromisoformat(ts.replace("Z", "+00:00")).timestamp()
+    except (ValueError, AttributeError):
+        return None
+
+
+def parse_claude(path):
+    sid, cwd, first_msg, birth = path.stem, None, None, None
+    try:
+        with open(path, errors="replace") as fh:
+            for i, line in enumerate(fh):
+                if i >= MAX_HEAD_LINES or (cwd and first_msg):
+                    break
+                try:
+                    rec = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                cwd = cwd or rec.get("cwd")
+                birth = birth or iso2epoch(rec.get("timestamp"))
+                if first_msg is None and rec.get("type") == "user" and not rec.get("isSidechain"):
+                    content = (rec.get("message") or {}).get("content")
+                    if isinstance(content, list):
+                        content = " ".join(c.get("text", "") for c in content
+                                           if isinstance(c, dict) and c.get("type") == "text")
+                    if isinstance(content, str):
+                        text = content.strip()
+                        if text and not text.startswith(("<", "Caveat:")):
+                            first_msg = text
+    except OSError:
+        return None
+    if not cwd:
+        return None
+    return sid, cwd, first_msg or "", birth
+
+
+def parse_codex(path):
+    try:
+        with open(path, errors="replace") as fh:
+            meta = json.loads(fh.readline())
+            payload = meta.get("payload", {})
+            sid, cwd = payload.get("id"), payload.get("cwd") or "?"
+            if not sid:
+                return None
+            birth = iso2epoch(payload.get("timestamp")) or iso2epoch(meta.get("timestamp"))
+            first_msg = None
+            for i, line in enumerate(fh):
+                if i >= MAX_HEAD_LINES:
+                    break
+                if "user" not in line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                p = rec.get("payload", {})
+                if p.get("type") == "user_message":
+                    text = (p.get("message") or "").strip()
+                elif p.get("item", p).get("role") == "user":
+                    item = p.get("item", p)
+                    text = " ".join(c.get("text", "") for c in (item.get("content") or [])
+                                    if isinstance(c, dict) and c.get("type") == "input_text").strip()
+                else:
+                    continue
+                if text and not text.startswith(("<", "#", "⚠")):
+                    first_msg = text
+                    break
+            return sid, cwd, first_msg or "", birth
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+def parse_pi(path):
+    """首行 {"type":"session","id","cwd","timestamp"[,"name"]}，消息为 type=message"""
+    try:
+        with open(path, errors="replace") as fh:
+            meta = json.loads(fh.readline())
+            if meta.get("type") != "session" or not meta.get("id"):
+                return None
+            sid, cwd = meta["id"], meta.get("cwd") or "?"
+            birth = iso2epoch(meta.get("timestamp"))
+            name = meta.get("name") or ""
+            first_msg = None
+            for i, line in enumerate(fh):
+                if i >= MAX_HEAD_LINES:
+                    break
+                if '"role":"user"' not in line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                msg = rec.get("message", {})
+                if rec.get("type") == "message" and msg.get("role") == "user":
+                    text = " ".join(c.get("text", "") for c in (msg.get("content") or [])
+                                    if isinstance(c, dict) and c.get("type") == "text").strip()
+                    if text and not text.startswith("<"):
+                        first_msg = text
+                        break
+            return sid, cwd, first_msg or "", birth, name
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+PARSERS = {"claude": parse_claude, "codex": parse_codex, "pi": parse_pi}
+
+
+def iter_files(only=None):
+    if only in (None, "claude"):
+        for f in CLAUDE_DIR.glob("*/*.jsonl"):
+            if not f.name.startswith("agent-"):
+                yield "claude", f
+    if only in (None, "codex"):
+        for f in CODEX_DIR.glob("*/*/*/rollout-*.jsonl"):
+            yield "codex", f
+    if only in (None, "pi"):
+        for f in PI_DIR.glob("*/*.jsonl"):
+            yield "pi", f
+
+
+def one_line(text, limit=100):
+    text = re.sub(r"\s+", " ", text or "")
+    return text[:limit] + ("…" if len(text) > limit else "")
+
+
+def build_index(only=None, limit=None):
+    """扫描所有 session，按 mtime 降序，同 id 去重保留最新"""
+    names = load_claude_names()
+    stars = load_stars()
+    files = sorted(iter_files(only), key=lambda t: t[1].stat().st_mtime, reverse=True)
+    seen, rows = set(), []
+    for tool, f in files:
+        st = f.stat()
+        if st.st_size < MIN_SIZE:
+            continue
+        parsed = PARSERS[tool](f)
+        if not parsed:
+            continue
+        sid, cwd, first_msg, birth = parsed[:4]
+        if sid in seen:
+            continue
+        seen.add(sid)
+        star = stars.get(sid)
+        name = parsed[4] if len(parsed) > 4 and parsed[4] else names.get(sid, "")
+        rows.append({
+            "id": sid, "tool": tool, "cwd": cwd,
+            "name": one_line(name, 120),
+            "first_msg": one_line(first_msg, 240),
+            "mtime": st.st_mtime,
+            "birth": birth or st.st_mtime,
+            "size_kb": st.st_size // 1024,
+            "starred": star is not None,
+            "star_note": (star or {}).get("note", ""),
+        })
+        if limit and len(rows) >= limit:
+            break
+    return rows
+
+
+# ─── star 管理 ────────────────────────────────
+
+def load_stars():
+    try:
+        return json.loads(STARS_FILE.read_text())
+    except Exception:
+        return {}
+
+
+def save_stars(stars):
+    STARS_FILE.write_text(json.dumps(stars, ensure_ascii=False, indent=1))
+
+
+def set_star(sid, note=None, remove=False):
+    stars = load_stars()
+    if remove:
+        stars.pop(sid, None)
+    else:
+        stars[sid] = {"note": note or "", "added": datetime.now().strftime("%Y-%m-%d %H:%M")}
+    save_stars(stars)
+
+
+def resolve_id(prefix):
+    matches = set()
+    for tool, f in iter_files():
+        if tool == "claude":
+            sid = f.stem
+        else:  # codex/pi 的 uuid 在文件名末尾
+            m = re.search(r"([0-9a-f]{8}-[0-9a-f-]{27})\.jsonl$", f.name)
+            sid = m.group(1) if m else None
+        if sid and sid.startswith(prefix):
+            matches.add(sid)
+    if len(matches) == 1:
+        return matches.pop()
+    sys.exit(f"id 前缀 '{prefix}' 匹配到 {len(matches)} 个 session，需要更长前缀" if matches
+             else f"没有 session 匹配 '{prefix}'")
+
+
+def cmd_star(prefix, note):
+    sid = resolve_id(prefix)
+    set_star(sid, note)
+    print(f"★ {sid}" + (f"  ({note})" if note else ""))
+
+
+def cmd_unstar(prefix):
+    stars = load_stars()
+    hit = [s for s in stars if s.startswith(prefix)]
+    if len(hit) != 1:
+        sys.exit(f"'{prefix}' 匹配到 {len(hit)} 个已标记 session")
+    set_star(hit[0], remove=True)
+    print(f"已取消 {hit[0]}")
+
+
+def cmd_stars():
+    stars = load_stars()
+    if not stars:
+        print("还没有标记任何 session（sessions star <id前缀> [备注]）")
+        return
+    for sid, info in sorted(stars.items(), key=lambda kv: kv[1].get("added", ""), reverse=True):
+        print(f"★ {sid}  [{info.get('added','')}]  {info.get('note','')}")
+
+
+# ─── list / find ─────────────────────────────
+
+def resume_cmd(tool, sid, cwd):
+    if tool == "codex":
+        return f"codex resume {sid}"
+    if tool == "pi":
+        return f"cd {cwd} && pi --session {sid}"
+    return f"cd {cwd} && claude -r {sid}"
+
+
+def print_entry(r, snippet=None):
+    day = datetime.fromtimestamp(r["mtime"]).strftime("%m-%d %H:%M")
+    star = "★" if r["starred"] else " "
+    print(f"{star} [{day}] {r['tool']:6} {r['cwd']}")
+    label = r.get("name") or r["first_msg"]
+    print(f"    {one_line(snippet if snippet is not None else label)}")
+    print(f"    ↳ {resume_cmd(r['tool'], r['id'], r['cwd'])}\n")
+
+
+def cmd_list(n, only=None):
+    for r in build_index(only, limit=n):
+        print_entry(r)
+
+
+def cmd_find(keyword, n):
+    try:
+        out = subprocess.run(["rg", "-l", "--no-messages", "--no-ignore", "--hidden",
+                              keyword, str(CLAUDE_DIR), str(CODEX_DIR), str(PI_DIR)],
+                             capture_output=True, text=True, timeout=120).stdout.splitlines()
+    except FileNotFoundError:
+        sys.exit("需要 ripgrep (rg)")
+    hit_files = {Path(p) for p in out
+                 if Path(p).suffix == ".jsonl" and not Path(p).name.startswith("agent-")}
+    if not hit_files:
+        print("没有匹配的 session")
+        return
+    stars = load_stars()
+    shown = 0
+    print(f"共 {len(hit_files)} 个匹配 session，显示最近 {min(n, len(hit_files))} 个：\n")
+    for f in sorted(hit_files, key=lambda p: p.stat().st_mtime, reverse=True)[:n]:
+        s = str(f)
+        tool = ("claude" if s.startswith(str(CLAUDE_DIR))
+                else "pi" if s.startswith(str(PI_DIR)) else "codex")
+        parsed = PARSERS[tool](f)
+        if not parsed:
+            continue
+        sid, cwd = parsed[0], parsed[1]
+        m = subprocess.run(["rg", "-m1", "-o", "--no-ignore", "--hidden",
+                            f".{{0,40}}{re.escape(keyword)}.{{0,60}}", str(f)],
+                           capture_output=True, text=True).stdout.strip().splitlines()
+        print_entry({"id": sid, "tool": tool, "cwd": cwd, "name": "", "first_msg": "",
+                     "mtime": f.stat().st_mtime, "starred": sid in stars},
+                    m[0] if m else keyword)
+        shown += 1
+
+
+# ─── dashboard 服务 ──────────────────────────
+
+_cache = {"rows": None, "at": 0.0}
+_cache_lock = threading.Lock()
+
+
+def cached_index(force=False):
+    with _cache_lock:
+        if force or _cache["rows"] is None or time.time() - _cache["at"] > INDEX_TTL:
+            _cache["rows"] = build_index()
+            _cache["at"] = time.time()
+        return _cache["rows"], _cache["at"]
+
+
+class DashHandler(BaseHTTPRequestHandler):
+    def log_message(self, *a):
+        pass
+
+    def _send(self, code, body, ctype="text/html; charset=utf-8"):
+        data = body.encode()
+        self.send_response(code)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def do_GET(self):
+        if self.path.split("?")[0] in ("/", "/index.html"):
+            rows, built_at = cached_index(force="fresh" in self.path)
+            now = datetime.fromtimestamp(built_at).strftime("%Y-%m-%d %H:%M:%S")
+            page = (DASH_TEMPLATE
+                    .replace("__DATA__", json.dumps(rows, ensure_ascii=False).replace("</", "<\\/"))
+                    .replace("__HOME__", str(Path.home()))
+                    .replace("__NOW__", now).replace("__COUNT__", str(len(rows))))
+            self._send(200, page)
+        else:
+            self._send(404, "not found", "text/plain")
+
+    def do_POST(self):
+        if self.path != "/star":
+            self._send(404, "not found", "text/plain")
+            return
+        try:
+            body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))))
+            sid = body["id"]
+        except Exception:
+            self._send(400, '{"error":"bad request"}', "application/json")
+            return
+        set_star(sid, note=body.get("note"), remove=bool(body.get("remove")))
+        with _cache_lock:
+            for r in _cache["rows"] or []:
+                if r["id"] == sid:
+                    r["starred"] = not body.get("remove")
+                    r["star_note"] = body.get("note") or ""
+        self._send(200, '{"ok":true}', "application/json")
+
+
+def serve():
+    ThreadingHTTPServer(("127.0.0.1", DASH_PORT), DashHandler).serve_forever()
+
+
+def open_url(url):
+    import shutil
+    if sys.platform == "darwin":
+        cmds = [["open", url]]
+    elif shutil.which("explorer.exe"):  # WSL
+        cmds = [["explorer.exe", url]]
+    else:
+        cmds = [["xdg-open", url]]
+    for cmd in cmds:
+        try:
+            subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            return
+        except OSError:
+            continue
+    print("请手动在浏览器打开上面的地址")
+
+
+def server_alive():
+    import socket
+    try:
+        with socket.create_connection(("127.0.0.1", DASH_PORT), timeout=0.5):
+            return True
+    except OSError:
+        return False
+
+
+def cmd_dash(rest):
+    if "--stop" in rest:
+        subprocess.run(["pkill", "-f", "sessions _serve"])
+        print("dashboard 服务已停止")
+        return
+    if not server_alive():
+        subprocess.Popen([sys.executable, str(Path(__file__).resolve()), "_serve"],
+                         start_new_session=True,
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        for _ in range(40):
+            if server_alive():
+                break
+            time.sleep(0.1)
+    url = f"http://localhost:{DASH_PORT}/"
+    print(f"dashboard: {url}（sessions dash --stop 停止服务）")
+    if "--no-open" not in rest:
+        open_url(url)
+
+
+DASH_TEMPLATE = """<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Sessions</title><style>
+/* Linear style — midnight precision instrument (styles.refero.design)，浅色为明度反转变体 */
+:root{--void:#08090a;--carbon:#0f1011;--obsidian:#161718;--graphite:#23252a;--smoke:#383b3f;
+  --ash:#62666d;--fog:#8a8f98;--mist:#d0d6e0;--bone:#e5e5e6;--paper:#ffffff;--lime:#e4f222;
+  --hover:rgba(255,255,255,.03);--chip:rgba(255,255,255,.05);
+  --input-bg:rgba(255,255,255,.02);--input-line:rgba(255,255,255,.08);
+  --star-wash:rgba(228,242,34,.03);color-scheme:dark}
+:root[data-theme=light]{--void:#fcfcfd;--carbon:#ffffff;--obsidian:#ececef;--graphite:#e0e0e4;
+  --smoke:#b9b9c1;--ash:#6e6e77;--fog:#55555e;--mist:#33333a;--bone:#18181b;--paper:#08090a;
+  --lime:#8f9a04;--hover:rgba(0,0,0,.03);--chip:rgba(0,0,0,.05);
+  --input-bg:#ffffff;--input-line:rgba(0,0,0,.12);
+  --star-wash:rgba(228,242,34,.16);color-scheme:light}
+*{box-sizing:border-box}
+body{background:var(--void);color:var(--mist);margin:0;letter-spacing:-.011em;
+  font:400 13px/1.5 Inter,"Inter Variable",-apple-system,"Segoe UI","PingFang SC","Microsoft YaHei",system-ui,sans-serif;
+  font-feature-settings:"cv01" on,"ss03" on,"zero" on}
+.mono{font-family:"Berkeley Mono",ui-monospace,"Cascadia Code",Consolas,monospace;
+  font-variant-numeric:tabular-nums;letter-spacing:-.013em}
+header{display:flex;align-items:baseline;gap:16px;flex-wrap:wrap;
+  padding:24px 32px 0;max-width:1280px;margin:0 auto}
+h1{font-size:16px;font-weight:510;letter-spacing:-.012em;margin:0;color:var(--paper)}
+.meta{color:var(--ash);font-size:13px}
+.meta .mono{font-size:12px;color:var(--fog)}
+.bar{display:flex;gap:8px;align-items:center;flex-wrap:wrap;
+  padding:12px 32px;max-width:1280px;margin:0 auto;position:sticky;top:0;
+  background:var(--void);border-bottom:1px solid var(--graphite);z-index:2}
+input[type=search]{flex:1;min-width:220px;padding:8px 12px;font:inherit;color:var(--mist);
+  border:1px solid var(--input-line);border-radius:6px;background:var(--input-bg);outline:none}
+input[type=search]::placeholder{color:var(--ash)}
+input[type=search]:focus{border-color:var(--mist)}
+.f{padding:4px 12px;font:inherit;font-size:13px;border:none;border-radius:9999px;
+  background:none;color:var(--fog);cursor:pointer}
+.f:hover{background:var(--chip);color:var(--mist)}
+.f.on{background:var(--bone);color:var(--void);font-weight:510}
+.f:focus-visible,input[type=search]:focus-visible{outline:2px solid var(--mist);outline-offset:1px}
+.act{border:1px solid var(--graphite);border-radius:6px}
+.sep{width:1px;height:16px;background:var(--graphite);margin:0 4px}
+main{max-width:1280px;margin:0 auto;padding:0 32px 48px}
+table{width:100%;border-collapse:collapse;table-layout:fixed}
+col.c-star{width:32px}col.c-date{width:92px}col.c-tool{width:60px}
+col.c-name{width:230px}col.c-note{width:120px}col.c-path{width:180px}col.c-size{width:70px}
+select#path{max-width:240px;padding:4px 8px;font:inherit;font-size:13px;color:var(--fog);
+  border:1px solid var(--input-line);border-radius:6px;background:var(--input-bg)}
+.bar2{display:flex;gap:6px;align-items:center;flex-wrap:wrap;
+  padding:8px 32px;max-width:1280px;margin:0 auto;color:var(--ash);font-size:12px}
+.bar2 label{margin-left:8px}
+.bar2 input{padding:3px 6px;font:inherit;font-size:12px;color:var(--mist);
+  border:1px solid var(--input-line);border-radius:6px;background:var(--input-bg);outline:none}
+.bar2 input[type=number]{width:76px}
+.bar2 input:focus{border-color:var(--mist)}
+th{text-align:left;font-size:12px;font-weight:400;color:var(--ash);position:relative;
+  padding:12px 8px 8px;border-bottom:1px solid var(--graphite);cursor:pointer;user-select:none;white-space:nowrap}
+th:hover{color:var(--fog)}
+th.s-asc::after{content:" ↑";color:var(--mist)}
+th.s-desc::after{content:" ↓";color:var(--mist)}
+.rs{position:absolute;top:0;right:-3px;width:7px;height:100%;cursor:col-resize;z-index:1}
+.rs:hover,.rs.on{border-right:2px solid var(--smoke)}
+th.num{text-align:right}
+td{padding:8px;border-bottom:1px solid var(--obsidian);vertical-align:baseline;
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+td.num{text-align:right}
+tr.row{cursor:pointer}
+.empty{padding:48px 8px;color:var(--ash);text-align:center}
+tr.row:hover td{background:var(--hover)}
+tr.row.starred td{background:var(--star-wash)}
+.dt,.tool,.sz{font-family:"Berkeley Mono",ui-monospace,"Cascadia Code",Consolas,monospace;
+  font-size:12px;color:var(--ash);letter-spacing:-.013em}
+td.starcell{cursor:pointer;color:var(--smoke);text-align:center;font-size:14px}
+td.starcell:hover{color:var(--lime)}
+tr.starred td.starcell{color:var(--lime)}
+.nm{font-weight:510;color:var(--paper)}
+td.notecell{color:var(--mist);font-size:12px}
+tr.starred td.notecell{cursor:text}
+tr.starred td.notecell:empty:hover::after{content:"点击添加备注";color:var(--smoke)}
+.msg{cursor:pointer;color:var(--fog)}
+.p{color:var(--ash);font-size:12px;font-family:"Berkeley Mono",ui-monospace,Consolas,monospace;letter-spacing:-.013em}
+.foot{color:var(--ash);font-size:12px;padding:16px 8px}
+#toast{position:fixed;bottom:24px;left:50%;transform:translate(-50%,8px);opacity:0;
+  background:var(--bone);color:var(--void);padding:8px 16px;border-radius:6px;font-size:13px;font-weight:510;
+  box-shadow:rgba(8,9,10,.6) 0 4px 32px;pointer-events:none;transition:opacity .15s,transform .15s}
+#toast.show{opacity:1;transform:translate(-50%,0)}
+</style>
+<script>document.documentElement.dataset.theme=
+  localStorage.theme||(matchMedia('(prefers-color-scheme: light)').matches?'light':'dark');</script>
+</head><body>
+<header><h1>Sessions</h1>
+<span class="meta">__COUNT__ 个 session，数据时间 __NOW__</span>
+</header>
+<div class="bar">
+<input type="search" id="q" placeholder="过滤：名称 / 首条消息 / 路径 / 备注 / id">
+<button class="f on" data-t="">全部</button><button class="f" data-t="claude">claude</button>
+<button class="f" data-t="codex">codex</button><button class="f" data-t="pi">pi</button><button class="f" data-t="__star__">已标记 ★</button>
+<select id="path"><option value="">全部路径</option></select>
+<span class="sep"></span>
+<button class="f act" id="reload" title="重新扫描 session 数据">刷新</button>
+<button class="f act" id="theme" title="切换深浅主题">◐</button>
+</div>
+<div class="bar2">
+<label>更新</label><input type="date" id="uf"> - <input type="date" id="ut">
+<label>创建</label><input type="date" id="cf"> - <input type="date" id="ct">
+<label>大小(MB)</label><input type="number" id="smin" min="0" step="0.1" placeholder="最小">
+ - <input type="number" id="smax" min="0" step="0.1" placeholder="最大">
+<button class="f" id="clear">清除筛选</button>
+</div>
+<main><table>
+<colgroup><col class="c-star"><col class="c-date"><col class="c-date"><col class="c-tool">
+<col class="c-name"><col class="c-note"><col><col class="c-path"><col class="c-size"></colgroup>
+<thead><tr><th data-k="starred">★</th><th data-k="mtime">更新</th><th data-k="birth">创建</th><th data-k="tool">工具</th>
+<th data-k="name">名称</th><th data-k="star_note">备注</th><th data-k="first_msg">首条消息</th>
+<th data-k="cwd">路径</th><th data-k="size_kb" class="num">大小</th></tr></thead>
+<tbody id="tb"></tbody></table>
+<div class="foot" id="foot"></div></main>
+<div id="toast"></div>
+<script type="application/json" id="raw">__DATA__</script>
+<script>
+const DATA=JSON.parse(document.getElementById('raw').textContent);
+const HOME='__HOME__';
+DATA.forEach((r,i)=>{r._i=i;
+  r._hay=(r.name+' '+r.first_msg+' '+r.cwd+' '+r.star_note+' '+r.id).toLowerCase();
+  r._p=r.cwd.startsWith(HOME)?'~'+r.cwd.slice(HOME.length):r.cwd;});
+const CAP=300;
+let tool='',pathSel='',sortK='',sortAsc=false,timer=null;
+const q=document.getElementById('q'),tb=document.getElementById('tb'),
+      foot=document.getElementById('foot'),toast=document.getElementById('toast'),
+      pathEl=document.getElementById('path');
+{const cnt={};DATA.forEach(r=>cnt[r.cwd]=(cnt[r.cwd]||0)+1);
+ Object.entries(cnt).sort((a,b)=>b[1]-a[1]).forEach(([p,n])=>{
+   const o=document.createElement('option');o.value=p;
+   o.textContent=`${p.startsWith(HOME)?'~'+p.slice(HOME.length):p} (${n})`;
+   pathEl.appendChild(o);});}
+pathEl.onchange=()=>{pathSel=pathEl.value;render()};
+['uf','ut','cf','ct','smin','smax'].forEach(id=>
+  document.getElementById(id).addEventListener('input',()=>{clearTimeout(timer);timer=setTimeout(render,120)}));
+document.getElementById('clear').onclick=()=>{
+  ['uf','ut','cf','ct','smin','smax'].forEach(id=>document.getElementById(id).value='');
+  q.value='';pathEl.value='';pathSel='';
+  document.querySelectorAll('button.f[data-t]').forEach(x=>x.classList.remove('on'));
+  document.querySelector('button.f[data-t=""]').classList.add('on');tool='';render();};
+const fmt=t=>{const d=new Date(t*1000),z=n=>(n+'').padStart(2,'0');
+  return z(d.getMonth()+1)+'-'+z(d.getDate())+' '+z(d.getHours())+':'+z(d.getMinutes())};
+const esc=s=>(s||'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const cmd=r=>r.tool==='codex'?`codex resume ${r.id}`:`cd ${r.cwd} && claude -r ${r.id}`;
+function pop(msg){toast.textContent=msg;toast.classList.add('show');
+  clearTimeout(pop._t);pop._t=setTimeout(()=>toast.classList.remove('show'),1200)}
+function render(){
+  const kw=q.value.trim().toLowerCase();
+  let rows=DATA;
+  if(tool==='__star__')rows=rows.filter(r=>r.starred);
+  else if(tool)rows=rows.filter(r=>r.tool===tool);
+  if(pathSel)rows=rows.filter(r=>r.cwd===pathSel);
+  const from=id=>{const v=document.getElementById(id).value;
+    return v?new Date(v+'T00:00:00').getTime()/1000:null};
+  const to=id=>{const v=document.getElementById(id).value;
+    return v?new Date(v+'T23:59:59').getTime()/1000:null};
+  const uf=from('uf'),ut=to('ut'),cf=from('cf'),ct=to('ct'),
+        smin=parseFloat(document.getElementById('smin').value),
+        smax=parseFloat(document.getElementById('smax').value);
+  if(uf)rows=rows.filter(r=>r.mtime>=uf);
+  if(ut)rows=rows.filter(r=>r.mtime<=ut);
+  if(cf)rows=rows.filter(r=>r.birth>=cf);
+  if(ct)rows=rows.filter(r=>r.birth<=ct);
+  if(!isNaN(smin))rows=rows.filter(r=>r.size_kb>=smin*1024);
+  if(!isNaN(smax))rows=rows.filter(r=>r.size_kb<=smax*1024);
+  if(kw)rows=rows.filter(r=>r._hay.includes(kw));
+  if(sortK)rows=[...rows].sort((a,b)=>{const x=a[sortK],y=b[sortK];
+    return(x<y?-1:x>y?1:0)*(sortAsc?1:-1)});
+  else rows=[...rows].sort((a,b)=>b.mtime-a.mtime);
+  const total=rows.length;rows=rows.slice(0,CAP);
+  if(!total){
+    tb.innerHTML=`<tr><td colspan="9"><div class="empty">没有匹配的 session，试试更短的关键词或切换筛选</div></td></tr>`;
+    foot.textContent='';syncSortMark();return;}
+  tb.innerHTML=rows.map(r=>`<tr class="row${r.starred?' starred':''}" data-i="${r._i}">
+   <td class="starcell" title="${r.starred?'取消标记':'标记重要'}">${r.starred?'★':'☆'}</td>
+   <td class="dt">${fmt(r.mtime)}</td><td class="dt">${fmt(r.birth)}</td><td class="tool">${r.tool}</td>
+   <td><span class="nm">${esc(r.name)}</span></td>
+   <td class="notecell" title="${r.starred?'点击编辑备注':''}">${esc(r.star_note)}</td>
+   <td class="msg" title="${esc(r.first_msg)}">${esc(r.first_msg)||'(空)'}</td>
+   <td class="p" title="${esc(r.cwd)}">${esc(r._p)}</td>
+   <td class="num sz">${r.size_kb>=1024?(r.size_kb/1024).toFixed(1)+'M':r.size_kb+'K'}</td></tr>`).join('');
+  foot.textContent=(total>CAP?`显示前 ${CAP} 行，共 ${total} 个匹配，输入关键词缩小范围`:`${total} 个匹配`)
+    +'。点击行复制恢复命令，点 ★ 标记，点备注列编辑';
+  syncSortMark();
+}
+function syncSortMark(){
+  document.querySelectorAll('th[data-k]').forEach(h=>{
+    h.classList.toggle('s-asc',h.dataset.k===sortK&&sortAsc);
+    h.classList.toggle('s-desc',h.dataset.k===sortK&&!sortAsc);});
+}
+q.addEventListener('input',()=>{clearTimeout(timer);timer=setTimeout(render,120)});
+tb.addEventListener('click',async e=>{
+  const tr=e.target.closest('tr.row');if(!tr)return;
+  const r=DATA[+tr.dataset.i];
+  if(e.target.classList.contains('starcell')){
+    let payload;
+    if(r.starred)payload={id:r.id,remove:true};
+    else{const note=prompt('备注（可选，直接确定跳过）','');
+      if(note===null)return;payload={id:r.id,note}}
+    const resp=await fetch('/star',{method:'POST',body:JSON.stringify(payload)});
+    if(!resp.ok){pop('保存失败');return}
+    r.starred=!r.starred;r.star_note=payload.note||'';
+    pop(r.starred?'已标记':'已取消');render();
+    return;}
+  if(e.target.classList.contains('notecell')&&r.starred){
+    const note=prompt('备注',r.star_note||'');
+    if(note===null)return;
+    const resp=await fetch('/star',{method:'POST',body:JSON.stringify({id:r.id,note})});
+    if(!resp.ok){pop('保存失败');return}
+    r.star_note=note;pop('已保存');render();
+    return;}
+  navigator.clipboard.writeText(cmd(r));pop('已复制恢复命令');});
+document.getElementById('reload').onclick=()=>{location.href='/?fresh=1'};
+document.getElementById('theme').onclick=()=>{
+  const t=document.documentElement.dataset.theme==='dark'?'light':'dark';
+  document.documentElement.dataset.theme=t;localStorage.theme=t;};
+document.querySelectorAll('button.f[data-t]').forEach(b=>b.onclick=()=>{
+  document.querySelectorAll('button.f[data-t]').forEach(x=>x.classList.remove('on'));
+  b.classList.add('on');tool=b.dataset.t;render();});
+let resizing=false;
+document.querySelectorAll('th[data-k]').forEach(h=>h.onclick=()=>{
+  if(resizing)return;
+  const k=h.dataset.k;sortAsc=(sortK===k)?!sortAsc:false;sortK=k;render();});
+// 列宽拖拽：改 colgroup 宽度，存 localStorage
+const cols=[...document.querySelectorAll('colgroup col')];
+try{JSON.parse(localStorage.colw3||'[]').forEach((w,i)=>{if(w&&cols[i])cols[i].style.width=w+'px'})}catch(e){}
+document.querySelectorAll('thead th').forEach((h,i)=>{
+  if(i>=cols.length-1)return;
+  const g=document.createElement('span');g.className='rs';h.appendChild(g);
+  g.addEventListener('mousedown',e=>{
+    e.preventDefault();e.stopPropagation();resizing=true;g.classList.add('on');
+    const x0=e.clientX,w0=cols[i].getBoundingClientRect().width;
+    const move=ev=>{cols[i].style.width=Math.max(36,w0+ev.clientX-x0)+'px'};
+    const up=()=>{document.removeEventListener('mousemove',move);
+      document.removeEventListener('mouseup',up);g.classList.remove('on');
+      localStorage.colw3=JSON.stringify(cols.map(c=>parseInt(c.style.width)||null));
+      setTimeout(()=>resizing=false,0)};
+    document.addEventListener('mousemove',move);document.addEventListener('mouseup',up);});});
+render();
+</script>
+</body></html>"""
+
+
+# ─── main ────────────────────────────────────
+
+def main():
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    args = sys.argv[1:]
+    if not args:
+        last = DATA_DIR / "last-active.txt"
+        print(last.read_text() if last.exists() else "还没有快照（session-tracker 每 5 分钟生成）")
+        return
+    if args[0] in ("-h", "--help"):
+        print(__doc__)
+        return
+    if args[0] == "_serve":
+        serve()
+        return
+    n = 20
+    if "-n" in args:
+        i = args.index("-n")
+        n = int(args[i + 1])
+        del args[i:i + 2]
+    cmd, rest = args[0], args[1:]
+    if cmd == "list":
+        cmd_list(n, rest[0] if rest else None)
+    elif cmd == "find" and rest:
+        cmd_find(" ".join(rest), n)
+    elif cmd == "star" and rest:
+        cmd_star(rest[0], " ".join(rest[1:]))
+    elif cmd == "unstar" and rest:
+        cmd_unstar(rest[0])
+    elif cmd == "stars":
+        cmd_stars()
+    elif cmd == "dash":
+        cmd_dash(rest)
+    else:
+        print(__doc__)
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()
