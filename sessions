@@ -195,6 +195,35 @@ def one_line(text, limit=100):
     return text[:limit] + ("…" if len(text) > limit else "")
 
 
+def tail_model(path, tool):
+    """会话当前模型 = 尾部最后一条模型记录（中途可换模型，取最后）。
+    模型记录距文件尾的距离不定（codex 的 turn_context 每轮一条，一轮可能几百KB），
+    窗口从 64KB 渐进扩到 4MB，仍找不到视为无模型。
+    用户消息里贴的 JSON 会被转义成 \\"model\\"，不会误匹配裸的 "model": 键。"""
+    def extract(text):
+        if tool == "pi":
+            pairs = re.findall(r'"provider":"([^"]+)","modelId":"([^"]+)"', text)
+            if pairs:
+                return "/".join(pairs[-1])
+            ids = re.findall(r'"modelId":"([^"]+)"', text)
+            return ids[-1] if ids else ""
+        models = [m for m in re.findall(r'"model":"([^"]+)"', text)
+                  if not m.startswith("<")]  # 排除 "<synthetic>"（API 错误占位）
+        return models[-1] if models else ""
+
+    try:
+        size = path.stat().st_size
+        for win in (65536, 1048576, 4194304):
+            with open(path, "rb") as fh:
+                fh.seek(max(0, size - win))
+                found = extract(fh.read().decode("utf-8", errors="replace"))
+            if found or win >= size:
+                return found
+    except OSError:
+        pass
+    return ""
+
+
 def build_index(only=None, limit=None):
     """扫描所有 session，按 mtime 降序，同 id 去重保留最新"""
     names = load_claude_names()
@@ -222,6 +251,7 @@ def build_index(only=None, limit=None):
             "mtime": st.st_mtime,
             "birth": birth or st.st_mtime,
             "size_kb": st.st_size // 1024,
+            "model": tail_model(f, tool),
             "starred": is_starred(star),
             "star_note": (star or {}).get("note", ""),
             "archived": bool((star or {}).get("archived")),
@@ -345,12 +375,12 @@ def cmd_stars():
 
 # ─── list / find ─────────────────────────────
 
-def resume_cmd(tool, sid, cwd):
+def resume_cmd(tool, sid, cwd, model=""):
     if tool == "codex":
-        return f"codex resume {sid}"
+        return f"codex resume {sid}" + (f" -m {model}" if model else "")
     if tool == "pi":
-        return f"cd {cwd} && pi --session {sid}"
-    return f"cd {cwd} && claude -r {sid}"
+        return f"cd {cwd} && pi --session {sid}" + (f" --model {model}" if model else "")
+    return f"cd {cwd} && claude -r {sid}" + (f" --model {model}" if model else "")
 
 
 def print_entry(r, snippet=None):
@@ -359,7 +389,7 @@ def print_entry(r, snippet=None):
     print(f"{star} [{day}] {r['tool']:6} {r['cwd']}")
     label = r.get("name") or r["first_msg"]
     print(f"    {one_line(snippet if snippet is not None else label)}")
-    print(f"    ↳ {resume_cmd(r['tool'], r['id'], r['cwd'])}\n")
+    print(f"    ↳ {resume_cmd(r['tool'], r['id'], r['cwd'], r.get('model', ''))}\n")
 
 
 def cmd_list(n, only=None):
@@ -400,6 +430,7 @@ def cmd_find(keyword, n):
                             f".{{0,40}}{re.escape(keyword)}.{{0,60}}", str(f)],
                            capture_output=True, text=True).stdout.strip().splitlines()
         print_entry({"id": sid, "tool": tool, "cwd": cwd, "name": "", "first_msg": "",
+                     "model": tail_model(f, tool),
                      "mtime": f.stat().st_mtime, "starred": is_starred(stars.get(sid))},
                     m[0] if m else keyword)
         shown += 1
@@ -614,7 +645,7 @@ td.namecell:empty:hover::after{content:"点击命名";color:var(--smoke);font-we
 td.archcell{cursor:pointer;color:var(--smoke);text-align:center;font-size:13px}
 td.archcell:hover{color:var(--mist)}
 tr.archived td{opacity:.6}
-col.c-stat{width:104px}
+col.c-stat{width:104px}col.c-model{width:120px}
 select.st{border:none;background:none;font:inherit;font-size:12px;padding:0;
   cursor:pointer;outline:none;appearance:none;color:var(--smoke);max-width:100%}
 select.st:hover{color:var(--fog)}
@@ -651,10 +682,10 @@ select.st:hover{color:var(--fog)}
 <button class="f" id="clear">清除筛选</button>
 </div>
 <main><table>
-<colgroup><col class="c-star"><col class="c-date"><col class="c-date"><col class="c-tool">
+<colgroup><col class="c-star"><col class="c-date"><col class="c-date"><col class="c-tool"><col class="c-model">
 <col class="c-name"><col class="c-note"><col class="c-stat"><col><col class="c-path"><col class="c-size"><col class="c-star"></colgroup>
 <thead><tr><th data-k="starred">★</th><th data-k="mtime">更新</th><th data-k="birth">创建</th><th data-k="tool">工具</th>
-<th data-k="name">名称</th><th data-k="star_note">备注</th><th data-k="status">状态</th><th data-k="first_msg">首条消息</th>
+<th data-k="model">模型</th><th data-k="name">名称</th><th data-k="star_note">备注</th><th data-k="status">状态</th><th data-k="first_msg">首条消息</th>
 <th data-k="cwd">路径</th><th data-k="size_kb" class="num">大小</th><th title="归档">⊘</th></tr></thead>
 <tbody id="tb"></tbody></table>
 <div class="foot" id="foot"></div></main>
@@ -663,7 +694,7 @@ select.st:hover{color:var(--fog)}
 <script>
 const DATA=JSON.parse(document.getElementById('raw').textContent);
 const HOME='__HOME__';
-const hay=r=>{r._hay=(r.name+' '+r.first_msg+' '+r.cwd+' '+r.star_note+' '+r.id).toLowerCase()};
+const hay=r=>{r._hay=(r.name+' '+r.first_msg+' '+r.cwd+' '+r.star_note+' '+r.model+' '+r.id).toLowerCase()};
 DATA.forEach((r,i)=>{r._i=i;hay(r);
   r._p=r.cwd.startsWith(HOME)?'~'+r.cwd.slice(HOME.length):r.cwd;});
 const CAP=300;
@@ -688,7 +719,10 @@ document.getElementById('clear').onclick=()=>{
 const fmt=t=>{const d=new Date(t*1000),z=n=>(n+'').padStart(2,'0');
   return z(d.getMonth()+1)+'-'+z(d.getDate())+' '+z(d.getHours())+':'+z(d.getMinutes())};
 const esc=s=>(s||'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
-const cmd=r=>r.tool==='codex'?`codex resume ${r.id}`:`cd ${r.cwd} && claude -r ${r.id}`;
+const cmd=r=>{const m=r.model;
+  if(r.tool==='codex')return`codex resume ${r.id}`+(m?` -m ${m}`:'');
+  if(r.tool==='pi')return`cd ${r.cwd} && pi --session ${r.id}`+(m?` --model ${m}`:'');
+  return`cd ${r.cwd} && claude -r ${r.id}`+(m?` --model ${m}`:'')};
 const STATUS=['','todo','in progress','blocked','done'];
 const STC={'todo':'var(--fog)','in progress':'#4ea7fc','blocked':'#eb5757','done':'#4cb782'};
 const stSel=r=>`<select class="st" style="color:${STC[r.status]||'var(--smoke)'}">`
@@ -724,11 +758,12 @@ function render(){
   else rows=[...rows].sort((a,b)=>b.mtime-a.mtime);
   const total=rows.length;rows=rows.slice(0,CAP);
   if(!total){
-    tb.innerHTML=`<tr><td colspan="11"><div class="empty">没有匹配的 session，试试更短的关键词或切换筛选</div></td></tr>`;
+    tb.innerHTML=`<tr><td colspan="12"><div class="empty">没有匹配的 session，试试更短的关键词或切换筛选</div></td></tr>`;
     foot.textContent='';syncSortMark();return;}
   tb.innerHTML=rows.map(r=>`<tr class="row${r.starred?' starred':''}${r.archived?' archived':''}" data-i="${r._i}">
    <td class="starcell" title="${r.starred?'取消标记':'标记重要'}">${r.starred?'★':'☆'}</td>
    <td class="dt">${fmt(r.mtime)}</td><td class="dt">${fmt(r.birth)}</td><td class="tool">${r.tool}</td>
+   <td class="tool" title="${esc(r.model)}">${esc(r.model)}</td>
    <td class="namecell nm" title="点击改名">${esc(r.name)}</td>
    <td class="notecell" title="点击编辑备注">${esc(r.star_note)}</td>
    <td>${stSel(r)}</td>
@@ -797,7 +832,7 @@ document.querySelectorAll('th[data-k]').forEach(h=>h.onclick=()=>{
   const k=h.dataset.k;sortAsc=(sortK===k)?!sortAsc:false;sortK=k;render();});
 // 列宽拖拽：改 colgroup 宽度，存 localStorage
 const cols=[...document.querySelectorAll('colgroup col')];
-try{JSON.parse(localStorage.colw4||'[]').forEach((w,i)=>{if(w&&cols[i])cols[i].style.width=w+'px'})}catch(e){}
+try{JSON.parse(localStorage.colw5||'[]').forEach((w,i)=>{if(w&&cols[i])cols[i].style.width=w+'px'})}catch(e){}
 document.querySelectorAll('thead th').forEach((h,i)=>{
   if(i>=cols.length-1)return;
   const g=document.createElement('span');g.className='rs';h.appendChild(g);
@@ -807,7 +842,7 @@ document.querySelectorAll('thead th').forEach((h,i)=>{
     const move=ev=>{cols[i].style.width=Math.max(36,w0+ev.clientX-x0)+'px'};
     const up=()=>{document.removeEventListener('mousemove',move);
       document.removeEventListener('mouseup',up);g.classList.remove('on');
-      localStorage.colw4=JSON.stringify(cols.map(c=>parseInt(c.style.width)||null));
+      localStorage.colw5=JSON.stringify(cols.map(c=>parseInt(c.style.width)||null));
       setTimeout(()=>resizing=false,0)};
     document.addEventListener('mousemove',move);document.addEventListener('mouseup',up);});});
 render();

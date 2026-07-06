@@ -40,6 +40,7 @@ Every result comes with a copy-pastable resume command (`claude -r` / `codex res
 - Archive noise sessions (hidden from all views; an "archived" view lists them for unarchiving)
 - Per-session status (todo / in progress / blocked / done, default none), with a status filter
 - Composable filters: keyword, tool, path (dropdown with counts), created/updated date ranges, size range
+- Model column: the session's last-used model, extracted from the tail of its transcript; resume commands carry it (`claude -r <id> --model <m>` / `codex resume <id> -m <m>` / `pi --session <id> --model <m>`)
 - Click a row to copy its resume command; draggable column widths (persisted in localStorage); light/dark theme toggle
 - Data cached for 30 seconds; the refresh button forces a rescan
 
