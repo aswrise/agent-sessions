@@ -668,7 +668,7 @@ select.st:hover{color:var(--fog)}
 <span class="meta">__COUNT__ 个 session，数据时间 __NOW__</span>
 </header>
 <div class="bar">
-<input type="search" id="q" placeholder="过滤：名称 / 首条消息 / 路径 / 备注 / id">
+<input type="search" id="q" placeholder="过滤：名称 / 备注 / 首条消息">
 <button class="f on" data-t="">全部</button><button class="f" data-t="claude">claude</button>
 <button class="f" data-t="codex">codex</button><button class="f" data-t="pi">pi</button><button class="f" data-t="__star__">已标记 ★</button><button class="f" data-t="__arch__">已归档</button>
 <select id="path"><option value="">全部路径</option></select>
@@ -698,7 +698,7 @@ select.st:hover{color:var(--fog)}
 <script>
 const DATA=JSON.parse(document.getElementById('raw').textContent);
 const HOME='__HOME__';
-const hay=r=>{r._hay=(r.name+' '+r.first_msg+' '+r.cwd+' '+r.star_note+' '+r.model+' '+r.id).toLowerCase()};
+const hay=r=>{r._hay=(r.name+' '+r.star_note+' '+r.first_msg).toLowerCase()};
 DATA.forEach((r,i)=>{r._i=i;hay(r);
   r._p=r.cwd.startsWith(HOME)?'~'+r.cwd.slice(HOME.length):r.cwd;});
 const CAP=300;
