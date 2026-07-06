@@ -35,7 +35,8 @@ sessions dash --stop             # 停止 dashboard 服务
 `sessions dash` 在 `localhost:7867` 起一个常驻微服务（python stdlib `http.server`）：
 
 - 名称列：Claude 的 `/rename` 手动命名 > AI 自动标题；pi 的 `--name`
-- 页内点 ★ 标记 / 点备注列编辑，POST 回写 `stars.json`，与命令行共用数据
+- 页内点 ★ 标记 / 点备注列编辑（两者互相独立），POST 回写 `stars.json`，与命令行共用数据
+- 页内改名：Claude 往 jsonl 追加 `custom-title` 记录（与 `/rename` 同机制，Claude Code 本体可见）；pi 改写首行 `name`；Codex 上游无 thread name 存储，改名仅本工具可见
 - 筛选可叠加：关键词、工具、路径（带计数下拉）、更新/创建时间范围、大小范围
 - 点击行复制恢复命令；列宽可拖拽（localStorage 记忆）；深浅主题切换
 - 数据 30 秒缓存，"刷新"按钮强制重扫
@@ -50,7 +51,7 @@ sessions dash --stop             # 停止 dashboard 服务
 | Codex | `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl` | 首行 `session_meta` |
 | pi | `~/.pi/agent/sessions/<路径slug>/*.jsonl` | 首行 `type=session` |
 
-工具只读扫描会话文件，标记数据写在 `~/.local/share/session-snapshots/stars.json`。
+扫描只读；唯一写入会话文件的操作是改名（Claude 追加 jsonl 记录 / pi 改写首行）。标记与备注数据写在 `~/.local/share/session-snapshots/stars.json`。
 
 注意：Claude Code 默认 30 天清理会话（`cleanupPeriodDays`），想长期保留需在 `~/.claude/settings.json` 调大。
 

@@ -8,7 +8,7 @@
   sessions star <id前缀> [备注...]        标记重要
   sessions unstar <id前缀>               取消标记
   sessions stars                         列出已标记
-  sessions dash [--no-open]              打开 dashboard（localhost 常驻服务，页内可点★）
+  sessions dash [--no-open]              打开 dashboard（localhost 常驻服务，页内可点★、改备注/名称）
   sessions dash --stop                   停止 dashboard 服务
 """
 import json
@@ -213,7 +213,8 @@ def build_index(only=None, limit=None):
             continue
         seen.add(sid)
         star = stars.get(sid)
-        name = parsed[4] if len(parsed) > 4 and parsed[4] else names.get(sid, "")
+        name = ((star or {}).get("name")
+                or (parsed[4] if len(parsed) > 4 and parsed[4] else names.get(sid, "")))
         rows.append({
             "id": sid, "tool": tool, "cwd": cwd,
             "name": one_line(name, 120),
@@ -221,7 +222,7 @@ def build_index(only=None, limit=None):
             "mtime": st.st_mtime,
             "birth": birth or st.st_mtime,
             "size_kb": st.st_size // 1024,
-            "starred": star is not None,
+            "starred": is_starred(star),
             "star_note": (star or {}).get("note", ""),
         })
         if limit and len(rows) >= limit:
@@ -242,13 +243,57 @@ def save_stars(stars):
     STARS_FILE.write_text(json.dumps(stars, ensure_ascii=False, indent=1))
 
 
-def set_star(sid, note=None, remove=False):
-    stars = load_stars()
-    if remove:
-        stars.pop(sid, None)
+def update_mark(sid, star=None, note=None, name=None):
+    """星标/备注/名称override 各自独立更新（传 None 的不动），全空则删条目。
+    旧格式条目没有 starred 字段，视为已标记。"""
+    marks = load_stars()
+    e = marks.get(sid) or {"starred": False, "note": ""}
+    e.setdefault("starred", True)
+    if star is not None:
+        e["starred"] = bool(star)
+    if note is not None:
+        e["note"] = note
+    if name is not None:
+        e["name"] = name
+    if e["starred"] or e.get("note") or e.get("name"):
+        e.setdefault("added", datetime.now().strftime("%Y-%m-%d %H:%M"))
+        marks[sid] = e
     else:
-        stars[sid] = {"note": note or "", "added": datetime.now().strftime("%Y-%m-%d %H:%M")}
-    save_stars(stars)
+        marks.pop(sid, None)
+    save_stars(marks)
+
+
+def is_starred(entry):
+    return bool(entry and entry.get("starred", True))
+
+
+def find_session_file(tool, sid):
+    hits = (list(CLAUDE_DIR.glob(f"*/{sid}.jsonl")) if tool == "claude"
+            else list(PI_DIR.glob(f"*/*{sid}.jsonl")))
+    return max(hits, key=lambda f: f.stat().st_mtime) if hits else None
+
+
+def rename_session(tool, sid, name):
+    """claude: 追加 custom-title 记录（与 /rename 同机制，claude 本体可见）；
+    pi: 改首行 meta.name（pi 本体可见）；codex: 上游无 thread name 存储，只存本工具 override"""
+    if tool == "codex":
+        update_mark(sid, name=name)
+        return
+    if tool not in ("claude", "pi"):
+        raise ValueError(f"未知工具: {tool}")
+    f = find_session_file(tool, sid)
+    if not f:
+        raise FileNotFoundError(f"找不到 {tool} session 文件: {sid}")
+    if tool == "claude":
+        with open(f, "a") as fh:
+            fh.write(json.dumps({"type": "custom-title", "customTitle": name,
+                                 "sessionId": sid}, ensure_ascii=False) + "\n")
+    else:
+        # ponytail: 整文件重写首行，正在运行的 pi 同时追加会有极小竞态窗口，本地工具可接受
+        head, sep, rest = f.read_text(errors="replace").partition("\n")
+        meta = json.loads(head)
+        meta["name"] = name
+        f.write_text(json.dumps(meta, ensure_ascii=False) + sep + rest)
 
 
 def resolve_id(prefix):
@@ -269,21 +314,21 @@ def resolve_id(prefix):
 
 def cmd_star(prefix, note):
     sid = resolve_id(prefix)
-    set_star(sid, note)
+    update_mark(sid, star=True, note=note or None)
     print(f"★ {sid}" + (f"  ({note})" if note else ""))
 
 
 def cmd_unstar(prefix):
     stars = load_stars()
-    hit = [s for s in stars if s.startswith(prefix)]
+    hit = [s for s, v in stars.items() if s.startswith(prefix) and is_starred(v)]
     if len(hit) != 1:
         sys.exit(f"'{prefix}' 匹配到 {len(hit)} 个已标记 session")
-    set_star(hit[0], remove=True)
+    update_mark(hit[0], star=False)
     print(f"已取消 {hit[0]}")
 
 
 def cmd_stars():
-    stars = load_stars()
+    stars = {s: v for s, v in load_stars().items() if is_starred(v)}
     if not stars:
         print("还没有标记任何 session（sessions star <id前缀> [备注]）")
         return
@@ -342,7 +387,7 @@ def cmd_find(keyword, n):
                             f".{{0,40}}{re.escape(keyword)}.{{0,60}}", str(f)],
                            capture_output=True, text=True).stdout.strip().splitlines()
         print_entry({"id": sid, "tool": tool, "cwd": cwd, "name": "", "first_msg": "",
-                     "mtime": f.stat().st_mtime, "starred": sid in stars},
+                     "mtime": f.stat().st_mtime, "starred": is_starred(stars.get(sid))},
                     m[0] if m else keyword)
         shown += 1
 
@@ -386,21 +431,39 @@ class DashHandler(BaseHTTPRequestHandler):
             self._send(404, "not found", "text/plain")
 
     def do_POST(self):
-        if self.path != "/star":
-            self._send(404, "not found", "text/plain")
-            return
         try:
             body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))))
             sid = body["id"]
         except Exception:
             self._send(400, '{"error":"bad request"}', "application/json")
             return
-        set_star(sid, note=body.get("note"), remove=bool(body.get("remove")))
-        with _cache_lock:
-            for r in _cache["rows"] or []:
-                if r["id"] == sid:
-                    r["starred"] = not body.get("remove")
-                    r["star_note"] = body.get("note") or ""
+        if self.path == "/star":
+            update_mark(sid, star=body.get("star"), note=body.get("note"))
+            with _cache_lock:
+                for r in _cache["rows"] or []:
+                    if r["id"] == sid:
+                        if body.get("star") is not None:
+                            r["starred"] = bool(body["star"])
+                        if body.get("note") is not None:
+                            r["star_note"] = body["note"]
+        elif self.path == "/rename":
+            name = (body.get("name") or "").strip()
+            if not name:
+                self._send(400, '{"error":"empty name"}', "application/json")
+                return
+            try:
+                rename_session(body.get("tool"), sid, name)
+            except Exception as e:
+                self._send(500, json.dumps({"error": str(e)}, ensure_ascii=False),
+                           "application/json")
+                return
+            with _cache_lock:
+                for r in _cache["rows"] or []:
+                    if r["id"] == sid:
+                        r["name"] = name
+        else:
+            self._send(404, "not found", "text/plain")
+            return
         self._send(200, '{"ok":true}', "application/json")
 
 
@@ -526,9 +589,10 @@ td.starcell{cursor:pointer;color:var(--smoke);text-align:center;font-size:14px}
 td.starcell:hover{color:var(--lime)}
 tr.starred td.starcell{color:var(--lime)}
 .nm{font-weight:510;color:var(--paper)}
-td.notecell{color:var(--mist);font-size:12px}
-tr.starred td.notecell{cursor:text}
-tr.starred td.notecell:empty:hover::after{content:"点击添加备注";color:var(--smoke)}
+td.notecell{color:var(--mist);font-size:12px;cursor:text}
+td.notecell:empty:hover::after{content:"点击添加备注";color:var(--smoke)}
+td.namecell{cursor:text}
+td.namecell:empty:hover::after{content:"点击命名";color:var(--smoke);font-weight:400}
 .msg{cursor:pointer;color:var(--fog)}
 .p{color:var(--ash);font-size:12px;font-family:"Berkeley Mono",ui-monospace,Consolas,monospace;letter-spacing:-.013em}
 .foot{color:var(--ash);font-size:12px;padding:16px 8px}
@@ -572,8 +636,8 @@ tr.starred td.notecell:empty:hover::after{content:"点击添加备注";color:var
 <script>
 const DATA=JSON.parse(document.getElementById('raw').textContent);
 const HOME='__HOME__';
-DATA.forEach((r,i)=>{r._i=i;
-  r._hay=(r.name+' '+r.first_msg+' '+r.cwd+' '+r.star_note+' '+r.id).toLowerCase();
+const hay=r=>{r._hay=(r.name+' '+r.first_msg+' '+r.cwd+' '+r.star_note+' '+r.id).toLowerCase()};
+DATA.forEach((r,i)=>{r._i=i;hay(r);
   r._p=r.cwd.startsWith(HOME)?'~'+r.cwd.slice(HOME.length):r.cwd;});
 const CAP=300;
 let tool='',pathSel='',sortK='',sortAsc=false,timer=null;
@@ -629,13 +693,13 @@ function render(){
   tb.innerHTML=rows.map(r=>`<tr class="row${r.starred?' starred':''}" data-i="${r._i}">
    <td class="starcell" title="${r.starred?'取消标记':'标记重要'}">${r.starred?'★':'☆'}</td>
    <td class="dt">${fmt(r.mtime)}</td><td class="dt">${fmt(r.birth)}</td><td class="tool">${r.tool}</td>
-   <td><span class="nm">${esc(r.name)}</span></td>
-   <td class="notecell" title="${r.starred?'点击编辑备注':''}">${esc(r.star_note)}</td>
+   <td class="namecell nm" title="点击改名">${esc(r.name)}</td>
+   <td class="notecell" title="点击编辑备注">${esc(r.star_note)}</td>
    <td class="msg" title="${esc(r.first_msg)}">${esc(r.first_msg)||'(空)'}</td>
    <td class="p" title="${esc(r.cwd)}">${esc(r._p)}</td>
    <td class="num sz">${r.size_kb>=1024?(r.size_kb/1024).toFixed(1)+'M':r.size_kb+'K'}</td></tr>`).join('');
   foot.textContent=(total>CAP?`显示前 ${CAP} 行，共 ${total} 个匹配，输入关键词缩小范围`:`${total} 个匹配`)
-    +'。点击行复制恢复命令，点 ★ 标记，点备注列编辑';
+    +'。点击行复制恢复命令，点 ★ 标记，名称/备注列点击编辑';
   syncSortMark();
 }
 function syncSortMark(){
@@ -648,21 +712,25 @@ tb.addEventListener('click',async e=>{
   const tr=e.target.closest('tr.row');if(!tr)return;
   const r=DATA[+tr.dataset.i];
   if(e.target.classList.contains('starcell')){
-    let payload;
-    if(r.starred)payload={id:r.id,remove:true};
-    else{const note=prompt('备注（可选，直接确定跳过）','');
-      if(note===null)return;payload={id:r.id,note}}
-    const resp=await fetch('/star',{method:'POST',body:JSON.stringify(payload)});
+    const star=!r.starred;
+    const resp=await fetch('/star',{method:'POST',body:JSON.stringify({id:r.id,star})});
     if(!resp.ok){pop('保存失败');return}
-    r.starred=!r.starred;r.star_note=payload.note||'';
-    pop(r.starred?'已标记':'已取消');render();
+    r.starred=star;pop(star?'已标记':'已取消');render();
     return;}
-  if(e.target.classList.contains('notecell')&&r.starred){
+  if(e.target.classList.contains('notecell')){
     const note=prompt('备注',r.star_note||'');
     if(note===null)return;
     const resp=await fetch('/star',{method:'POST',body:JSON.stringify({id:r.id,note})});
     if(!resp.ok){pop('保存失败');return}
-    r.star_note=note;pop('已保存');render();
+    r.star_note=note;hay(r);pop('已保存');render();
+    return;}
+  if(e.target.classList.contains('namecell')){
+    const name=(prompt('名称',r.name||'')||'').trim();
+    if(!name||name===r.name)return;
+    const resp=await fetch('/rename',{method:'POST',body:JSON.stringify({id:r.id,tool:r.tool,name})});
+    if(!resp.ok){pop('改名失败');return}
+    r.name=name;hay(r);
+    pop(r.tool==='codex'?'已改名（仅本工具可见，codex 上游无处存名）':'已改名');render();
     return;}
   navigator.clipboard.writeText(cmd(r));pop('已复制恢复命令');});
 document.getElementById('reload').onclick=()=>{location.href='/?fresh=1'};
