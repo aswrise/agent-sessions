@@ -37,6 +37,8 @@ Every result comes with a copy-pastable resume command (`claude -r` / `codex res
 - Name column: Claude's `/rename` custom title > AI-generated title; pi's `--name`
 - Star / edit notes in the page (independent of each other); changes POST back to `stars.json`, shared with the CLI
 - Rename sessions in the page: Claude gets a `custom-title` record appended to its jsonl (same mechanism as `/rename`, visible in Claude Code itself); pi gets its first-line `name` rewritten; Codex has no upstream thread-name storage, so the name is a local override visible only in this tool
+- Archive noise sessions (hidden from all views; an "archived" view lists them for unarchiving)
+- Per-session status (todo / in progress / blocked / done, default none), with a status filter
 - Composable filters: keyword, tool, path (dropdown with counts), created/updated date ranges, size range
 - Click a row to copy its resume command; draggable column widths (persisted in localStorage); light/dark theme toggle
 - Data cached for 30 seconds; the refresh button forces a rescan

@@ -8,7 +8,7 @@
   sessions star <id前缀> [备注...]        标记重要
   sessions unstar <id前缀>               取消标记
   sessions stars                         列出已标记
-  sessions dash [--no-open]              打开 dashboard（localhost 常驻服务，页内可点★、改备注/名称）
+  sessions dash [--no-open]              打开 dashboard（localhost 常驻服务，页内可点★、改备注/名称、归档）
   sessions dash --stop                   停止 dashboard 服务
 """
 import json
@@ -224,6 +224,8 @@ def build_index(only=None, limit=None):
             "size_kb": st.st_size // 1024,
             "starred": is_starred(star),
             "star_note": (star or {}).get("note", ""),
+            "archived": bool((star or {}).get("archived")),
+            "status": (star or {}).get("status", ""),
         })
         if limit and len(rows) >= limit:
             break
@@ -243,8 +245,8 @@ def save_stars(stars):
     STARS_FILE.write_text(json.dumps(stars, ensure_ascii=False, indent=1))
 
 
-def update_mark(sid, star=None, note=None, name=None):
-    """星标/备注/名称override 各自独立更新（传 None 的不动），全空则删条目。
+def update_mark(sid, star=None, note=None, name=None, archive=None, status=None):
+    """星标/备注/名称override/归档/状态 各自独立更新（传 None 的不动），全空则删条目。
     旧格式条目没有 starred 字段，视为已标记。"""
     marks = load_stars()
     e = marks.get(sid) or {"starred": False, "note": ""}
@@ -255,7 +257,12 @@ def update_mark(sid, star=None, note=None, name=None):
         e["note"] = note
     if name is not None:
         e["name"] = name
-    if e["starred"] or e.get("note") or e.get("name"):
+    if archive is not None:
+        e["archived"] = bool(archive)
+    if status is not None:
+        e["status"] = status
+    if (e["starred"] or e.get("note") or e.get("name")
+            or e.get("archived") or e.get("status")):
         e.setdefault("added", datetime.now().strftime("%Y-%m-%d %H:%M"))
         marks[sid] = e
     else:
@@ -356,8 +363,14 @@ def print_entry(r, snippet=None):
 
 
 def cmd_list(n, only=None):
-    for r in build_index(only, limit=n):
+    shown = 0
+    for r in build_index(only):
+        if r["archived"]:
+            continue
         print_entry(r)
+        shown += 1
+        if shown >= n:
+            break
 
 
 def cmd_find(keyword, n):
@@ -438,7 +451,8 @@ class DashHandler(BaseHTTPRequestHandler):
             self._send(400, '{"error":"bad request"}', "application/json")
             return
         if self.path == "/star":
-            update_mark(sid, star=body.get("star"), note=body.get("note"))
+            update_mark(sid, star=body.get("star"), note=body.get("note"),
+                        archive=body.get("archive"), status=body.get("status"))
             with _cache_lock:
                 for r in _cache["rows"] or []:
                     if r["id"] == sid:
@@ -446,6 +460,10 @@ class DashHandler(BaseHTTPRequestHandler):
                             r["starred"] = bool(body["star"])
                         if body.get("note") is not None:
                             r["star_note"] = body["note"]
+                        if body.get("archive") is not None:
+                            r["archived"] = bool(body["archive"])
+                        if body.get("status") is not None:
+                            r["status"] = body["status"]
         elif self.path == "/rename":
             name = (body.get("name") or "").strip()
             if not name:
@@ -593,6 +611,13 @@ td.notecell{color:var(--mist);font-size:12px;cursor:text}
 td.notecell:empty:hover::after{content:"点击添加备注";color:var(--smoke)}
 td.namecell{cursor:text}
 td.namecell:empty:hover::after{content:"点击命名";color:var(--smoke);font-weight:400}
+td.archcell{cursor:pointer;color:var(--smoke);text-align:center;font-size:13px}
+td.archcell:hover{color:var(--mist)}
+tr.archived td{opacity:.6}
+col.c-stat{width:104px}
+select.st{border:none;background:none;font:inherit;font-size:12px;padding:0;
+  cursor:pointer;outline:none;appearance:none;color:var(--smoke);max-width:100%}
+select.st:hover{color:var(--fog)}
 .msg{cursor:pointer;color:var(--fog)}
 .p{color:var(--ash);font-size:12px;font-family:"Berkeley Mono",ui-monospace,Consolas,monospace;letter-spacing:-.013em}
 .foot{color:var(--ash);font-size:12px;padding:16px 8px}
@@ -610,7 +635,7 @@ td.namecell:empty:hover::after{content:"点击命名";color:var(--smoke);font-we
 <div class="bar">
 <input type="search" id="q" placeholder="过滤：名称 / 首条消息 / 路径 / 备注 / id">
 <button class="f on" data-t="">全部</button><button class="f" data-t="claude">claude</button>
-<button class="f" data-t="codex">codex</button><button class="f" data-t="pi">pi</button><button class="f" data-t="__star__">已标记 ★</button>
+<button class="f" data-t="codex">codex</button><button class="f" data-t="pi">pi</button><button class="f" data-t="__star__">已标记 ★</button><button class="f" data-t="__arch__">已归档</button>
 <select id="path"><option value="">全部路径</option></select>
 <span class="sep"></span>
 <button class="f act" id="reload" title="重新扫描 session 数据">刷新</button>
@@ -621,14 +646,16 @@ td.namecell:empty:hover::after{content:"点击命名";color:var(--smoke);font-we
 <label>创建</label><input type="date" id="cf"> - <input type="date" id="ct">
 <label>大小(MB)</label><input type="number" id="smin" min="0" step="0.1" placeholder="最小">
  - <input type="number" id="smax" min="0" step="0.1" placeholder="最大">
+<label>状态</label><select id="stf"><option value="">全部</option><option>todo</option>
+<option>in progress</option><option>blocked</option><option>done</option></select>
 <button class="f" id="clear">清除筛选</button>
 </div>
 <main><table>
 <colgroup><col class="c-star"><col class="c-date"><col class="c-date"><col class="c-tool">
-<col class="c-name"><col class="c-note"><col><col class="c-path"><col class="c-size"></colgroup>
+<col class="c-name"><col class="c-note"><col class="c-stat"><col><col class="c-path"><col class="c-size"><col class="c-star"></colgroup>
 <thead><tr><th data-k="starred">★</th><th data-k="mtime">更新</th><th data-k="birth">创建</th><th data-k="tool">工具</th>
-<th data-k="name">名称</th><th data-k="star_note">备注</th><th data-k="first_msg">首条消息</th>
-<th data-k="cwd">路径</th><th data-k="size_kb" class="num">大小</th></tr></thead>
+<th data-k="name">名称</th><th data-k="star_note">备注</th><th data-k="status">状态</th><th data-k="first_msg">首条消息</th>
+<th data-k="cwd">路径</th><th data-k="size_kb" class="num">大小</th><th title="归档">⊘</th></tr></thead>
 <tbody id="tb"></tbody></table>
 <div class="foot" id="foot"></div></main>
 <div id="toast"></div>
@@ -650,24 +677,31 @@ const q=document.getElementById('q'),tb=document.getElementById('tb'),
    o.textContent=`${p.startsWith(HOME)?'~'+p.slice(HOME.length):p} (${n})`;
    pathEl.appendChild(o);});}
 pathEl.onchange=()=>{pathSel=pathEl.value;render()};
+document.getElementById('stf').onchange=render;
 ['uf','ut','cf','ct','smin','smax'].forEach(id=>
   document.getElementById(id).addEventListener('input',()=>{clearTimeout(timer);timer=setTimeout(render,120)}));
 document.getElementById('clear').onclick=()=>{
   ['uf','ut','cf','ct','smin','smax'].forEach(id=>document.getElementById(id).value='');
-  q.value='';pathEl.value='';pathSel='';
+  q.value='';pathEl.value='';pathSel='';document.getElementById('stf').value='';
   document.querySelectorAll('button.f[data-t]').forEach(x=>x.classList.remove('on'));
   document.querySelector('button.f[data-t=""]').classList.add('on');tool='';render();};
 const fmt=t=>{const d=new Date(t*1000),z=n=>(n+'').padStart(2,'0');
   return z(d.getMonth()+1)+'-'+z(d.getDate())+' '+z(d.getHours())+':'+z(d.getMinutes())};
 const esc=s=>(s||'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 const cmd=r=>r.tool==='codex'?`codex resume ${r.id}`:`cd ${r.cwd} && claude -r ${r.id}`;
+const STATUS=['','todo','in progress','blocked','done'];
+const STC={'todo':'var(--fog)','in progress':'#4ea7fc','blocked':'#eb5757','done':'#4cb782'};
+const stSel=r=>`<select class="st" style="color:${STC[r.status]||'var(--smoke)'}">`
+  +STATUS.map(s=>`<option value="${s}"${s===r.status?' selected':''}>${s||'无'}</option>`).join('')+'</select>';
 function pop(msg){toast.textContent=msg;toast.classList.add('show');
   clearTimeout(pop._t);pop._t=setTimeout(()=>toast.classList.remove('show'),1200)}
 function render(){
   const kw=q.value.trim().toLowerCase();
   let rows=DATA;
-  if(tool==='__star__')rows=rows.filter(r=>r.starred);
-  else if(tool)rows=rows.filter(r=>r.tool===tool);
+  if(tool==='__arch__')rows=rows.filter(r=>r.archived);
+  else{rows=rows.filter(r=>!r.archived);
+    if(tool==='__star__')rows=rows.filter(r=>r.starred);
+    else if(tool)rows=rows.filter(r=>r.tool===tool);}
   if(pathSel)rows=rows.filter(r=>r.cwd===pathSel);
   const from=id=>{const v=document.getElementById(id).value;
     return v?new Date(v+'T00:00:00').getTime()/1000:null};
@@ -682,24 +716,28 @@ function render(){
   if(ct)rows=rows.filter(r=>r.birth<=ct);
   if(!isNaN(smin))rows=rows.filter(r=>r.size_kb>=smin*1024);
   if(!isNaN(smax))rows=rows.filter(r=>r.size_kb<=smax*1024);
+  const sf=document.getElementById('stf').value;
+  if(sf)rows=rows.filter(r=>r.status===sf);
   if(kw)rows=rows.filter(r=>r._hay.includes(kw));
   if(sortK)rows=[...rows].sort((a,b)=>{const x=a[sortK],y=b[sortK];
     return(x<y?-1:x>y?1:0)*(sortAsc?1:-1)});
   else rows=[...rows].sort((a,b)=>b.mtime-a.mtime);
   const total=rows.length;rows=rows.slice(0,CAP);
   if(!total){
-    tb.innerHTML=`<tr><td colspan="9"><div class="empty">没有匹配的 session，试试更短的关键词或切换筛选</div></td></tr>`;
+    tb.innerHTML=`<tr><td colspan="11"><div class="empty">没有匹配的 session，试试更短的关键词或切换筛选</div></td></tr>`;
     foot.textContent='';syncSortMark();return;}
-  tb.innerHTML=rows.map(r=>`<tr class="row${r.starred?' starred':''}" data-i="${r._i}">
+  tb.innerHTML=rows.map(r=>`<tr class="row${r.starred?' starred':''}${r.archived?' archived':''}" data-i="${r._i}">
    <td class="starcell" title="${r.starred?'取消标记':'标记重要'}">${r.starred?'★':'☆'}</td>
    <td class="dt">${fmt(r.mtime)}</td><td class="dt">${fmt(r.birth)}</td><td class="tool">${r.tool}</td>
    <td class="namecell nm" title="点击改名">${esc(r.name)}</td>
    <td class="notecell" title="点击编辑备注">${esc(r.star_note)}</td>
+   <td>${stSel(r)}</td>
    <td class="msg" title="${esc(r.first_msg)}">${esc(r.first_msg)||'(空)'}</td>
    <td class="p" title="${esc(r.cwd)}">${esc(r._p)}</td>
-   <td class="num sz">${r.size_kb>=1024?(r.size_kb/1024).toFixed(1)+'M':r.size_kb+'K'}</td></tr>`).join('');
+   <td class="num sz">${r.size_kb>=1024?(r.size_kb/1024).toFixed(1)+'M':r.size_kb+'K'}</td>
+   <td class="archcell" title="${r.archived?'解除归档':'归档（在"已归档"视图可找回）'}">${r.archived?'↩':'⊘'}</td></tr>`).join('');
   foot.textContent=(total>CAP?`显示前 ${CAP} 行，共 ${total} 个匹配，输入关键词缩小范围`:`${total} 个匹配`)
-    +'。点击行复制恢复命令，点 ★ 标记，名称/备注列点击编辑';
+    +'。点击行复制恢复命令，点 ★ 标记，名称/备注列点击编辑，⊘ 归档';
   syncSortMark();
 }
 function syncSortMark(){
@@ -708,7 +746,14 @@ function syncSortMark(){
     h.classList.toggle('s-desc',h.dataset.k===sortK&&!sortAsc);});
 }
 q.addEventListener('input',()=>{clearTimeout(timer);timer=setTimeout(render,120)});
+tb.addEventListener('change',async e=>{
+  if(!e.target.classList.contains('st'))return;
+  const r=DATA[+e.target.closest('tr').dataset.i],status=e.target.value;
+  const resp=await fetch('/star',{method:'POST',body:JSON.stringify({id:r.id,status})});
+  if(!resp.ok){pop('保存失败');return}
+  r.status=status;pop(status?'状态：'+status:'已清除状态');render();});
 tb.addEventListener('click',async e=>{
+  if(e.target.tagName==='SELECT')return;
   const tr=e.target.closest('tr.row');if(!tr)return;
   const r=DATA[+tr.dataset.i];
   if(e.target.classList.contains('starcell')){
@@ -723,6 +768,12 @@ tb.addEventListener('click',async e=>{
     const resp=await fetch('/star',{method:'POST',body:JSON.stringify({id:r.id,note})});
     if(!resp.ok){pop('保存失败');return}
     r.star_note=note;hay(r);pop('已保存');render();
+    return;}
+  if(e.target.classList.contains('archcell')){
+    const archive=!r.archived;
+    const resp=await fetch('/star',{method:'POST',body:JSON.stringify({id:r.id,archive})});
+    if(!resp.ok){pop('保存失败');return}
+    r.archived=archive;pop(archive?'已归档':'已解除归档');render();
     return;}
   if(e.target.classList.contains('namecell')){
     const name=(prompt('名称',r.name||'')||'').trim();
@@ -746,7 +797,7 @@ document.querySelectorAll('th[data-k]').forEach(h=>h.onclick=()=>{
   const k=h.dataset.k;sortAsc=(sortK===k)?!sortAsc:false;sortK=k;render();});
 // 列宽拖拽：改 colgroup 宽度，存 localStorage
 const cols=[...document.querySelectorAll('colgroup col')];
-try{JSON.parse(localStorage.colw3||'[]').forEach((w,i)=>{if(w&&cols[i])cols[i].style.width=w+'px'})}catch(e){}
+try{JSON.parse(localStorage.colw4||'[]').forEach((w,i)=>{if(w&&cols[i])cols[i].style.width=w+'px'})}catch(e){}
 document.querySelectorAll('thead th').forEach((h,i)=>{
   if(i>=cols.length-1)return;
   const g=document.createElement('span');g.className='rs';h.appendChild(g);
@@ -756,7 +807,7 @@ document.querySelectorAll('thead th').forEach((h,i)=>{
     const move=ev=>{cols[i].style.width=Math.max(36,w0+ev.clientX-x0)+'px'};
     const up=()=>{document.removeEventListener('mousemove',move);
       document.removeEventListener('mouseup',up);g.classList.remove('on');
-      localStorage.colw3=JSON.stringify(cols.map(c=>parseInt(c.style.width)||null));
+      localStorage.colw4=JSON.stringify(cols.map(c=>parseInt(c.style.width)||null));
       setTimeout(()=>resizing=false,0)};
     document.addEventListener('mousemove',move);document.addEventListener('mouseup',up);});});
 render();

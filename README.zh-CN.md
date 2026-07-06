@@ -37,6 +37,8 @@ sessions dash --stop             # 停止 dashboard 服务
 - 名称列：Claude 的 `/rename` 手动命名 > AI 自动标题；pi 的 `--name`
 - 页内点 ★ 标记 / 点备注列编辑（两者互相独立），POST 回写 `stars.json`，与命令行共用数据
 - 页内改名：Claude 往 jsonl 追加 `custom-title` 记录（与 `/rename` 同机制，Claude Code 本体可见）；pi 改写首行 `name`；Codex 上游无 thread name 存储，改名仅本工具可见
+- 垃圾 session 可归档（默认所有视图不再出现，“已归档”视图可查看并解除归档）
+- 每个 session 可设状态（todo / in progress / blocked / done，默认无），支持按状态筛选
 - 筛选可叠加：关键词、工具、路径（带计数下拉）、更新/创建时间范围、大小范围
 - 点击行复制恢复命令；列宽可拖拽（localStorage 记忆）；深浅主题切换
 - 数据 30 秒缓存，"刷新"按钮强制重扫
