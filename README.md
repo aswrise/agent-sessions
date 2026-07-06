@@ -28,6 +28,8 @@ sessions dash --stop             # 停止 dashboard 服务
 
 ## Dashboard
 
+![dashboard](docs/dashboard.png)
+
 `sessions dash` 在 `localhost:7867` 起一个常驻微服务（python stdlib `http.server`）：
 
 - 名称列：Claude 的 `/rename` 手动命名 > AI 自动标题；pi 的 `--name`
