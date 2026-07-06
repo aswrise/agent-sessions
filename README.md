@@ -1,59 +1,61 @@
 # agent-sessions
 
-跨路径检索 Claude Code / Codex / pi 的历史会话，单文件 Python 脚本，零第三方依赖（仅需 [ripgrep](https://github.com/BurntSushi/ripgrep)）。
+Search your Claude Code / Codex / pi session history across all project directories. A single-file Python script with zero third-party dependencies (only [ripgrep](https://github.com/BurntSushi/ripgrep) required).
 
-解决的痛点：CLI agent 的 resume 只检索当前目录的会话，换个目录打开就"找不到之前的对话"。实际上对话全量存在本地磁盘，缺的只是一个跨路径的检索入口。
+[中文文档](README.zh-CN.md)
 
-## 安装
+The pain point it solves: CLI agents only list resumable sessions for the current directory. Open a different directory and your past conversations seem gone. They are not: every conversation is stored on disk in full. What is missing is a cross-directory search entry, and that is all this tool is.
+
+## Install
 
 ```bash
 cp sessions ~/.local/bin/ && chmod +x ~/.local/bin/sessions
-# 依赖：python3（仅标准库）、ripgrep（rg）
+# Requires: python3 (stdlib only), ripgrep (rg)
 ```
 
-## 用法
+## Usage
 
 ```bash
-sessions list -n 30              # 最近会话，跨全路径、三工具混排
-sessions list claude             # 只看某个工具（claude / codex / pi）
-sessions find "关键词"            # rg 全文搜索全部历史
-sessions star 48e17d64 备注       # 按 id 前缀标记重要会话
-sessions unstar 48e17d64         # 取消标记
-sessions stars                   # 列出已标记
-sessions dash                    # 打开 dashboard（localhost 常驻服务）
-sessions dash --stop             # 停止 dashboard 服务
+sessions list -n 30              # recent sessions, all paths, all three tools
+sessions list claude             # single tool (claude / codex / pi)
+sessions find "keyword"          # full-text search across all history via rg
+sessions star 48e17d64 note     # star a session by id prefix, with optional note
+sessions unstar 48e17d64        # remove a star
+sessions stars                   # list starred sessions
+sessions dash                    # open the dashboard (resident localhost service)
+sessions dash --stop             # stop the dashboard service
 ```
 
-每条结果带可直接复制的恢复命令（`claude -r` / `codex resume` / `pi --session`，Claude 与 pi 的 resume 需在原目录执行，命令里已带 `cd`）。
+Every result comes with a copy-pastable resume command (`claude -r` / `codex resume` / `pi --session`). Claude and pi must be resumed from the original directory, so the command includes the `cd`.
 
 ## Dashboard
 
 ![dashboard](docs/dashboard.png)
 
-`sessions dash` 在 `localhost:7867` 起一个常驻微服务（python stdlib `http.server`）：
+`sessions dash` starts a resident micro-service on `localhost:7867` (python stdlib `http.server`):
 
-- 名称列：Claude 的 `/rename` 手动命名 > AI 自动标题；pi 的 `--name`
-- 页内点 ★ 标记 / 点备注列编辑，POST 回写 `stars.json`，与命令行共用数据
-- 筛选可叠加：关键词、工具、路径（带计数下拉）、更新/创建时间范围、大小范围
-- 点击行复制恢复命令；列宽可拖拽（localStorage 记忆）；深浅主题切换
-- 数据 30 秒缓存，"刷新"按钮强制重扫
+- Name column: Claude's `/rename` custom title > AI-generated title; pi's `--name`
+- Star / edit notes in the page; changes POST back to `stars.json`, shared with the CLI
+- Composable filters: keyword, tool, path (dropdown with counts), created/updated date ranges, size range
+- Click a row to copy its resume command; draggable column widths (persisted in localStorage); light/dark theme toggle
+- Data cached for 30 seconds; the refresh button forces a rescan
 
-样式基于 [refero styles](https://styles.refero.design/) 的 Linear（midnight precision instrument）DESIGN.md。
+Styling follows the Linear (midnight precision instrument) DESIGN.md from [refero styles](https://styles.refero.design/).
 
-## 数据源
+## Data sources
 
-| 工具 | 路径 | 说明 |
+| Tool | Location | Notes |
 |---|---|---|
-| Claude Code | `~/.claude/projects/<路径slug>/*.jsonl` | 名称取 jsonl 内 `custom-title` / `ai-title` 记录 |
-| Codex | `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl` | 首行 `session_meta` |
-| pi | `~/.pi/agent/sessions/<路径slug>/*.jsonl` | 首行 `type=session` |
+| Claude Code | `~/.claude/projects/<path-slug>/*.jsonl` | names from `custom-title` / `ai-title` records inside the jsonl |
+| Codex | `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl` | first line is `session_meta` |
+| pi | `~/.pi/agent/sessions/<path-slug>/*.jsonl` | first line is `type=session` |
 
-工具只读扫描会话文件，标记数据写在 `~/.local/share/session-snapshots/stars.json`。
+The tool scans session files read-only. Star data lives in `~/.local/share/session-snapshots/stars.json`.
 
-注意：Claude Code 默认 30 天清理会话（`cleanupPeriodDays`），想长期保留需在 `~/.claude/settings.json` 调大。
+Note: Claude Code deletes sessions after 30 days by default (`cleanupPeriodDays`). Raise it in `~/.claude/settings.json` if you want long-term history.
 
-## 跨平台
+## Cross-platform
 
-Linux / WSL / macOS。打开浏览器自动探测（WSL 用 `explorer.exe`，macOS 用 `open`，其余 `xdg-open`）。
+Linux / WSL / macOS. Browser opening is auto-detected (`explorer.exe` on WSL, `open` on macOS, `xdg-open` otherwise).
 
-已知坑：`~/.claude/.gitignore` 会让 rg 静默跳过整个子树，脚本内所有 rg 调用都带了 `--no-ignore --hidden`。
+Known pitfall: a `~/.claude/.gitignore` file makes rg silently skip the whole subtree, so every rg call in the script uses `--no-ignore --hidden`.
