@@ -652,6 +652,10 @@ select.st:hover{color:var(--fog)}
 .msg{cursor:pointer;color:var(--fog)}
 .p{color:var(--ash);font-size:12px;font-family:"Berkeley Mono",ui-monospace,Consolas,monospace;letter-spacing:-.013em}
 .foot{color:var(--ash);font-size:12px;padding:16px 8px}
+#tip{position:fixed;max-width:560px;display:none;z-index:5;pointer-events:none;
+  background:var(--carbon);border:1px solid var(--graphite);color:var(--mist);
+  padding:8px 12px;border-radius:6px;font-size:12px;line-height:1.6;
+  white-space:pre-wrap;word-break:break-all;box-shadow:rgba(8,9,10,.5) 0 4px 24px}
 #toast{position:fixed;bottom:24px;left:50%;transform:translate(-50%,8px);opacity:0;
   background:var(--bone);color:var(--void);padding:8px 16px;border-radius:6px;font-size:13px;font-weight:510;
   box-shadow:rgba(8,9,10,.6) 0 4px 32px;pointer-events:none;transition:opacity .15s,transform .15s}
@@ -689,7 +693,7 @@ select.st:hover{color:var(--fog)}
 <th data-k="cwd">路径</th><th data-k="size_kb" class="num">大小</th><th title="归档">⊘</th></tr></thead>
 <tbody id="tb"></tbody></table>
 <div class="foot" id="foot"></div></main>
-<div id="toast"></div>
+<div id="toast"></div><div id="tip"></div>
 <script type="application/json" id="raw">__DATA__</script>
 <script>
 const DATA=JSON.parse(document.getElementById('raw').textContent);
@@ -763,12 +767,12 @@ function render(){
   tb.innerHTML=rows.map(r=>`<tr class="row${r.starred?' starred':''}${r.archived?' archived':''}" data-i="${r._i}">
    <td class="starcell" title="${r.starred?'取消标记':'标记重要'}">${r.starred?'★':'☆'}</td>
    <td class="dt">${fmt(r.mtime)}</td><td class="dt">${fmt(r.birth)}</td><td class="tool">${r.tool}</td>
-   <td class="tool" title="${esc(r.model)}">${esc(r.model)}</td>
-   <td class="namecell nm" title="点击改名">${esc(r.name)}</td>
-   <td class="notecell" title="点击编辑备注">${esc(r.star_note)}</td>
+   <td class="tool">${esc(r.model)}</td>
+   <td class="namecell nm">${esc(r.name)}</td>
+   <td class="notecell">${esc(r.star_note)}</td>
    <td>${stSel(r)}</td>
-   <td class="msg" title="${esc(r.first_msg)}">${esc(r.first_msg)||'(空)'}</td>
-   <td class="p" title="${esc(r.cwd)}">${esc(r._p)}</td>
+   <td class="msg">${esc(r.first_msg)||'(空)'}</td>
+   <td class="p">${esc(r._p)}</td>
    <td class="num sz">${r.size_kb>=1024?(r.size_kb/1024).toFixed(1)+'M':r.size_kb+'K'}</td>
    <td class="archcell" title="${r.archived?'解除归档':'归档（在"已归档"视图可找回）'}">${r.archived?'↩':'⊘'}</td></tr>`).join('');
   foot.textContent=(total>CAP?`显示前 ${CAP} 行，共 ${total} 个匹配，输入关键词缩小范围`:`${total} 个匹配`)
@@ -781,6 +785,20 @@ function syncSortMark(){
     h.classList.toggle('s-desc',h.dataset.k===sortK&&!sortAsc);});
 }
 q.addEventListener('input',()=>{clearTimeout(timer);timer=setTimeout(render,120)});
+// 悬浮预览：单元格内容被截断时，悬停显示完整内容，移开消失
+const tip=document.getElementById('tip');
+tb.addEventListener('mouseover',e=>{
+  if(e.target.tagName==='SELECT')return;
+  const td=e.target.closest('td');
+  if(!td||td.scrollWidth<=td.clientWidth+1){tip.style.display='none';return}
+  tip.textContent=td.textContent;tip.style.display='block';
+  const r=td.getBoundingClientRect(),w=Math.min(560,innerWidth-24);
+  tip.style.left=Math.max(12,Math.min(r.left,innerWidth-w-12))+'px';
+  let top=r.bottom+4;
+  if(top+tip.offsetHeight>innerHeight-8)top=r.top-tip.offsetHeight-4;
+  tip.style.top=top+'px';});
+tb.addEventListener('mouseout',()=>tip.style.display='none');
+addEventListener('scroll',()=>tip.style.display='none',true);
 tb.addEventListener('change',async e=>{
   if(!e.target.classList.contains('st'))return;
   const r=DATA[+e.target.closest('tr').dataset.i],status=e.target.value;

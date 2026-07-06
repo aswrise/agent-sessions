@@ -41,7 +41,7 @@ Every result comes with a copy-pastable resume command (`claude -r` / `codex res
 - Per-session status (todo / in progress / blocked / done, default none), with a status filter
 - Composable filters: keyword, tool, path (dropdown with counts), created/updated date ranges, size range
 - Model column: the session's last-used model, extracted from the tail of its transcript; resume commands carry it (`claude -r <id> --model <m>` / `codex resume <id> -m <m>` / `pi --session <id> --model <m>`)
-- Click a row to copy its resume command; draggable column widths (persisted in localStorage); light/dark theme toggle
+- Hover a truncated cell to preview its full content (any column); click a row to copy its resume command; draggable column widths (persisted in localStorage); light/dark theme toggle
 - Data cached for 30 seconds; the refresh button forces a rescan
 
 Styling follows the Linear (midnight precision instrument) DESIGN.md from [refero styles](https://styles.refero.design/).
