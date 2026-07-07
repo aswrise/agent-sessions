@@ -683,7 +683,8 @@ select.st:hover{color:var(--fog)}
 <label>大小(MB)</label><input type="number" id="smin" min="0" step="0.1" placeholder="最小">
  - <input type="number" id="smax" min="0" step="0.1" placeholder="最大">
 <label>状态</label><select id="stf"><option value="">全部</option><option>todo</option>
-<option>in progress</option><option>blocked</option><option>done</option></select>
+<option>in progress</option><option>review</option><option>blocked</option><option>done</option>
+<option>archived</option></select>
 <button class="f" id="clear">清除筛选</button>
 </div>
 <main><table>
@@ -728,8 +729,9 @@ const cmd=r=>{const m=r.model;
   if(r.tool==='codex')return`codex resume ${r.id}`+(m?` -m ${m}`:'');
   if(r.tool==='pi')return`cd ${r.cwd} && pi --session ${r.id}`+(m?` --model ${m}`:'');
   return`cd ${r.cwd} && claude -r ${r.id}`+(m?` --model ${m}`:'')};
-const STATUS=['','todo','in progress','blocked','done'];
-const STC={'todo':'var(--fog)','in progress':'#4ea7fc','blocked':'#eb5757','done':'#4cb782'};
+const STATUS=['','todo','in progress','review','blocked','done','archived'];
+const STC={'todo':'var(--fog)','in progress':'#4ea7fc','review':'#b589f2',
+  'blocked':'#eb5757','done':'#4cb782','archived':'var(--smoke)'};
 const stSel=r=>`<select class="st" style="color:${STC[r.status]||'var(--smoke)'}">`
   +STATUS.map(s=>`<option value="${s}"${s===r.status?' selected':''}>${s||'无'}</option>`).join('')+'</select>';
 function pop(msg){toast.textContent=msg;toast.classList.add('show');
