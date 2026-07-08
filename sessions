@@ -20,6 +20,7 @@ import time
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from urllib.parse import parse_qs, urlparse
 
 CLAUDE_DIR = Path.home() / ".claude" / "projects"
 CODEX_DIR = Path.home() / ".codex" / "sessions"
@@ -305,9 +306,71 @@ def is_starred(entry):
 
 
 def find_session_file(tool, sid):
-    hits = (list(CLAUDE_DIR.glob(f"*/{sid}.jsonl")) if tool == "claude"
-            else list(PI_DIR.glob(f"*/*{sid}.jsonl")))
+    if tool == "claude":
+        hits = list(CLAUDE_DIR.glob(f"*/{sid}.jsonl"))
+    elif tool == "codex":
+        hits = list(CODEX_DIR.glob(f"*/*/*/rollout-*{sid}.jsonl"))
+    elif tool == "pi":
+        hits = list(PI_DIR.glob(f"*/*{sid}.jsonl"))
+    else:
+        hits = []
     return max(hits, key=lambda f: f.stat().st_mtime) if hits else None
+
+
+def content_text(content):
+    if isinstance(content, str):
+        return content.strip()
+    if not isinstance(content, list):
+        return ""
+    parts = []
+    for c in content:
+        if not isinstance(c, dict):
+            continue
+        text = c.get("text") if c.get("type") in ("text", "input_text", "output_text") else None
+        if isinstance(text, str):
+            parts.append(text)
+    return "\n".join(p.strip() for p in parts if p.strip()).strip()
+
+
+def skip_transcript_text(role, text):
+    return role == "user" and text.startswith((
+        "# AGENTS.md instructions",
+        "<environment_context",
+        "<skill>",
+        "Base directory for this skill:",
+        "⚠",
+    ))
+
+
+def transcript_messages(tool, sid):
+    path = find_session_file(tool, sid)
+    if not path:
+        raise FileNotFoundError(f"找不到 {tool} session 文件: {sid}")
+    out = []
+    with open(path, errors="replace") as fh:
+        for line in fh:
+            try:
+                rec = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            msg = None
+            if tool == "claude" and rec.get("type") in ("user", "assistant"):
+                if rec.get("isSidechain") or rec.get("toolUseResult"):
+                    continue
+                msg = rec.get("message") or {}
+            elif tool == "codex" and rec.get("type") == "response_item":
+                payload = rec.get("payload") or {}
+                if payload.get("type") == "message":
+                    msg = payload
+            elif tool == "pi" and rec.get("type") == "message":
+                msg = rec.get("message") or {}
+            if not msg or msg.get("role") not in ("user", "assistant"):
+                continue
+            text = content_text(msg.get("content"))
+            if text and not skip_transcript_text(msg["role"], text):
+                out.append({"role": msg["role"], "text": text,
+                            "timestamp": rec.get("timestamp", "")})
+    return out
 
 
 def rename_session(tool, sid, name):
@@ -377,7 +440,7 @@ def cmd_stars():
 
 def resume_cmd(tool, sid, cwd, model=""):
     if tool == "codex":
-        return f"codex resume {sid}" + (f" -m {model}" if model else "")
+        return f"cd {cwd} && codex resume {sid}" + (f" -m {model}" if model else "")
     if tool == "pi":
         return f"cd {cwd} && pi --session {sid}" + (f" --model {model}" if model else "")
     return f"cd {cwd} && claude -r {sid}" + (f" --model {model}" if model else "")
@@ -463,14 +526,29 @@ class DashHandler(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
     def do_GET(self):
-        if self.path.split("?")[0] in ("/", "/index.html"):
-            rows, built_at = cached_index(force="fresh" in self.path)
+        url = urlparse(self.path)
+        if url.path in ("/", "/index.html"):
+            rows, built_at = cached_index(force="fresh" in url.query)
             now = datetime.fromtimestamp(built_at).strftime("%Y-%m-%d %H:%M:%S")
             page = (DASH_TEMPLATE
                     .replace("__DATA__", json.dumps(rows, ensure_ascii=False).replace("</", "<\\/"))
                     .replace("__HOME__", str(Path.home()))
                     .replace("__NOW__", now).replace("__COUNT__", str(len(rows))))
             self._send(200, page)
+        elif url.path == "/api/session":
+            sid = (parse_qs(url.query).get("id") or [""])[0]
+            rows, _ = cached_index()
+            row = next((r for r in rows if r["id"] == sid), None)
+            if not row:
+                self._send(404, '{"error":"session not found"}', "application/json")
+                return
+            try:
+                detail = dict(row, messages=transcript_messages(row["tool"], sid))
+            except Exception as e:
+                self._send(500, json.dumps({"error": str(e)}, ensure_ascii=False),
+                           "application/json")
+                return
+            self._send(200, json.dumps(detail, ensure_ascii=False), "application/json")
         else:
             self._send(404, "not found", "text/plain")
 
@@ -642,21 +720,44 @@ td.notecell{color:var(--mist);font-size:12px;cursor:text}
 td.notecell:empty:hover::after{content:"点击添加备注";color:var(--smoke)}
 td.namecell{cursor:text}
 td.namecell:empty:hover::after{content:"点击命名";color:var(--smoke);font-weight:400}
-td.archcell{cursor:pointer;color:var(--smoke);text-align:center;font-size:13px}
-td.archcell:hover{color:var(--mist)}
+td.detailcell,td.archcell{cursor:pointer;color:var(--smoke);text-align:center;font-size:13px}
+td.detailcell:hover,td.archcell:hover{color:var(--mist)}
 tr.archived td{opacity:.6}
-col.c-stat{width:104px}col.c-model{width:120px}
-select.st{border:1px solid transparent;background:var(--chip);border-radius:4px;
-  font:inherit;font-size:12px;padding:1px 4px;cursor:pointer;outline:none;
-  appearance:none;color:var(--smoke);max-width:100%}
-select.st:hover{color:var(--fog)}
+col.c-stat{width:116px}col.c-model{width:120px}
+#detail[hidden],#list[hidden],.bar[hidden],.bar2[hidden]{display:none}
+.detail-top{display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:16px 0;
+  border-bottom:1px solid var(--graphite)}
+.detail-title{font-size:15px;font-weight:510;color:var(--paper);min-width:0;flex:1}
+.detail-meta{color:var(--ash);font-size:12px;width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.msglist{display:grid;gap:12px;padding:16px 0 48px}
+.bubble{max-width:920px;border:1px solid var(--obsidian);border-radius:8px;
+  padding:10px 12px;background:var(--carbon)}
+.bubble.user{margin-left:auto;background:var(--chip)}
+.role{font-size:11px;text-transform:uppercase;color:var(--ash);margin-bottom:6px}
+.body{white-space:pre-wrap;word-break:break-word;color:var(--mist)}
+.status{position:relative;display:inline-grid;max-width:100%;vertical-align:middle}
+.status span{display:inline-flex;align-items:center;gap:6px;min-width:0;height:22px;
+  padding:0 7px;border:1px solid color-mix(in srgb,var(--sc) 28%,transparent);
+  border-radius:9999px;background:color-mix(in srgb,var(--sc) 9%,transparent);
+  color:var(--sc);font-size:11px;font-weight:510;letter-spacing:-.01em;line-height:1;
+  box-shadow:inset 0 1px 0 rgba(255,255,255,.04)}
+.status span::before{content:"";width:5px;height:5px;border-radius:9999px;background:var(--sc);
+  box-shadow:0 0 0 2px color-mix(in srgb,var(--sc) 9%,transparent)}
+.status .none::before{background:var(--smoke)}
+select.st{position:absolute;inset:0;width:100%;height:100%;opacity:0;cursor:pointer}
+.status:hover span,.status:focus-within span{border-color:var(--sc);
+  background:color-mix(in srgb,var(--sc) 13%,transparent)}
 .msg{cursor:pointer;color:var(--fog)}
 .p{color:var(--ash);font-size:12px;font-family:"Berkeley Mono",ui-monospace,Consolas,monospace;letter-spacing:-.013em}
 .foot{color:var(--ash);font-size:12px;padding:16px 8px}
-#tip{position:fixed;max-width:560px;display:none;z-index:5;pointer-events:none;
+#tip{position:fixed;max-width:min(820px,calc(100vw - 24px));max-height:70vh;overflow:auto;
+  display:none;z-index:5;pointer-events:none;
   background:var(--carbon);border:1px solid var(--graphite);color:var(--mist);
   padding:8px 12px;border-radius:6px;font-size:12px;line-height:1.6;
   white-space:pre-wrap;word-break:break-all;box-shadow:rgba(8,9,10,.5) 0 4px 24px}
+.tiptitle{font-weight:510;color:var(--paper);margin-bottom:8px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.tipmsg{border-top:1px solid var(--obsidian);padding-top:8px;margin-top:8px;white-space:pre-wrap;word-break:break-word}
+.tiprole{font-size:10px;text-transform:uppercase;color:var(--ash);margin-bottom:3px}
 #toast{position:fixed;bottom:24px;left:50%;transform:translate(-50%,8px);opacity:0;
   background:var(--bone);color:var(--void);padding:8px 16px;border-radius:6px;font-size:13px;font-weight:510;
   box-shadow:rgba(8,9,10,.6) 0 4px 32px;pointer-events:none;transition:opacity .15s,transform .15s}
@@ -687,14 +788,14 @@ select.st:hover{color:var(--fog)}
 <option>archived</option></select>
 <button class="f" id="clear">清除筛选</button>
 </div>
-<main><table>
+<main><section id="list"><table>
 <colgroup><col class="c-star"><col class="c-date"><col class="c-date"><col class="c-tool"><col class="c-model">
-<col class="c-name"><col class="c-note"><col class="c-stat"><col><col class="c-path"><col class="c-size"><col class="c-star"></colgroup>
+<col class="c-name"><col class="c-note"><col class="c-stat"><col><col class="c-path"><col class="c-size"><col class="c-star"><col class="c-star"></colgroup>
 <thead><tr><th data-k="starred">★</th><th data-k="mtime">更新</th><th data-k="birth">创建</th><th data-k="tool">工具</th>
 <th data-k="model">模型</th><th data-k="name">名称</th><th data-k="star_note">备注</th><th data-k="status">状态</th><th data-k="first_msg">首条消息</th>
-<th data-k="cwd">路径</th><th data-k="size_kb" class="num">大小</th><th title="归档">⊘</th></tr></thead>
+<th data-k="cwd">路径</th><th data-k="size_kb" class="num">大小</th><th title="详情">详情</th><th title="归档">⊘</th></tr></thead>
 <tbody id="tb"></tbody></table>
-<div class="foot" id="foot"></div></main>
+<div class="foot" id="foot"></div></section><section id="detail" hidden></section></main>
 <div id="toast"></div><div id="tip"></div>
 <script type="application/json" id="raw">__DATA__</script>
 <script>
@@ -707,7 +808,8 @@ const CAP=300;
 let tool='',pathSel='',sortK='',sortAsc=false,timer=null;
 const q=document.getElementById('q'),tb=document.getElementById('tb'),
       foot=document.getElementById('foot'),toast=document.getElementById('toast'),
-      pathEl=document.getElementById('path');
+      pathEl=document.getElementById('path'),list=document.getElementById('list'),
+      detail=document.getElementById('detail');
 {const cnt={};DATA.forEach(r=>cnt[r.cwd]=(cnt[r.cwd]||0)+1);
  Object.entries(cnt).sort((a,b)=>b[1]-a[1]).forEach(([p,n])=>{
    const o=document.createElement('option');o.value=p;
@@ -726,14 +828,17 @@ const fmt=t=>{const d=new Date(t*1000),z=n=>(n+'').padStart(2,'0');
   return z(d.getMonth()+1)+'-'+z(d.getDate())+' '+z(d.getHours())+':'+z(d.getMinutes())};
 const esc=s=>(s||'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 const cmd=r=>{const m=r.model;
-  if(r.tool==='codex')return`codex resume ${r.id}`+(m?` -m ${m}`:'');
+  if(r.tool==='codex')return`cd ${r.cwd} && codex resume ${r.id}`+(m?` -m ${m}`:'');
   if(r.tool==='pi')return`cd ${r.cwd} && pi --session ${r.id}`+(m?` --model ${m}`:'');
   return`cd ${r.cwd} && claude -r ${r.id}`+(m?` --model ${m}`:'')};
 const STATUS=['','todo','in progress','review','blocked','done','archived'];
-const STC={'todo':'var(--fog)','in progress':'#4ea7fc','review':'#b589f2',
-  'blocked':'#eb5757','done':'#4cb782','archived':'var(--smoke)'};
-const stSel=r=>`<select class="st" style="color:${STC[r.status]||'var(--smoke)'}">`
-  +STATUS.map(s=>`<option value="${s}"${s===r.status?' selected':''}>${s||'无'}</option>`).join('')+'</select>';
+const STM={
+  '': ['无','var(--ash)'],todo:['todo','var(--fog)'],
+  'in progress':['progress','#78b8ff'],review:['review','#c6a4ff'],
+  blocked:['blocked','#ff8d8d'],done:['done','#6fd49b'],archived:['archived','var(--ash)']};
+const stSel=r=>{const m=STM[r.status]||[r.status,'var(--smoke)'];
+  return `<label class="status" style="--sc:${m[1]}"><span class="${r.status?'':'none'}">${esc(m[0])}</span><select class="st">`
+    +STATUS.map(s=>`<option value="${s}"${s===r.status?' selected':''}>${s||'无'}</option>`).join('')+'</select></label>'};
 function pop(msg){toast.textContent=msg;toast.classList.add('show');
   clearTimeout(pop._t);pop._t=setTimeout(()=>toast.classList.remove('show'),1200)}
 function render(){
@@ -765,7 +870,7 @@ function render(){
   else rows=[...rows].sort((a,b)=>b.mtime-a.mtime);
   const total=rows.length;rows=rows.slice(0,CAP);
   if(!total){
-    tb.innerHTML=`<tr><td colspan="12"><div class="empty">没有匹配的 session，试试更短的关键词或切换筛选</div></td></tr>`;
+    tb.innerHTML=`<tr><td colspan="13"><div class="empty">没有匹配的 session，试试更短的关键词或切换筛选</div></td></tr>`;
     foot.textContent='';syncSortMark();return;}
   tb.innerHTML=rows.map(r=>`<tr class="row${r.starred?' starred':''}${r.archived?' archived':''}" data-i="${r._i}">
    <td class="starcell" title="${r.starred?'取消标记':'标记重要'}">${r.starred?'★':'☆'}</td>
@@ -777,30 +882,84 @@ function render(){
    <td class="msg">${esc(r.first_msg)||'(空)'}</td>
    <td class="p">${esc(r._p)}</td>
    <td class="num sz">${r.size_kb>=1024?(r.size_kb/1024).toFixed(1)+'M':r.size_kb+'K'}</td>
+   <td class="detailcell" title="打开详情页">详情</td>
    <td class="archcell" title="${r.archived?'解除归档':'归档（在"已归档"视图可找回）'}">${r.archived?'↩':'⊘'}</td></tr>`).join('');
   foot.textContent=(total>CAP?`显示前 ${CAP} 行，共 ${total} 个匹配，输入关键词缩小范围`:`${total} 个匹配`)
-    +'。点击行复制恢复命令，点 ★ 标记，名称/备注列点击编辑，⊘ 归档';
+    +'。点击行复制恢复命令，点详情打开详情页，首条消息悬停预览对话';
   syncSortMark();
 }
+function setListMode(on){
+  list.hidden=!on;detail.hidden=on;
+  document.querySelector('.bar').hidden=!on;document.querySelector('.bar2').hidden=!on;
+}
+function showList(push=true){
+  setListMode(true);
+  if(push)history.pushState(null,'','/');
+}
+function detailHtml(d){
+  const title=esc(d.name||d.first_msg||d.id);
+  const meta=`${d.tool} · ${d.model||'无模型'} · ${d._p||d.cwd} · ${d.size_kb>=1024?(d.size_kb/1024).toFixed(1)+'M':d.size_kb+'K'}`;
+  const msgs=d.messages.length?d.messages.map(m=>`<article class="bubble ${m.role}">
+    <div class="role">${esc(m.role)}</div><div class="body">${esc(m.text)}</div></article>`).join('')
+    :'<div class="empty">没有可展示的 user / assistant 文本消息</div>';
+  return `<div class="detail-top"><button class="f act" id="back">返回</button>
+    <button class="f act" id="copycmd">复制恢复命令</button><div class="detail-title">${title}</div>
+    <div class="detail-meta mono">${esc(meta)}</div></div><div class="msglist">${msgs}</div>`;
+}
+async function openDetail(id,push=true){
+  const r=DATA.find(x=>x.id===id);
+  setListMode(false);detail.innerHTML='<div class="empty">加载中...</div>';
+  if(push)history.pushState(null,'','/?session='+encodeURIComponent(id));
+  const resp=await fetch('/api/session?id='+encodeURIComponent(id));
+  if(!resp.ok){detail.innerHTML='<div class="empty">加载失败</div>';return}
+  const d=await resp.json();d._p=r?r._p:d.cwd;
+  detail.innerHTML=detailHtml(d);
+  document.getElementById('back').onclick=()=>showList();
+  document.getElementById('copycmd').onclick=()=>{navigator.clipboard.writeText(cmd(d));pop('已复制恢复命令')};
+}
+async function loadDetail(r){
+  if(r._detail)return r._detail;
+  if(!r._detailPromise)r._detailPromise=fetch('/api/session?id='+encodeURIComponent(r.id))
+    .then(resp=>{if(!resp.ok)throw new Error('load failed');return resp.json()})
+    .then(d=>{d._p=r._p;r._detail=d;return d});
+  return r._detailPromise;
+}
+const previewHtml=d=>`<div class="tiptitle">${esc(d.name||d.first_msg||d.id)}</div>`
+  +(d.messages.length?d.messages.map(m=>`<div class="tipmsg"><div class="tiprole">${esc(m.role)}</div>${esc(m.text)}</div>`).join('')
+    :'<div class="tipmsg">没有可展示的 user / assistant 文本消息</div>');
 function syncSortMark(){
   document.querySelectorAll('th[data-k]').forEach(h=>{
     h.classList.toggle('s-asc',h.dataset.k===sortK&&sortAsc);
     h.classList.toggle('s-desc',h.dataset.k===sortK&&!sortAsc);});
 }
 q.addEventListener('input',()=>{clearTimeout(timer);timer=setTimeout(render,120)});
-// 悬浮预览：单元格内容被截断时，悬停显示完整内容，移开消失
+// 悬浮预览：首条消息列预览完整对话，其他截断单元格预览完整文本
 const tip=document.getElementById('tip');
-tb.addEventListener('mouseover',e=>{
-  if(e.target.tagName==='SELECT')return;
-  const td=e.target.closest('td');
-  if(!td||td.scrollWidth<=td.clientWidth+1){tip.style.display='none';return}
-  tip.textContent=td.textContent;tip.style.display='block';
-  const r=td.getBoundingClientRect(),w=Math.min(560,innerWidth-24);
+let tipKey='';
+function placeTip(td){
+  const r=td.getBoundingClientRect(),w=Math.min(820,innerWidth-24);
   tip.style.left=Math.max(12,Math.min(r.left,innerWidth-w-12))+'px';
   let top=r.bottom+4;
-  if(top+tip.offsetHeight>innerHeight-8)top=r.top-tip.offsetHeight-4;
-  tip.style.top=top+'px';});
-tb.addEventListener('mouseout',()=>tip.style.display='none');
+  if(top+tip.offsetHeight>innerHeight-8)top=Math.max(8,r.top-tip.offsetHeight-4);
+  tip.style.top=top+'px';
+}
+function showTip(td,html){
+  tip.innerHTML=html;tip.style.display='block';placeTip(td);
+}
+tb.addEventListener('mouseover',async e=>{
+  if(e.target.tagName==='SELECT')return;
+  const td=e.target.closest('td');
+  if(!td){tip.style.display='none';return}
+  if(td.classList.contains('msg')){
+    const r=DATA[+td.closest('tr').dataset.i],key='msg:'+r.id;
+    tipKey=key;showTip(td,'加载对话预览...');
+    try{const d=await loadDetail(r);if(tipKey===key)showTip(td,previewHtml(d))}
+    catch(e){if(tipKey===key)showTip(td,'加载失败')}
+    return;
+  }
+  if(td.scrollWidth<=td.clientWidth+1){tip.style.display='none';return}
+  tipKey='text';showTip(td,esc(td.textContent));});
+tb.addEventListener('mouseout',()=>{tipKey='';tip.style.display='none'});
 addEventListener('scroll',()=>tip.style.display='none',true);
 tb.addEventListener('change',async e=>{
   if(!e.target.classList.contains('st'))return;
@@ -825,6 +984,9 @@ tb.addEventListener('click',async e=>{
     if(!resp.ok){pop('保存失败');return}
     r.star_note=note;hay(r);pop('已保存');render();
     return;}
+  if(e.target.classList.contains('detailcell')){
+    openDetail(r.id);
+    return;}
   if(e.target.classList.contains('archcell')){
     const archive=!r.archived;
     const resp=await fetch('/star',{method:'POST',body:JSON.stringify({id:r.id,archive})});
@@ -840,6 +1002,10 @@ tb.addEventListener('click',async e=>{
     pop(r.tool==='codex'?'已改名（仅本工具可见，codex 上游无处存名）':'已改名');render();
     return;}
   navigator.clipboard.writeText(cmd(r));pop('已复制恢复命令');});
+addEventListener('popstate',()=>{
+  const id=new URLSearchParams(location.search).get('session');
+  if(id)openDetail(id,false);else showList(false);
+});
 document.getElementById('reload').onclick=()=>{location.href='/?fresh=1'};
 document.getElementById('theme').onclick=()=>{
   const t=document.documentElement.dataset.theme==='dark'?'light':'dark';
@@ -867,6 +1033,7 @@ document.querySelectorAll('thead th').forEach((h,i)=>{
       setTimeout(()=>resizing=false,0)};
     document.addEventListener('mousemove',move);document.addEventListener('mouseup',up);});});
 render();
+{const id=new URLSearchParams(location.search).get('session');if(id)openDetail(id,false)}
 </script>
 </body></html>"""
 

@@ -26,7 +26,7 @@ sessions dash                    # 打开 dashboard（localhost 常驻服务）
 sessions dash --stop             # 停止 dashboard 服务
 ```
 
-每条结果带可直接复制的恢复命令（`claude -r` / `codex resume` / `pi --session`，Claude 与 pi 的 resume 需在原目录执行，命令里已带 `cd`）。
+每条结果带可直接复制的恢复命令（`claude -r` / `codex resume` / `pi --session`），会先 `cd` 到原目录再恢复。
 
 ## Dashboard
 
@@ -41,7 +41,7 @@ sessions dash --stop             # 停止 dashboard 服务
 - 每个 session 可设状态（todo / in progress / review / blocked / done / archived，默认无），支持按状态筛选
 - 筛选可叠加：关键词、工具、路径（带计数下拉）、更新/创建时间范围、大小范围
 - 模型列：从会话文件尾部提取最后使用的模型，恢复命令自动带上（`claude -r <id> --model <m>` / `codex resume <id> -m <m>` / `pi --session <id> --model <m>`）
-- 任意列内容截断时悬停即浮出完整预览；点击行复制恢复命令；列宽可拖拽（localStorage 记忆）；深浅主题切换
+- 任意列内容截断时悬停即浮出完整预览，首条消息悬停会预览 user/assistant 可读对话；点击行复制恢复命令；点详情按钮打开对话详情页；列宽可拖拽（localStorage 记忆）；深浅主题切换
 - 数据 30 秒缓存，"刷新"按钮强制重扫
 
 样式基于 [refero styles](https://styles.refero.design/) 的 Linear（midnight precision instrument）DESIGN.md。
