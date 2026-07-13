@@ -13,6 +13,7 @@
 """
 import json
 import re
+import sqlite3
 import subprocess
 import sys
 import threading
@@ -24,6 +25,8 @@ from urllib.parse import parse_qs, urlparse
 
 CLAUDE_DIR = Path.home() / ".claude" / "projects"
 CODEX_DIR = Path.home() / ".codex" / "sessions"
+CODEX_INDEX_FILE = Path.home() / ".codex" / "session_index.jsonl"
+CODEX_STATE_FILE = Path.home() / ".codex" / "state_5.sqlite"
 PI_DIR = Path.home() / ".pi" / "agent" / "sessions"
 DATA_DIR = Path.home() / ".local" / "share" / "session-snapshots"
 STARS_FILE = DATA_DIR / "stars.json"
@@ -69,6 +72,34 @@ def load_claude_names():
             pass
     ai.update(custom)
     return ai
+
+
+def load_codex_names():
+    """显式 thread_name 优先，其次使用不同于首条消息的 Codex title。"""
+    names = {}
+    try:
+        with open(CODEX_INDEX_FILE, errors="replace") as fh:
+            for line in fh:
+                try:
+                    rec = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if rec.get("id"):
+                    if rec.get("thread_name"):
+                        names[rec["id"]] = rec["thread_name"]
+                    else:
+                        names.pop(rec["id"], None)
+    except OSError:
+        pass
+    try:
+        with sqlite3.connect(f"file:{CODEX_STATE_FILE}?mode=ro", uri=True) as db:
+            for sid, title, first_msg in db.execute(
+                    "SELECT id, title, first_user_message FROM threads"):
+                if sid not in names and title and title != first_msg:
+                    names[sid] = title
+    except sqlite3.Error:
+        pass
+    return names
 
 
 def iso2epoch(ts):
@@ -227,7 +258,7 @@ def tail_model(path, tool):
 
 def build_index(only=None, limit=None):
     """扫描所有 session，按 mtime 降序，同 id 去重保留最新"""
-    names = load_claude_names()
+    names = {"claude": load_claude_names(), "codex": load_codex_names()}
     stars = load_stars()
     files = sorted(iter_files(only), key=lambda t: t[1].stat().st_mtime, reverse=True)
     seen, rows = set(), []
@@ -243,8 +274,9 @@ def build_index(only=None, limit=None):
             continue
         seen.add(sid)
         star = stars.get(sid)
-        name = ((star or {}).get("name")
-                or (parsed[4] if len(parsed) > 4 and parsed[4] else names.get(sid, "")))
+        upstream_name = (parsed[4] if len(parsed) > 4 and parsed[4]
+                         else names.get(tool, {}).get(sid, ""))
+        name = (star or {}).get("name") or upstream_name
         rows.append({
             "id": sid, "tool": tool, "cwd": cwd,
             "name": one_line(name, 120),
@@ -375,7 +407,7 @@ def transcript_messages(tool, sid):
 
 def rename_session(tool, sid, name):
     """claude: 追加 custom-title 记录（与 /rename 同机制，claude 本体可见）；
-    pi: 改首行 meta.name（pi 本体可见）；codex: 上游无 thread name 存储，只存本工具 override"""
+    pi: 改首行 meta.name（pi 本体可见）；codex: 只存本工具 override，不写内部索引"""
     if tool == "codex":
         update_mark(sid, name=name)
         return
@@ -751,7 +783,7 @@ select.st{position:absolute;inset:0;width:100%;height:100%;opacity:0;cursor:poin
 .p{color:var(--ash);font-size:12px;font-family:"Berkeley Mono",ui-monospace,Consolas,monospace;letter-spacing:-.013em}
 .foot{color:var(--ash);font-size:12px;padding:16px 8px}
 #tip{position:fixed;max-width:min(820px,calc(100vw - 24px));max-height:70vh;overflow:auto;
-  display:none;z-index:5;pointer-events:none;
+  display:none;z-index:5;overscroll-behavior:contain;
   background:var(--carbon);border:1px solid var(--graphite);color:var(--mist);
   padding:8px 12px;border-radius:6px;font-size:12px;line-height:1.6;
   white-space:pre-wrap;word-break:break-all;box-shadow:rgba(8,9,10,.5) 0 4px 24px}
@@ -935,7 +967,10 @@ function syncSortMark(){
 q.addEventListener('input',()=>{clearTimeout(timer);timer=setTimeout(render,120)});
 // 悬浮预览：首条消息列预览完整对话，其他截断单元格预览完整文本
 const tip=document.getElementById('tip');
-let tipKey='';
+let tipKey='',tipHideTimer=null;
+function cancelTipHide(){clearTimeout(tipHideTimer)}
+function hideTip(){cancelTipHide();tipKey='';tip.style.display='none'}
+function scheduleTipHide(){cancelTipHide();tipHideTimer=setTimeout(hideTip,100)}
 function placeTip(td){
   const r=td.getBoundingClientRect(),w=Math.min(820,innerWidth-24);
   tip.style.left=Math.max(12,Math.min(r.left,innerWidth-w-12))+'px';
@@ -944,12 +979,13 @@ function placeTip(td){
   tip.style.top=top+'px';
 }
 function showTip(td,html){
-  tip.innerHTML=html;tip.style.display='block';placeTip(td);
+  cancelTipHide();tip.innerHTML=html;tip.style.display='block';placeTip(td);
 }
 tb.addEventListener('mouseover',async e=>{
+  cancelTipHide();
   if(e.target.tagName==='SELECT')return;
   const td=e.target.closest('td');
-  if(!td){tip.style.display='none';return}
+  if(!td){hideTip();return}
   if(td.classList.contains('msg')){
     const r=DATA[+td.closest('tr').dataset.i],key='msg:'+r.id;
     tipKey=key;showTip(td,'加载对话预览...');
@@ -957,10 +993,12 @@ tb.addEventListener('mouseover',async e=>{
     catch(e){if(tipKey===key)showTip(td,'加载失败')}
     return;
   }
-  if(td.scrollWidth<=td.clientWidth+1){tip.style.display='none';return}
+  if(td.scrollWidth<=td.clientWidth+1){hideTip();return}
   tipKey='text';showTip(td,esc(td.textContent));});
-tb.addEventListener('mouseout',()=>{tipKey='';tip.style.display='none'});
-addEventListener('scroll',()=>tip.style.display='none',true);
+tb.addEventListener('mouseout',scheduleTipHide);
+tip.addEventListener('mouseenter',cancelTipHide);
+tip.addEventListener('mouseleave',scheduleTipHide);
+addEventListener('scroll',e=>{if(e.target!==tip)hideTip()},true);
 tb.addEventListener('change',async e=>{
   if(!e.target.classList.contains('st'))return;
   const r=DATA[+e.target.closest('tr').dataset.i],status=e.target.value;
@@ -999,7 +1037,7 @@ tb.addEventListener('click',async e=>{
     const resp=await fetch('/rename',{method:'POST',body:JSON.stringify({id:r.id,tool:r.tool,name})});
     if(!resp.ok){pop('改名失败');return}
     r.name=name;hay(r);
-    pop(r.tool==='codex'?'已改名（仅本工具可见，codex 上游无处存名）':'已改名');render();
+    pop(r.tool==='codex'?'已改名（仅本工具可见）':'已改名');render();
     return;}
   navigator.clipboard.writeText(cmd(r));pop('已复制恢复命令');});
 addEventListener('popstate',()=>{

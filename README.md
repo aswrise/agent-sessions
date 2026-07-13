@@ -34,9 +34,9 @@ Every result comes with a copy-pastable resume command (`claude -r` / `codex res
 
 `sessions dash` starts a resident micro-service on `localhost:7867` (python stdlib `http.server`):
 
-- Name column: Claude's `/rename` custom title > AI-generated title; pi's `--name`
+- Name column: Claude's `/rename` custom title > AI-generated title; Codex's explicit `thread_name` > distinct automatic title; pi's `--name`
 - Star / edit notes in the page (independent of each other); changes POST back to `stars.json`, shared with the CLI
-- Rename sessions in the page: Claude gets a `custom-title` record appended to its jsonl (same mechanism as `/rename`, visible in Claude Code itself); pi gets its first-line `name` rewritten; Codex has no upstream thread-name storage, so the name is a local override visible only in this tool
+- Rename sessions in the page: Claude gets a `custom-title` record appended to its jsonl (same mechanism as `/rename`, visible in Claude Code itself); pi gets its first-line `name` rewritten; Codex gets a local override without writing its internal index
 - Archive noise sessions (hidden from all views; an "archived" view lists them for unarchiving)
 - Per-session status (todo / in progress / review / blocked / done / archived, default none), with a status filter
 - Composable filters: keyword, tool, path (dropdown with counts), created/updated date ranges, size range
@@ -51,7 +51,7 @@ Styling follows the Linear (midnight precision instrument) DESIGN.md from [refer
 | Tool | Location | Notes |
 |---|---|---|
 | Claude Code | `~/.claude/projects/<path-slug>/*.jsonl` | names from `custom-title` / `ai-title` records inside the jsonl |
-| Codex | `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl` | first line is `session_meta` |
+| Codex | `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl` | metadata from `session_meta`; names from `session_index.jsonl` and `state_5.sqlite` |
 | pi | `~/.pi/agent/sessions/<path-slug>/*.jsonl` | first line is `type=session` |
 
 Scanning is read-only; the only write into session files is renaming (Claude jsonl append / pi first-line rewrite). Star/note data lives in `~/.local/share/session-snapshots/stars.json`.

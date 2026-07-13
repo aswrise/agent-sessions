@@ -34,9 +34,9 @@ sessions dash --stop             # 停止 dashboard 服务
 
 `sessions dash` 在 `localhost:7867` 起一个常驻微服务（python stdlib `http.server`）：
 
-- 名称列：Claude 的 `/rename` 手动命名 > AI 自动标题；pi 的 `--name`
+- 名称列：Claude 的 `/rename` 手动命名 > AI 自动标题；Codex 的显式 `thread_name` > 独立自动标题；pi 的 `--name`
 - 页内点 ★ 标记 / 点备注列编辑（两者互相独立），POST 回写 `stars.json`，与命令行共用数据
-- 页内改名：Claude 往 jsonl 追加 `custom-title` 记录（与 `/rename` 同机制，Claude Code 本体可见）；pi 改写首行 `name`；Codex 上游无 thread name 存储，改名仅本工具可见
+- 页内改名：Claude 往 jsonl 追加 `custom-title` 记录（与 `/rename` 同机制，Claude Code 本体可见）；pi 改写首行 `name`；Codex 仅写本工具本地 override，不改内部索引
 - 垃圾 session 可归档（默认所有视图不再出现，“已归档”视图可查看并解除归档）
 - 每个 session 可设状态（todo / in progress / review / blocked / done / archived，默认无），支持按状态筛选
 - 筛选可叠加：关键词、工具、路径（带计数下拉）、更新/创建时间范围、大小范围
@@ -51,7 +51,7 @@ sessions dash --stop             # 停止 dashboard 服务
 | 工具 | 路径 | 说明 |
 |---|---|---|
 | Claude Code | `~/.claude/projects/<路径slug>/*.jsonl` | 名称取 jsonl 内 `custom-title` / `ai-title` 记录 |
-| Codex | `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl` | 首行 `session_meta` |
+| Codex | `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl` | `session_meta` 提供元数据，名称来自 `session_index.jsonl` 与 `state_5.sqlite` |
 | pi | `~/.pi/agent/sessions/<路径slug>/*.jsonl` | 首行 `type=session` |
 
 扫描只读；唯一写入会话文件的操作是改名（Claude 追加 jsonl 记录 / pi 改写首行）。标记与备注数据写在 `~/.local/share/session-snapshots/stars.json`。
