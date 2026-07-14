@@ -30,7 +30,17 @@ Every result comes with a copy-pastable resume command (`claude -r` / `codex res
 
 ## Dashboard
 
-![dashboard](docs/dashboard.png)
+### Session overview
+
+![Session dashboard overview](docs/dashboard.png)
+
+### Filters and status
+
+![Expanded filters and status menu](docs/dashboard-filters.png)
+
+### Transcript detail
+
+![Dark transcript detail view](docs/dashboard-detail.png)
 
 `sessions dash` starts a resident micro-service on `localhost:7867` (python stdlib `http.server`):
 

@@ -30,7 +30,17 @@ sessions dash --stop             # 停止 dashboard 服务
 
 ## Dashboard
 
-![dashboard](docs/dashboard.png)
+### 会话总览
+
+![会话面板总览](docs/dashboard.png)
+
+### 筛选与状态
+
+![展开的筛选面板与状态菜单](docs/dashboard-filters.png)
+
+### 对话详情
+
+![深色模式下的对话详情](docs/dashboard-detail.png)
 
 `sessions dash` 在 `localhost:7867` 起一个常驻微服务（python stdlib `http.server`）：
 
