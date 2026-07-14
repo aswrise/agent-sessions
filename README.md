@@ -35,16 +35,16 @@ Every result comes with a copy-pastable resume command (`claude -r` / `codex res
 `sessions dash` starts a resident micro-service on `localhost:7867` (python stdlib `http.server`):
 
 - Name column: Claude's `/rename` custom title > AI-generated title; Codex's explicit `thread_name` > distinct automatic title; pi's `--name`
-- Star / edit notes in the page (independent of each other); changes POST back to `stars.json`, shared with the CLI
-- Rename sessions in the page: Claude gets a `custom-title` record appended to its jsonl (same mechanism as `/rename`, visible in Claude Code itself); pi gets its first-line `name` rewritten; Codex gets a local override without writing its internal index
+- Star sessions and edit notes inline; marks/notes POST back to `stars.json`, shared with the CLI
+- Rename sessions inline: Claude gets a `custom-title` record appended to its jsonl (same mechanism as `/rename`, visible in Claude Code itself); pi gets its first-line `name` rewritten; Codex gets a local override without writing its internal index
 - Archive noise sessions (hidden from all views; an "archived" view lists them for unarchiving)
 - Per-session status (todo / in progress / review / blocked / done / archived, default none), with a status filter
-- Composable filters: keyword, tool, path (dropdown with counts), created/updated date ranges, size range
+- Composable filters: keyword, tool, path (dropdown with counts), plus an on-demand advanced panel for created/updated dates, size, and status
 - Model column: the session's last-used model, extracted from the tail of its transcript; resume commands carry it (`claude -r <id> --model <m>` / `codex resume <id> -m <m>` / `pi --session <id> --model <m>`)
 - Hover a truncated cell to preview its full content (first-message hover previews the readable user/assistant transcript); click a row to copy its resume command; use the detail button to open the transcript page; draggable column widths (persisted in localStorage); light/dark theme toggle
 - Data cached for 30 seconds; the refresh button forces a rescan
 
-Styling follows the Linear (midnight precision instrument) DESIGN.md from [refero styles](https://styles.refero.design/).
+The interface uses a quiet adaptive workspace design: system typography, translucent floating controls, immediate press feedback, progressive disclosure, and reduced-motion/transparency/contrast fallbacks.
 
 ## Data sources
 

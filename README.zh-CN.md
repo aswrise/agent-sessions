@@ -35,16 +35,16 @@ sessions dash --stop             # 停止 dashboard 服务
 `sessions dash` 在 `localhost:7867` 起一个常驻微服务（python stdlib `http.server`）：
 
 - 名称列：Claude 的 `/rename` 手动命名 > AI 自动标题；Codex 的显式 `thread_name` > 独立自动标题；pi 的 `--name`
-- 页内点 ★ 标记 / 点备注列编辑（两者互相独立），POST 回写 `stars.json`，与命令行共用数据
-- 页内改名：Claude 往 jsonl 追加 `custom-title` 记录（与 `/rename` 同机制，Claude Code 本体可见）；pi 改写首行 `name`；Codex 仅写本工具本地 override，不改内部索引
+- 页内点 ★ 标记，备注支持原地编辑；标记和备注 POST 回写 `stars.json`，与命令行共用数据
+- 名称支持原地编辑：Claude 往 jsonl 追加 `custom-title` 记录（与 `/rename` 同机制，Claude Code 本体可见）；pi 改写首行 `name`；Codex 仅写本工具本地 override，不改内部索引
 - 垃圾 session 可归档（默认所有视图不再出现，“已归档”视图可查看并解除归档）
 - 每个 session 可设状态（todo / in progress / review / blocked / done / archived，默认无），支持按状态筛选
-- 筛选可叠加：关键词、工具、路径（带计数下拉）、更新/创建时间范围、大小范围
+- 筛选可叠加：关键词、工具、路径（带计数下拉）；更新/创建时间、大小和状态收进按需展开的高级筛选
 - 模型列：从会话文件尾部提取最后使用的模型，恢复命令自动带上（`claude -r <id> --model <m>` / `codex resume <id> -m <m>` / `pi --session <id> --model <m>`）
 - 任意列内容截断时悬停即浮出完整预览，首条消息悬停会预览 user/assistant 可读对话；点击行复制恢复命令；点详情按钮打开对话详情页；列宽可拖拽（localStorage 记忆）；深浅主题切换
 - 数据 30 秒缓存，"刷新"按钮强制重扫
 
-样式基于 [refero styles](https://styles.refero.design/) 的 Linear（midnight precision instrument）DESIGN.md。
+界面采用克制的自适应工作台设计：系统字体、半透明浮动控件、即时按压反馈、渐进式信息披露，并适配减少动态、减少透明度和高对比度偏好。
 
 ## 数据源
 

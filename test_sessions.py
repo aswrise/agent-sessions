@@ -97,6 +97,17 @@ class SessionsTest(unittest.TestCase):
         self.assertIn('aria-label="分页"', sessions.DASH_TEMPLATE)
         self.assertIn("rows.slice(start,start+PAGE_SIZE)", sessions.DASH_TEMPLATE)
 
+    def test_dashboard_design_keeps_advanced_controls_progressive_and_accessible(self):
+        self.assertIn('id="advancedFilters" hidden', sessions.DASH_TEMPLATE)
+        self.assertIn('id="filterToggle" type="button" aria-expanded="false"',
+                      sessions.DASH_TEMPLATE)
+        self.assertIn('class="rowbtn detailbtn" type="button"', sessions.DASH_TEMPLATE)
+        self.assertIn("function editCell(td,r,field)", sessions.DASH_TEMPLATE)
+        self.assertIn("prefers-reduced-transparency:reduce", sessions.DASH_TEMPLATE)
+        self.assertIn('id="menu" class="menu" role="listbox"', sessions.DASH_TEMPLATE)
+        self.assertIn('data-k="starred" class="action-head"', sessions.DASH_TEMPLATE)
+        self.assertNotIn('<select id="path"', sessions.DASH_TEMPLATE)
+
 
 if __name__ == "__main__":
     unittest.main()
