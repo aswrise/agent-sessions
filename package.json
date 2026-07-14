@@ -5,7 +5,9 @@
   "type": "module",
   "packageManager": "bun@1.3.9",
   "scripts": {
-    "test": "bun test",
+    "test": "bun run test:backend && bun run test:ui",
+    "test:backend": "bun test tests/contracts.test.ts tests/catalog.test.ts tests/http.test.ts",
+    "test:ui": "vitest run",
     "typecheck": "vue-tsc --noEmit",
     "build": "vite build"
   },
