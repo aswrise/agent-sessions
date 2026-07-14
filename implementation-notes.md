@@ -1,0 +1,59 @@
+# Implementation Notes: Python Dashboard Parity in Vue
+
+## Objective
+
+把 `master:sessions` 中 Python dashboard 的视觉与交互完整迁移到当前 Vue 版本，同时保留 Bun 后端、现有 API 契约及当前工作树中的 Markdown Transcript 渲染。
+
+## Authoritative Baseline
+
+- 视觉与交互：`git show master:sessions` 中的 `DASH_TEMPLATE`。
+- 数据与写入行为：当前 `SessionCatalog`、HTTP API 与 `SessionView` / `TranscriptView` 契约。
+- 当前用户改动：保留 `markdown-it` 依赖及详情、悬浮预览中的 Markdown 安全渲染。
+
+## Parity Checklist
+
+- [x] 默认深色主题、原色板、背景、字体与响应式布局
+- [x] 品牌头、说明文案、Session 总数与更新时间
+- [x] sticky chrome、搜索框、来源标签及动态数量
+- [x] 自定义路径菜单、状态菜单及键盘导航
+- [x] 高级筛选、有效筛选计数与清除筛选
+- [x] 13 列表格、原列宽、排序标记与列宽拖拽持久化
+- [x] 日期、路径、大小、工具标签和状态胶囊格式
+- [x] 点击名称/备注后进入编辑，Enter/失焦保存，Escape 取消
+- [x] 行点击复制、星标、状态、详情、归档及原提示文案
+- [x] 截断单元格提示和首条消息 Transcript 悬浮预览
+- [x] 详情页头、消息气泡、浏览器历史与 Escape 返回
+- [x] 分页、footer 文案、`/` 搜索快捷键、主题持久化
+- [x] Vue 回归测试、类型检查、生产构建及浏览器实测
+
+## Progress
+
+### 2026-07-14
+
+- 对比确认 Vue 初版只迁移了功能，没有迁移 Python 版 DOM/CSS。
+- 将 `src/App.vue` 重构为 Python 版的信息架构和样式体系：品牌头、chrome、13 列表格、状态胶囊、菜单、toast、详情和 preview 均已落入 Vue 模板。
+- 搜索语义恢复为 Python 版：只匹配名称、备注与首条消息，不匹配路径、模型、工具或 id。
+- 保留当前工作树里的 Markdown 安全渲染，并为旧版 bubble / tip 外观补充最小 Markdown 样式。
+- Session 列表 envelope 增加 `home` 并在前端边界校验，恢复 Python 版基于真实 HOME 的 `~` 路径缩写。
+- `index.html` 在 Vue 启动前同步主题，恢复 Python 版无主题闪烁的启动方式。
+- 恢复 `docs/dashboard.png`、`docs/dashboard-filters.png`、`docs/dashboard-detail.png` 为 Python 视觉基准，README 不再展示错误的迁移界面。
+- 将 JSONL 元数据解析改为惰性头部读取，Claude 标题改由 `rg` 提取，并复用 Codex SQLite 的首条消息与模型；真实 1900+ Sessions 首次索引中位数从约 6.5 秒降至 0.93 秒，刷新降至约 0.18 秒。
+- Session 索引保存 `id -> file` 定位，详情不再触发全量重建；前端合并同一 Session 的在途预览请求，避免鼠标反复移入导致请求排队。
+- Codex 名称优先使用官方 `thread_name`；改名通过 Codex app-server `thread/name/set` 同步，并在成功后移除旧 `stars.json` 本地名称覆盖。
+
+## Deviations
+
+- Python 模板由服务端直接注入 `HOME`；Vue 迁移最初只能猜测用户目录。已在 Session 列表 envelope 增加经过边界校验的 `home`，由 Bun 服务端显式提供，从而保留 Python 版精确的 `~` 缩写行为。
+- Python 版刷新通过页面导航 `/?fresh=1`，Vue 版直接请求 `/api/sessions?fresh=1`。两者都会强制重建 Session 索引；保留 SPA 方式以避免无意义的整页重载。
+- Python 版将 Codex 改名仅保存在本工具标记中；Vue/Bun 版按新需求调用 Codex 官方 app-server。只读能力仍仅依赖 `rg`，Codex CLI 缺失时只有 Codex 改名不可用。
+
+## Verification Log
+
+- `bun run test`：通过；20 个 Bun 后端测试、7 个 Vue DOM/交互测试全部通过。
+- `bun run typecheck`：通过。
+- `bun run build`：通过；Vite 产物已内嵌进 standalone HTML。
+- `git diff --check`：通过。
+- 浏览器实测：在 `http://127.0.0.1:7868/` 使用真实 1900+ Sessions 完成列表渲染；与 `master` 中 Python `docs/dashboard.png` 对照，品牌头、chrome、13 列表格、行高、列宽、色板和信息密度一致。
+- 详情直达实测：`/?session=<id>` 成功加载真实 Transcript，深色主题、详情头和左右消息气泡与 Python 基准一致。
+- 性能实测：真实 1911 Sessions 冷索引中位数 0.93 秒、缓存命中 5.1 毫秒、显式刷新中位数 0.186 秒；10.7MB Codex Transcript 的详情 HTTP 约 43 毫秒。
+- Codex 名称实测：`刷workspace-` 同步写入 `session_index.jsonl` 与 `state_5.sqlite`，`7868` API 返回同名且旧本地覆盖已清理。

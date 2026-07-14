@@ -13,7 +13,8 @@ import {
   writeFileSync,
 } from "node:fs";
 import type { Stats } from "node:fs";
-import { basename, dirname, join, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import packageJson from "../package.json" with { type: "json" };
 import { isStatus, type MarkPatch, type Session, type SessionStatus, type Tool, type Transcript, type TranscriptMessage } from "./contracts.ts";
 import { userDataDirectory } from "./paths.ts";
 
@@ -30,6 +31,7 @@ type Metadata = {
   upstream_name: string;
   model: string;
 };
+type ParsedMetadata = Omit<Metadata, "model"> & { model?: string };
 type Located = { adapter: Adapter; path: string; stat: Stats };
 type Mark = {
   starred?: boolean;
@@ -47,6 +49,7 @@ export interface CatalogOptions {
   environment?: NodeJS.ProcessEnv;
   platform?: NodeJS.Platform;
   rgPath?: string | null;
+  codexPath?: string | null;
   now?: () => Date;
 }
 
@@ -61,10 +64,10 @@ interface Adapter {
   readonly tool: Tool;
   readonly root: string;
   discover(): string[];
-  parse(path: string): Omit<Metadata, "model"> | null;
+  parse(path: string): ParsedMetadata | null;
   loadNames(): Map<string, string>;
-  transcript(id: string): TranscriptMessage[];
-  rename(id: string, name: string): "upstream" | "local";
+  transcript(id: string, path?: string): TranscriptMessage[];
+  rename(id: string, name: string, path?: string): Promise<void>;
   findFile(id: string): string | undefined;
   allowed(path: string): boolean;
 }
@@ -123,8 +126,96 @@ function readLines(path: string, strict = false): string[] {
   }
 }
 
+function* readHeadLines(path: string, limit: number): Generator<string> {
+  let fd: number | undefined;
+  try {
+    fd = openSync(path, "r");
+    let pending = Buffer.alloc(0), lines = 0;
+    while (lines < limit) {
+      const chunk = Buffer.allocUnsafe(8192);
+      const length = readSync(fd, chunk, 0, chunk.length, null);
+      if (!length) {
+        if (pending.length) yield pending.toString("utf8").replace(/\r$/, "");
+        break;
+      }
+      const data = pending.length ? Buffer.concat([pending, chunk.subarray(0, length)]) : chunk.subarray(0, length);
+      let start = 0;
+      while (lines < limit) {
+        const newline = data.indexOf(10, start);
+        if (newline < 0) break;
+        const end = newline > start && data[newline - 1] === 13 ? newline - 1 : newline;
+        yield data.subarray(start, end).toString("utf8");
+        lines++;
+        start = newline + 1;
+      }
+      pending = Buffer.from(data.subarray(start));
+    }
+  } catch {
+    return;
+  } finally {
+    if (fd !== undefined) closeSync(fd);
+  }
+}
+
 function latest(paths: string[]): string | undefined {
   return paths.sort((left, right) => statSync(right).mtimeMs - statSync(left).mtimeMs)[0];
+}
+
+async function setCodexSessionName(executable: string | null, codexHome: string, id: string, name: string): Promise<void> {
+  if (!executable) throw new CatalogError("invalid", "找不到 Codex CLI，无法更新 Session 名称");
+  const child = Bun.spawn([executable, "app-server", "--stdio"], {
+    env: { ...process.env, CODEX_HOME: codexHome },
+    stdin: "pipe",
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const exchange = async () => {
+      const decoder = new TextDecoder();
+      const reader = child.stdout.getReader();
+      let buffer = "";
+      const send = (value: Json) => {
+        child.stdin.write(JSON.stringify(value) + "\n");
+        child.stdin.flush();
+      };
+      const response = async (requestId: number): Promise<void> => {
+        while (true) {
+          while (!buffer.includes("\n")) {
+            const { value, done } = await reader.read();
+            if (done) throw new Error("Codex app-server 提前退出");
+            buffer += decoder.decode(value, { stream: true });
+          }
+          const newline = buffer.indexOf("\n");
+          const message = parseRecord(buffer.slice(0, newline));
+          buffer = buffer.slice(newline + 1);
+          if (!message || message.id !== requestId) continue;
+          const error = isRecord(message.error) ? message.error : undefined;
+          if (error) throw new Error(stringValue(error.message) || "Codex app-server 请求失败");
+          return;
+        }
+      };
+      send({ id: 1, method: "initialize", params: { clientInfo: { name: "agent-sessions", version: packageJson.version }, capabilities: {} } });
+      await response(1);
+      send({ method: "initialized" });
+      send({ id: 2, method: "thread/name/set", params: { threadId: id, name } });
+      await response(2);
+      child.stdin.end();
+      if (await child.exited !== 0) throw new Error("Codex app-server 退出异常");
+    };
+    await Promise.race([
+      exchange(),
+      new Promise<never>((_, reject) => {
+        timeout = setTimeout(() => { child.kill(); reject(new Error("Codex app-server 超时")); }, 5_000);
+      }),
+    ]);
+  } catch (cause) {
+    throw new CatalogError("invalid", `Codex Session 名称更新失败: ${cause instanceof Error ? cause.message : String(cause)}`);
+  } finally {
+    clearTimeout(timeout);
+    try { child.stdin.end(); } catch {}
+    if (child.exitCode === null) child.kill();
+  }
 }
 
 function tailModel(path: string, tool: Tool): string {
@@ -164,23 +255,25 @@ abstract class JsonlAdapter implements Adapter {
   abstract readonly tool: Tool;
   constructor(readonly root: string) {}
   abstract discover(): string[];
-  abstract parse(path: string): Omit<Metadata, "model"> | null;
+  abstract parse(path: string): ParsedMetadata | null;
   abstract loadNames(): Map<string, string>;
-  abstract rename(id: string, name: string): "upstream" | "local";
+  abstract rename(id: string, name: string): Promise<void>;
 
   allowed(path: string): boolean {
-    return this.discover().map((candidate) => resolve(candidate)).includes(resolve(path));
+    const child = relative(resolve(this.root), resolve(path));
+    return child !== "" && child !== ".." && !child.startsWith(`..${sep}`) && !isAbsolute(child);
   }
 
   findFile(id: string): string | undefined {
     return latest(this.discover().filter((path) => this.parse(path)?.id === id));
   }
 
-  protected messages(id: string, pick: (record: Json) => Json | undefined): TranscriptMessage[] {
-    const path = this.findFile(id);
+  protected messages(id: string, pick: (record: Json) => Json | undefined, locatedPath?: string, marker?: string): TranscriptMessage[] {
+    const path = locatedPath ?? this.findFile(id);
     if (!path) throw new CatalogError("not_found", `找不到 ${this.tool} session 文件: ${id}`);
     const output: TranscriptMessage[] = [];
     for (const line of readLines(path, true)) {
+      if (marker && !line.includes(marker)) continue;
       const record = parseRecord(line);
       const message = record && pick(record);
       if (!record || !message) continue;
@@ -205,9 +298,9 @@ class ClaudeAdapter extends JsonlAdapter {
       .filter((path) => !basename(path).startsWith("agent-"));
   }
 
-  parse(path: string): Omit<Metadata, "model"> | null {
+  parse(path: string): ParsedMetadata | null {
     let cwd = "", first = "", birth: number | undefined;
-    for (const line of readLines(path).slice(0, MAX_HEAD_LINES)) {
+    for (const line of readHeadLines(path, MAX_HEAD_LINES)) {
       const record = parseRecord(line);
       if (!record) continue;
       cwd ||= stringValue(record.cwd);
@@ -225,7 +318,18 @@ class ClaudeAdapter extends JsonlAdapter {
 
   loadNames(): Map<string, string> {
     const ai = new Map<string, string>(), custom = new Map<string, string>();
-    for (const path of this.discover()) for (const line of readLines(path)) {
+    const titleLines: string[] = [];
+    const rg = Bun.which("rg");
+    if (rg && existsSync(this.root)) {
+      const result = Bun.spawnSync([rg, "--json", "-N", "--no-messages", "--no-ignore", "--hidden",
+        String.raw`"type"\s*:\s*"(?:ai|custom)-title"`, this.root]);
+      if (result.exitCode <= 1) for (const line of result.stdout.toString().split(/\r?\n/)) {
+        const event = parseRecord(line), data = event && isRecord(event.data) ? event.data : undefined;
+        const lines = data && isRecord(data.lines) ? data.lines : undefined;
+        if (event?.type === "match" && lines) titleLines.push(stringValue(lines.text).trimEnd());
+      }
+    } else for (const path of this.discover()) titleLines.push(...readLines(path));
+    for (const line of titleLines) {
       const record = parseRecord(line);
       const id = record && stringValue(record.sessionId);
       if (!record || !id) continue;
@@ -244,68 +348,72 @@ class ClaudeAdapter extends JsonlAdapter {
     return ai;
   }
 
-  transcript(id: string): TranscriptMessage[] {
+  transcript(id: string, path?: string): TranscriptMessage[] {
     return this.messages(id, (record) => {
       if (!["user", "assistant"].includes(stringValue(record.type)) || record.isSidechain || record.toolUseResult) return;
       return isRecord(record.message) ? record.message : undefined;
-    });
+    }, path, '"message"');
   }
 
-  rename(id: string, name: string): "upstream" {
-    const path = this.findFile(id);
+  async rename(id: string, name: string, locatedPath?: string): Promise<void> {
+    const path = locatedPath ?? this.findFile(id);
     if (!path) throw new CatalogError("not_found", `找不到 claude session 文件: ${id}`);
     appendFileSync(path, JSON.stringify({ type: "custom-title", customTitle: name, sessionId: id }) + "\n");
-    return "upstream";
   }
 }
 
 class CodexAdapter extends JsonlAdapter {
   readonly tool = "codex" as const;
-  constructor(root: string, private indexFile: string, private stateFile: string) { super(root); }
+  private firstMessages = new Map<string, string>();
+  private models = new Map<string, string>();
+  constructor(root: string, private indexFile: string, private stateFile: string, private codexPath: string | null) { super(root); }
 
   discover(): string[] {
     if (!existsSync(this.root)) return [];
-    return [...new Bun.Glob("*/*/*/rollout-*.jsonl").scanSync({ cwd: this.root, absolute: true, dot: true })]
-      .filter((path) => !this.isSubagent(path));
+    return [...new Bun.Glob("*/*/*/rollout-*.jsonl").scanSync({ cwd: this.root, absolute: true, dot: true })];
   }
 
-  private isSubagent(path: string): boolean {
-    const first = parseRecord(readLines(path)[0] ?? "");
-    const payload = first && isRecord(first.payload) ? first.payload : undefined;
-    return payload?.thread_source === "subagent";
-  }
-
-  parse(path: string): Omit<Metadata, "model"> | null {
-    const lines = readLines(path);
-    const meta = parseRecord(lines[0] ?? "");
+  parse(path: string): ParsedMetadata | null {
+    const lines = readHeadLines(path, MAX_HEAD_LINES + 1);
+    const meta = parseRecord(lines.next().value ?? "");
     const payload = meta && isRecord(meta.payload) ? meta.payload : undefined;
     const id = payload && stringValue(payload.id);
-    if (!meta || !payload || !id) return null;
-    let first = "";
-    for (const line of lines.slice(1, MAX_HEAD_LINES + 1)) {
-      if (!line.includes("user")) continue;
-      const record = parseRecord(line);
-      const value = record?.payload;
-      if (!isRecord(value)) continue;
-      if (value.type === "user_message") first = stringValue(value.message).trim();
-      else {
-        const item = isRecord(value.item) ? value.item : value;
-        if (item.role === "user") first = contentText(item.content);
-      }
-      if (first && !["<", "#", "⚠"].some((prefix) => first.startsWith(prefix))) break;
-      first = "";
+    if (!meta || !payload || !id || payload.thread_source === "subagent") {
+      lines.return(undefined);
+      return null;
     }
+    let first = this.firstMessages.get(id)?.trim() ?? "";
+    if (!first || ["<", "#", "⚠"].some((prefix) => first.startsWith(prefix))) {
+      first = "";
+      for (const line of lines) {
+        if (!line.includes("user")) continue;
+        const record = parseRecord(line);
+        const value = record?.payload;
+        if (!isRecord(value)) continue;
+        if (value.type === "user_message") first = stringValue(value.message).trim();
+        else {
+          const item = isRecord(value.item) ? value.item : value;
+          if (item.role === "user") first = contentText(item.content);
+        }
+        if (first && !["<", "#", "⚠"].some((prefix) => first.startsWith(prefix))) break;
+        first = "";
+      }
+    } else lines.return(undefined);
+    const model = this.models.get(id);
     return {
       id,
       cwd: stringValue(payload.cwd) || "?",
       first_msg: first,
       birth: isoToEpoch(payload.timestamp) ?? isoToEpoch(meta.timestamp),
       upstream_name: "",
+      ...(model ? { model } : {}),
     };
   }
 
   loadNames(): Map<string, string> {
     const names = new Map<string, string>();
+    this.firstMessages.clear();
+    this.models.clear();
     for (const line of readLines(this.indexFile)) {
       const record = parseRecord(line), id = record && stringValue(record.id);
       if (!record || !id) continue;
@@ -316,23 +424,28 @@ class CodexAdapter extends JsonlAdapter {
     let database: Database | undefined;
     try {
       database = new Database(this.stateFile, { readonly: true });
-      const rows = database.query("SELECT id, title, first_user_message FROM threads").all() as Json[];
+      const hasModel = Boolean(database.query("SELECT 1 FROM pragma_table_info('threads') WHERE name = 'model'").get());
+      const rows = database.query(`SELECT id, title, first_user_message${hasModel ? ", model" : ""} FROM threads`).all() as Json[];
       for (const row of rows) {
-        const id = stringValue(row.id), title = stringValue(row.title);
+        const id = stringValue(row.id), title = stringValue(row.title), first = stringValue(row.first_user_message);
+        if (id && first) this.firstMessages.set(id, first);
+        if (id && stringValue(row.model)) this.models.set(id, stringValue(row.model));
         if (!names.has(id) && title && title !== stringValue(row.first_user_message)) names.set(id, title);
       }
     } catch {} finally { database?.close(); }
     return names;
   }
 
-  transcript(id: string): TranscriptMessage[] {
+  transcript(id: string, path?: string): TranscriptMessage[] {
     return this.messages(id, (record) => {
       if (record.type !== "response_item" || !isRecord(record.payload) || record.payload.type !== "message") return;
       return record.payload;
-    });
+    }, path, '"response_item"');
   }
 
-  rename(): "local" { return "local"; }
+  async rename(id: string, name: string): Promise<void> {
+    await setCodexSessionName(this.codexPath, dirname(this.root), id, name);
+  }
 }
 
 class PiAdapter extends JsonlAdapter {
@@ -343,11 +456,14 @@ class PiAdapter extends JsonlAdapter {
     return [...new Bun.Glob("*/*.jsonl").scanSync({ cwd: this.root, absolute: true, dot: true })];
   }
 
-  parse(path: string): Omit<Metadata, "model"> | null {
-    const lines = readLines(path), meta = parseRecord(lines[0] ?? ""), id = meta && stringValue(meta.id);
-    if (!meta || meta.type !== "session" || !id) return null;
+  parse(path: string): ParsedMetadata | null {
+    const lines = readHeadLines(path, MAX_HEAD_LINES + 1), meta = parseRecord(lines.next().value ?? ""), id = meta && stringValue(meta.id);
+    if (!meta || meta.type !== "session" || !id) {
+      lines.return(undefined);
+      return null;
+    }
     let first = "";
-    for (const line of lines.slice(1, MAX_HEAD_LINES + 1)) {
+    for (const line of lines) {
       if (!line.includes('"role":"user"')) continue;
       const record = parseRecord(line), message = record && isRecord(record.message) ? record.message : undefined;
       if (record?.type === "message" && message?.role === "user") first = contentText(message.content);
@@ -365,12 +481,12 @@ class PiAdapter extends JsonlAdapter {
 
   loadNames(): Map<string, string> { return new Map(); }
 
-  transcript(id: string): TranscriptMessage[] {
-    return this.messages(id, (record) => record.type === "message" && isRecord(record.message) ? record.message : undefined);
+  transcript(id: string, path?: string): TranscriptMessage[] {
+    return this.messages(id, (record) => record.type === "message" && isRecord(record.message) ? record.message : undefined, path, '"message"');
   }
 
-  rename(id: string, name: string): "upstream" {
-    const path = this.findFile(id);
+  async rename(id: string, name: string, locatedPath?: string): Promise<void> {
+    const path = locatedPath ?? this.findFile(id);
     if (!path) throw new CatalogError("not_found", `找不到 pi session 文件: ${id}`);
     const text = readFileSync(path, "utf8"), newline = text.indexOf("\n");
     const meta = parseRecord(newline < 0 ? text : text.slice(0, newline));
@@ -378,7 +494,6 @@ class PiAdapter extends JsonlAdapter {
     meta.name = name;
     const output = JSON.stringify(meta) + (newline < 0 ? "" : text.slice(newline));
     atomicWrite(path, output);
-    return "upstream";
   }
 }
 
@@ -408,6 +523,7 @@ export class SessionCatalog {
   private marksFile: string;
   private metadata = new Map<string, { signature: string; value: Metadata | null }>();
   private index: { expires: number; rows: Session[] } | undefined;
+  private locations = new Map<string, Located>();
   private now: () => Date;
   private rgPath: string | null | undefined;
 
@@ -419,7 +535,8 @@ export class SessionCatalog {
     const pi = join(home, ".pi", "agent", "sessions");
     this.adapters = [
       new ClaudeAdapter(claude),
-      new CodexAdapter(join(codex, "sessions"), join(codex, "session_index.jsonl"), join(codex, "state_5.sqlite")),
+      new CodexAdapter(join(codex, "sessions"), join(codex, "session_index.jsonl"), join(codex, "state_5.sqlite"),
+        options.codexPath === undefined ? Bun.which("codex") : options.codexPath),
       new PiAdapter(pi),
     ];
     const dataDirectory = options.dataDirectory ?? userDataDirectory(home, options.environment, options.platform);
@@ -436,10 +553,10 @@ export class SessionCatalog {
   }
 
   async detail(id: string): Promise<Transcript> {
-    const session = (await this.list({ fresh: true })).find((row) => row.id === id);
-    if (!session) throw new CatalogError("not_found", `没有 session 匹配 '${id}'`);
-    const adapter = this.adapters.find(({ tool }) => tool === session.tool)!;
-    return { ...session, messages: adapter.transcript(id) };
+    const session = await this.exact(id);
+    const location = this.locations.get(id);
+    const adapter = location?.adapter ?? this.adapters.find(({ tool }) => tool === session.tool)!;
+    return { ...session, messages: adapter.transcript(id, location?.path) };
   }
 
   async find(keyword: string, limit = 20): Promise<{ total: number; results: (Session & { snippet: string })[] }> {
@@ -511,14 +628,16 @@ export class SessionCatalog {
   async rename(id: string, name: string): Promise<void> {
     if (!name.trim()) throw new CatalogError("invalid", "名称不能为空");
     const session = await this.exact(id);
-    const adapter = this.adapters.find(({ tool }) => tool === session.tool)!;
-    if (adapter.rename(session.id, name.trim()) === "local") {
-      const marks = this.loadMarks(), mark = marks[id] ?? { starred: false, note: "" };
-      mark.starred ??= true;
-      mark.name = name.trim();
-      mark.added ??= added(this.now());
-      marks[id] = mark;
-      this.saveMarks(marks);
+    const location = this.locations.get(id);
+    const adapter = location?.adapter ?? this.adapters.find(({ tool }) => tool === session.tool)!;
+    await adapter.rename(session.id, name.trim(), location?.path);
+    if (session.tool === "codex") {
+      const marks = this.loadMarks(), mark = marks[id];
+      if (mark?.name) {
+        delete mark.name;
+        if (!meaningful(mark)) delete marks[id];
+        this.saveMarks(marks);
+      }
     }
     this.index = undefined;
   }
@@ -531,19 +650,21 @@ export class SessionCatalog {
       for (const path of adapter.discover()) try { files.push({ adapter, path, stat: statSync(path) }); } catch {}
     files.sort((left, right) => right.stat.mtimeMs - left.stat.mtimeMs);
     const live = new Set(files.map(({ adapter, path }) => `${adapter.tool}:${resolve(path)}`));
-    const seen = new Set<string>(), rows: Session[] = [];
+    const seen = new Set<string>(), rows: Session[] = [], locations = new Map<string, Located>();
     for (const file of files) {
       if (file.stat.size < MIN_SIZE) continue;
       const metadata = this.cached(file);
       if (!metadata || seen.has(metadata.id)) continue;
       seen.add(metadata.id);
+      locations.set(metadata.id, file);
       const mark = marks[metadata.id];
       const upstream = metadata.upstream_name || names.get(file.adapter.tool)?.get(metadata.id) || "";
+      const name = file.adapter.tool === "codex" ? upstream || mark?.name || "" : mark?.name || upstream;
       rows.push({
         id: metadata.id,
         tool: file.adapter.tool,
         cwd: metadata.cwd,
-        name: oneLine(mark?.name || upstream, 120),
+        name: oneLine(name, 120),
         first_msg: oneLine(metadata.first_msg, 240),
         mtime: file.stat.mtimeMs / 1000,
         birth: metadata.birth ?? file.stat.mtimeMs / 1000,
@@ -556,17 +677,17 @@ export class SessionCatalog {
       });
     }
     for (const key of this.metadata.keys()) if (!live.has(key)) this.metadata.delete(key);
+    if (!tool) this.locations = locations;
     return rows;
   }
 
   private cached(file: Located): Metadata | null {
     const key = `${file.adapter.tool}:${resolve(file.path)}`;
-    const raw = statSync(file.path, { bigint: true });
-    const signature = `${raw.mtimeNs}:${raw.size}`;
+    const signature = `${file.stat.mtimeMs}:${file.stat.size}`;
     const previous = this.metadata.get(key);
     if (previous?.signature === signature) return previous.value;
     const parsed = file.adapter.parse(file.path);
-    const value = parsed ? { ...parsed, model: tailModel(file.path, file.adapter.tool) } : null;
+    const value = parsed ? { ...parsed, model: parsed.model || tailModel(file.path, file.adapter.tool) } : null;
     this.metadata.set(key, { signature, value });
     return value;
   }
@@ -598,7 +719,7 @@ export class SessionCatalog {
   }
 
   private async exact(id: string): Promise<Session> {
-    const session = (await this.list({ fresh: true })).find((row) => row.id === id);
+    const session = (this.index?.rows ?? await this.list()).find((row) => row.id === id);
     if (!session) throw new CatalogError("not_found", `没有 session 匹配 '${id}'`);
     return session;
   }

@@ -1,6 +1,7 @@
 import { CatalogError, SessionCatalog } from "./catalog.ts";
 import { isStatus, type MarkPatch, type Session, type Transcript } from "./contracts.ts";
 import { formatResumeCommand } from "./resume.ts";
+import { homedir } from "node:os";
 
 type ServerOptions = {
   catalog: SessionCatalog;
@@ -8,6 +9,7 @@ type ServerOptions = {
   nonce?: string;
   html?: string;
   platform?: NodeJS.Platform;
+  home?: string;
 };
 
 class RequestError extends Error {
@@ -42,6 +44,7 @@ export function startServer(options: ServerOptions): Bun.Server<undefined> {
   const nonce = options.nonce ?? crypto.randomUUID();
   const html = options.html ?? "<!doctype html><html lang=\"zh-CN\"><body><div id=\"app\"></div></body></html>";
   const platform = options.platform ?? process.platform;
+  const home = options.home ?? homedir();
   return Bun.serve({
     hostname: "127.0.0.1",
     port: options.port ?? 7867,
@@ -55,7 +58,7 @@ export function startServer(options: ServerOptions): Bun.Server<undefined> {
           return new Response(html, { headers: { "content-type": "text/html; charset=utf-8" } });
         if (request.method === "GET" && url.pathname === "/api/sessions") {
           const sessions = await catalog.list({ fresh: url.searchParams.get("fresh") === "1" });
-          return json({ generatedAt: new Date().toISOString(), sessions: sessions.map((session) => withResumeCommand(session, platform)) });
+          return json({ generatedAt: new Date().toISOString(), home, sessions: sessions.map((session) => withResumeCommand(session, platform)) });
         }
         if (request.method === "GET" && url.pathname === "/api/session") {
           const id = url.searchParams.get("id");

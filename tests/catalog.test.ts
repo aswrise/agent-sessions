@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { chmodSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { appendFileSync, chmodSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, test } from "bun:test";
 import { CatalogError, SessionCatalog } from "../src/catalog.ts";
@@ -60,8 +60,39 @@ describe("SessionCatalog", () => {
     expect(JSON.parse(readFileSync(join(home, ".local/share/session-snapshots/stars.json"), "utf8"))["claude-a"]).toBeUndefined();
   });
 
-  test("keeps each adapter's rename behavior behind the Catalog", async () => {
+  test("prefers Codex thread_name over a legacy local name", async () => {
+    const { catalog } = setup();
+    expect((await catalog.list({ fresh: true })).find(({ id }) => id === "codex-b")?.name).toBe("Codex explicit");
+  });
+
+  test("detail reuses the current index until an explicit refresh", async () => {
     const { home, catalog } = setup();
+    const before = (await catalog.list({ fresh: true })).find(({ id }) => id === "claude-a")!;
+    appendFileSync(join(home, ".claude/projects/-tmp-alpha/claude-a.jsonl"),
+      JSON.stringify({ type: "custom-title", customTitle: "Changed after index", sessionId: "claude-a" }) + "\n");
+
+    expect((await catalog.detail("claude-a")).name).toBe(before.name);
+    expect((await catalog.list({ fresh: true })).find(({ id }) => id === "claude-a")?.name).toBe("Changed after index");
+  });
+
+  test("keeps each adapter's rename behavior behind the Catalog", async () => {
+    const fixture = fixtureHome();
+    cleanups.push(fixture.cleanup);
+    const { home } = fixture;
+    const codexPath = join(home, "fake-codex");
+    writeFileSync(codexPath, `#!/bin/sh
+while IFS= read -r line; do
+  case "$line" in
+    *'"id":1'*) printf '%s\\n' '{"id":1,"result":{}}' ;;
+    *'"id":2'*)
+      printf '%s\\n' "$line" > "$CODEX_HOME/rename-request.json"
+      printf '%s\\n' '{"id":"codex-b","thread_name":"Codex new","updated_at":"2026-07-14T12:00:00Z"}' >> "$CODEX_HOME/session_index.jsonl"
+      printf '%s\\n' '{"id":2,"result":{}}' ;;
+  esac
+done
+`);
+    chmodSync(codexPath, 0o755);
+    const catalog = new SessionCatalog({ home, codexPath });
     const pi = join(home, ".pi/agent/sessions/-tmp-gamma/pi-c.jsonl");
     if (process.platform !== "win32") chmodSync(pi, 0o640);
     await catalog.rename("claude-a", "Claude new");
@@ -72,9 +103,12 @@ describe("SessionCatalog", () => {
       "pi-c": "Pi new", "claude-a": "Claude new", "codex-b": "Codex new",
     });
     expect(readFileSync(join(home, ".claude/projects/-tmp-alpha/claude-a.jsonl"), "utf8")).toContain('"customTitle":"Claude new"');
+    expect(JSON.parse(readFileSync(join(home, ".codex/rename-request.json"), "utf8"))).toMatchObject({
+      method: "thread/name/set", params: { threadId: "codex-b", name: "Codex new" },
+    });
     expect(JSON.parse(readFileSync(pi, "utf8").split("\n")[0]!).name).toBe("Pi new");
     if (process.platform !== "win32") expect(statSync(pi).mode & 0o777).toBe(0o640);
-    expect(JSON.parse(readFileSync(join(home, ".local/share/session-snapshots/stars.json"), "utf8"))["codex-b"].name).toBe("Codex new");
+    expect(JSON.parse(readFileSync(join(home, ".local/share/session-snapshots/stars.json"), "utf8"))["codex-b"].name).toBeUndefined();
   });
 
   test("resolves only unique prefixes", async () => {

@@ -15,7 +15,9 @@ reused or stopped after its GET health response echoes that nonce.
 
 ## Consequences
 
-- `rg` remains the sole external runtime dependency.
+- `rg` remains the sole external dependency for read-only operations; renaming a
+  Codex Session additionally requires the local Codex CLI and uses its
+  `thread/name/set` app-server method instead of editing Codex storage directly.
 - `stars.json` stays backward compatible; Session and SQLite inputs are not
   converted during cutover or rollback.
 - Release CI cross-builds six targets. x64 host artifacts run smoke tests;

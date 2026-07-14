@@ -12,7 +12,8 @@ describe("shared contracts", () => {
   });
 
   test("reject malformed HTTP boundary values", () => {
-    expect(() => parseSessionsEnvelope({ generatedAt: "now", sessions: [{}] })).toThrow("响应无效");
+    expect(() => parseSessionsEnvelope({ generatedAt: "now", home: "/home/me", sessions: [{}] })).toThrow("响应无效");
+    expect(() => parseSessionsEnvelope({ generatedAt: "now", sessions: [] })).toThrow("响应无效");
     expect(() => parseTranscriptView({ messages: [{ role: "system", text: "hidden", timestamp: "" }] })).toThrow("响应无效");
   });
 });

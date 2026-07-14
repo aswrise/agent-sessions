@@ -40,6 +40,7 @@ export interface TranscriptView extends Transcript {
 
 export interface SessionsEnvelope {
   generatedAt: string;
+  home: string;
   sessions: SessionView[];
 }
 
@@ -70,7 +71,8 @@ export function isSessionView(value: unknown): value is SessionView {
 }
 
 export function parseSessionsEnvelope(value: unknown): SessionsEnvelope {
-  if (!isRecord(value) || typeof value.generatedAt !== "string" || !Array.isArray(value.sessions) || !value.sessions.every(isSessionView))
+  if (!isRecord(value) || typeof value.generatedAt !== "string" || typeof value.home !== "string"
+      || !Array.isArray(value.sessions) || !value.sessions.every(isSessionView))
     throw new Error("Session 列表响应无效");
   return value as unknown as SessionsEnvelope;
 }
