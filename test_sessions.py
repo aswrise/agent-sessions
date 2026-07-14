@@ -70,8 +70,11 @@ class SessionsTest(unittest.TestCase):
         self.assertIn("tip.addEventListener('mouseenter',cancelTipHide)", sessions.DASH_TEMPLATE)
         self.assertIn("if(e.target!==tip)hideTip()", sessions.DASH_TEMPLATE)
 
-    def test_dashboard_limits_initial_render_to_100_rows(self):
-        self.assertIn("const CAP=100;", sessions.DASH_TEMPLATE)
+    def test_dashboard_paginates_rows_in_the_browser(self):
+        self.assertIn("const PAGE_SIZE=100;", sessions.DASH_TEMPLATE)
+        self.assertIn('id="pager"', sessions.DASH_TEMPLATE)
+        self.assertIn('aria-label="分页"', sessions.DASH_TEMPLATE)
+        self.assertIn("rows.slice(start,start+PAGE_SIZE)", sessions.DASH_TEMPLATE)
 
 
 if __name__ == "__main__":

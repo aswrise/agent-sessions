@@ -810,6 +810,9 @@ select.st{position:absolute;inset:0;width:100%;height:100%;opacity:0;cursor:poin
 .msg{cursor:pointer;color:var(--fog)}
 .p{color:var(--ash);font-size:12px;font-family:"Berkeley Mono",ui-monospace,Consolas,monospace;letter-spacing:-.013em}
 .foot{color:var(--ash);font-size:12px;padding:16px 8px}
+.pager{display:flex;align-items:center;justify-content:center;gap:8px;padding:0 8px 16px;color:var(--ash)}
+.pager[hidden]{display:none}
+.pager button:disabled{opacity:.4;cursor:default}
 #tip{position:fixed;max-width:min(820px,calc(100vw - 24px));max-height:70vh;overflow:auto;
   display:none;z-index:5;overscroll-behavior:contain;
   background:var(--carbon);border:1px solid var(--graphite);color:var(--mist);
@@ -855,7 +858,12 @@ select.st{position:absolute;inset:0;width:100%;height:100%;opacity:0;cursor:poin
 <th data-k="model">模型</th><th data-k="name">名称</th><th data-k="star_note">备注</th><th data-k="status">状态</th><th data-k="first_msg">首条消息</th>
 <th data-k="cwd">路径</th><th data-k="size_kb" class="num">大小</th><th title="详情">详情</th><th title="归档">⊘</th></tr></thead>
 <tbody id="tb"></tbody></table>
-<div class="foot" id="foot"></div></section><section id="detail" hidden></section></main>
+<div class="foot" id="foot"></div>
+<nav class="pager" id="pager" aria-label="分页" hidden>
+<button class="f act" id="prev" type="button" aria-label="上一页">上一页</button>
+<span class="p" id="pageInfo" aria-live="polite"></span>
+<button class="f act" id="next" type="button" aria-label="下一页">下一页</button>
+</nav></section><section id="detail" hidden></section></main>
 <div id="toast"></div><div id="tip"></div>
 <script type="application/json" id="raw">__DATA__</script>
 <script>
@@ -864,26 +872,28 @@ const HOME='__HOME__';
 const hay=r=>{r._hay=(r.name+' '+r.star_note+' '+r.first_msg).toLowerCase()};
 DATA.forEach((r,i)=>{r._i=i;hay(r);
   r._p=r.cwd.startsWith(HOME)?'~'+r.cwd.slice(HOME.length):r.cwd;});
-const CAP=100;
-let tool='',pathSel='',sortK='',sortAsc=false,timer=null;
+const PAGE_SIZE=100;
+let page=1,tool='',pathSel='',sortK='',sortAsc=false,timer=null;
 const q=document.getElementById('q'),tb=document.getElementById('tb'),
       foot=document.getElementById('foot'),toast=document.getElementById('toast'),
       pathEl=document.getElementById('path'),list=document.getElementById('list'),
-      detail=document.getElementById('detail');
+      detail=document.getElementById('detail'),pager=document.getElementById('pager'),
+      pageInfo=document.getElementById('pageInfo'),prev=document.getElementById('prev'),
+      next=document.getElementById('next');
 {const cnt={};DATA.forEach(r=>cnt[r.cwd]=(cnt[r.cwd]||0)+1);
  Object.entries(cnt).sort((a,b)=>b[1]-a[1]).forEach(([p,n])=>{
    const o=document.createElement('option');o.value=p;
    o.textContent=`${p.startsWith(HOME)?'~'+p.slice(HOME.length):p} (${n})`;
    pathEl.appendChild(o);});}
-pathEl.onchange=()=>{pathSel=pathEl.value;render()};
-document.getElementById('stf').onchange=render;
+pathEl.onchange=()=>{pathSel=pathEl.value;page=1;render()};
+document.getElementById('stf').onchange=()=>{page=1;render()};
 ['uf','ut','cf','ct','smin','smax'].forEach(id=>
-  document.getElementById(id).addEventListener('input',()=>{clearTimeout(timer);timer=setTimeout(render,120)}));
+  document.getElementById(id).addEventListener('input',()=>{page=1;clearTimeout(timer);timer=setTimeout(render,120)}));
 document.getElementById('clear').onclick=()=>{
   ['uf','ut','cf','ct','smin','smax'].forEach(id=>document.getElementById(id).value='');
   q.value='';pathEl.value='';pathSel='';document.getElementById('stf').value='';
   document.querySelectorAll('button.f[data-t]').forEach(x=>x.classList.remove('on'));
-  document.querySelector('button.f[data-t=""]').classList.add('on');tool='';render();};
+  document.querySelector('button.f[data-t=""]').classList.add('on');tool='';page=1;render();};
 const fmt=t=>{const d=new Date(t*1000),z=n=>(n+'').padStart(2,'0');
   return z(d.getMonth()+1)+'-'+z(d.getDate())+' '+z(d.getHours())+':'+z(d.getMinutes())};
 const esc=s=>(s||'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
@@ -928,10 +938,13 @@ function render(){
   if(sortK)rows=[...rows].sort((a,b)=>{const x=a[sortK],y=b[sortK];
     return(x<y?-1:x>y?1:0)*(sortAsc?1:-1)});
   else rows=[...rows].sort((a,b)=>b.mtime-a.mtime);
-  const total=rows.length;rows=rows.slice(0,CAP);
+  const total=rows.length,pages=Math.ceil(total/PAGE_SIZE);
   if(!total){
     tb.innerHTML=`<tr><td colspan="13"><div class="empty">没有匹配的 session，试试更短的关键词或切换筛选</div></td></tr>`;
-    foot.textContent='';syncSortMark();return;}
+    foot.textContent='';pager.hidden=true;syncSortMark();return;}
+  page=Math.min(page,pages);
+  const start=(page-1)*PAGE_SIZE;
+  rows=rows.slice(start,start+PAGE_SIZE);
   tb.innerHTML=rows.map(r=>`<tr class="row${r.starred?' starred':''}${r.archived?' archived':''}" data-i="${r._i}">
    <td class="starcell" title="${r.starred?'取消标记':'标记重要'}">${r.starred?'★':'☆'}</td>
    <td class="dt">${fmt(r.mtime)}</td><td class="dt">${fmt(r.birth)}</td><td class="tool">${r.tool}</td>
@@ -944,10 +957,14 @@ function render(){
    <td class="num sz">${r.size_kb>=1024?(r.size_kb/1024).toFixed(1)+'M':r.size_kb+'K'}</td>
    <td class="detailcell" title="打开详情页">详情</td>
    <td class="archcell" title="${r.archived?'解除归档':'归档（在"已归档"视图可找回）'}">${r.archived?'↩':'⊘'}</td></tr>`).join('');
-  foot.textContent=(total>CAP?`显示前 ${CAP} 行，共 ${total} 个匹配，输入关键词缩小范围`:`${total} 个匹配`)
+  pager.hidden=pages<=1;pageInfo.textContent=`第 ${page} / ${pages} 页`;
+  prev.disabled=page===1;next.disabled=page===pages;
+  foot.textContent=(pages>1?`显示第 ${start+1}-${start+rows.length} 行，共 ${total} 个匹配`:`${total} 个匹配`)
     +'。点击行复制恢复命令，点详情打开详情页，首条消息悬停预览对话';
   syncSortMark();
 }
+prev.onclick=()=>{if(page>1){page--;render();scrollTo(0,0)}};
+next.onclick=()=>{page++;render();scrollTo(0,0)};
 function setListMode(on){
   list.hidden=!on;detail.hidden=on;
   document.querySelector('.bar').hidden=!on;document.querySelector('.bar2').hidden=!on;
@@ -992,7 +1009,7 @@ function syncSortMark(){
     h.classList.toggle('s-asc',h.dataset.k===sortK&&sortAsc);
     h.classList.toggle('s-desc',h.dataset.k===sortK&&!sortAsc);});
 }
-q.addEventListener('input',()=>{clearTimeout(timer);timer=setTimeout(render,120)});
+q.addEventListener('input',()=>{page=1;clearTimeout(timer);timer=setTimeout(render,120)});
 // 悬浮预览：首条消息列预览完整对话，其他截断单元格预览完整文本
 const tip=document.getElementById('tip');
 let tipKey='',tipHideTimer=null;
@@ -1078,11 +1095,11 @@ document.getElementById('theme').onclick=()=>{
   document.documentElement.dataset.theme=t;localStorage.theme=t;};
 document.querySelectorAll('button.f[data-t]').forEach(b=>b.onclick=()=>{
   document.querySelectorAll('button.f[data-t]').forEach(x=>x.classList.remove('on'));
-  b.classList.add('on');tool=b.dataset.t;render();});
+  b.classList.add('on');tool=b.dataset.t;page=1;render();});
 let resizing=false;
 document.querySelectorAll('th[data-k]').forEach(h=>h.onclick=()=>{
   if(resizing)return;
-  const k=h.dataset.k;sortAsc=(sortK===k)?!sortAsc:false;sortK=k;render();});
+  const k=h.dataset.k;sortAsc=(sortK===k)?!sortAsc:false;sortK=k;page=1;render();});
 // 列宽拖拽：改 colgroup 宽度，存 localStorage
 const cols=[...document.querySelectorAll('colgroup col')];
 try{JSON.parse(localStorage.colw5||'[]').forEach((w,i)=>{if(w&&cols[i])cols[i].style.width=w+'px'})}catch(e){}
