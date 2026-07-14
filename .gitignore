@@ -1,2 +1,6 @@
+node_modules/
 __pycache__/
-.superpowers/
+dist/
+build/
+src/generated-html.ts
+*.tmp
