@@ -256,35 +256,59 @@ def tail_model(path, tool):
     return ""
 
 
+_file_cache = {}
+
+
+def cached_file_metadata(tool, path, stat):
+    """解析发生变化的 session 文件；名称和标记由 build_index 每次重新合并。"""
+    key = tool, path
+    signature = stat.st_mtime_ns, stat.st_size
+    cached = _file_cache.get(key)
+    if cached and cached[0] == signature:
+        return cached[1]
+    parsed = PARSERS[tool](path)
+    metadata = None
+    if parsed:
+        metadata = {
+            "id": parsed[0], "cwd": parsed[1],
+            "first_msg": one_line(parsed[2], 240), "birth": parsed[3],
+            "upstream_name": parsed[4] if len(parsed) > 4 else "",
+            "model": tail_model(path, tool),
+        }
+    _file_cache[key] = signature, metadata
+    return metadata
+
+
 def build_index(only=None, limit=None):
     """扫描所有 session，按 mtime 降序，同 id 去重保留最新"""
     names = {"claude": load_claude_names(), "codex": load_codex_names()}
     stars = load_stars()
-    files = sorted(iter_files(only), key=lambda t: t[1].stat().st_mtime, reverse=True)
+    files = [(tool, path, path.stat()) for tool, path in iter_files(only)]
+    files.sort(key=lambda item: item[2].st_mtime, reverse=True)
+    live = {(tool, path) for tool, path, _ in files}
     seen, rows = set(), []
-    for tool, f in files:
-        st = f.stat()
+    for tool, f, st in files:
         if st.st_size < MIN_SIZE:
             continue
-        parsed = PARSERS[tool](f)
-        if not parsed:
+        metadata = cached_file_metadata(tool, f, st)
+        if not metadata:
             continue
-        sid, cwd, first_msg, birth = parsed[:4]
+        sid = metadata["id"]
         if sid in seen:
             continue
         seen.add(sid)
         star = stars.get(sid)
-        upstream_name = (parsed[4] if len(parsed) > 4 and parsed[4]
-                         else names.get(tool, {}).get(sid, ""))
+        upstream_name = (metadata["upstream_name"]
+                         or names.get(tool, {}).get(sid, ""))
         name = (star or {}).get("name") or upstream_name
         rows.append({
-            "id": sid, "tool": tool, "cwd": cwd,
+            "id": sid, "tool": tool, "cwd": metadata["cwd"],
             "name": one_line(name, 120),
-            "first_msg": one_line(first_msg, 240),
+            "first_msg": metadata["first_msg"],
             "mtime": st.st_mtime,
-            "birth": birth or st.st_mtime,
+            "birth": metadata["birth"] or st.st_mtime,
             "size_kb": st.st_size // 1024,
-            "model": tail_model(f, tool),
+            "model": metadata["model"],
             "starred": is_starred(star),
             "star_note": (star or {}).get("note", ""),
             "archived": bool((star or {}).get("archived")),
@@ -292,6 +316,10 @@ def build_index(only=None, limit=None):
         })
         if limit and len(rows) >= limit:
             break
+    scanned_tools = set(PARSERS) if only is None else {only}
+    for key in list(_file_cache):
+        if key[0] in scanned_tools and key not in live:
+            del _file_cache[key]
     return rows
 
 
@@ -836,7 +864,7 @@ const HOME='__HOME__';
 const hay=r=>{r._hay=(r.name+' '+r.star_note+' '+r.first_msg).toLowerCase()};
 DATA.forEach((r,i)=>{r._i=i;hay(r);
   r._p=r.cwd.startsWith(HOME)?'~'+r.cwd.slice(HOME.length):r.cwd;});
-const CAP=300;
+const CAP=100;
 let tool='',pathSel='',sortK='',sortAsc=false,timer=null;
 const q=document.getElementById('q'),tb=document.getElementById('tb'),
       foot=document.getElementById('foot'),toast=document.getElementById('toast'),

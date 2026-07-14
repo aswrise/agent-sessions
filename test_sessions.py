@@ -5,6 +5,7 @@ import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 LOADER = SourceFileLoader("sessions_module", str(Path(__file__).with_name("sessions")))
@@ -14,6 +15,38 @@ LOADER.exec_module(sessions)
 
 
 class SessionsTest(unittest.TestCase):
+    def test_build_index_reuses_file_metadata_but_refreshes_name(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "session.jsonl"
+            path.write_text("{}\n" + " " * sessions.MIN_SIZE)
+            names = {"old-session": "旧名称"}
+            calls = {"parse": 0, "tail": 0}
+
+            def parse(_path):
+                calls["parse"] += 1
+                return "old-session", "/tmp/project", "首条消息", 1
+
+            def tail(_path, _tool):
+                calls["tail"] += 1
+                return "model"
+
+            sessions._file_cache.clear()
+            with (mock.patch.object(sessions, "iter_files",
+                                    side_effect=lambda only=None: iter([("claude", path)])),
+                  mock.patch.object(sessions, "load_claude_names", side_effect=lambda: names.copy()),
+                  mock.patch.object(sessions, "load_codex_names", return_value={}),
+                  mock.patch.object(sessions, "load_stars", return_value={}),
+                  mock.patch.dict(sessions.PARSERS, {"claude": parse}),
+                  mock.patch.object(sessions, "tail_model", side_effect=tail)):
+                self.assertEqual(sessions.build_index()[0]["name"], "旧名称")
+                names["old-session"] = "新名称"
+                self.assertEqual(sessions.build_index()[0]["name"], "新名称")
+                self.assertEqual(calls, {"parse": 1, "tail": 1})
+
+                path.write_text(path.read_text() + "\n")
+                sessions.build_index()
+                self.assertEqual(calls, {"parse": 2, "tail": 2})
+
     def test_codex_names(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp = Path(tmp)
@@ -36,6 +69,9 @@ class SessionsTest(unittest.TestCase):
         self.assertIn("overscroll-behavior:contain", sessions.DASH_TEMPLATE)
         self.assertIn("tip.addEventListener('mouseenter',cancelTipHide)", sessions.DASH_TEMPLATE)
         self.assertIn("if(e.target!==tip)hideTip()", sessions.DASH_TEMPLATE)
+
+    def test_dashboard_limits_initial_render_to_100_rows(self):
+        self.assertIn("const CAP=100;", sessions.DASH_TEMPLATE)
 
 
 if __name__ == "__main__":
