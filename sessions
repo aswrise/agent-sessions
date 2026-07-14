@@ -899,8 +899,16 @@ col.c-stat{width:116px}col.c-model{width:120px}
 #tip.show{visibility:visible;opacity:1;transform:scale(1);pointer-events:auto}
 #tip.instant{transition-duration:0ms}
 .tiptitle{font-weight:600;color:var(--paper);margin-bottom:8px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.tipmsg{border-top:1px solid var(--obsidian);padding-top:8px;margin-top:8px;white-space:pre-wrap;word-break:break-word}
-.tiprole{font-size:9px;font-weight:650;letter-spacing:.07em;text-transform:uppercase;color:var(--ash);margin-bottom:3px}
+.tipmsg{padding:9px 11px;margin-top:8px;border:1px solid var(--obsidian);border-radius:10px 10px 10px 3px;
+  background:var(--carbon);white-space:pre-wrap;word-break:break-word}
+.tipmsg.user{margin-left:36px;border-radius:10px 10px 3px 10px;
+  border-color:color-mix(in srgb,var(--lime) 22%,var(--obsidian));
+  background:color-mix(in srgb,var(--lime) 9%,var(--carbon))}
+.tipmsg.assistant{margin-right:36px}
+.tiprole{display:inline-flex;align-items:center;padding:2px 6px;border-radius:9999px;font-size:9px;font-weight:700;
+  line-height:1;letter-spacing:.07em;text-transform:uppercase;color:var(--fog);background:var(--chip);margin-bottom:6px}
+.tipmsg.user .tiprole{color:var(--lime);background:color-mix(in srgb,var(--lime) 12%,transparent)}
+.tiptext{color:var(--mist);line-height:1.6}
 #toast{position:fixed;bottom:24px;left:50%;transform:translate(-50%,8px);opacity:0;
   background:var(--bone);color:var(--void);padding:8px 14px;border-radius:9px;font-size:12px;font-weight:600;
   box-shadow:0 12px 36px rgba(0,0,0,.3);pointer-events:none;
@@ -1170,7 +1178,7 @@ async function loadDetail(r){
   return r._detailPromise;
 }
 const previewHtml=d=>`<div class="tiptitle">${esc(d.name||d.first_msg||d.id)}</div>`
-  +(d.messages.length?d.messages.map(m=>`<div class="tipmsg"><div class="tiprole">${esc(m.role)}</div>${esc(m.text)}</div>`).join('')
+  +(d.messages.length?d.messages.map(m=>`<div class="tipmsg ${m.role}"><div class="tiprole">${esc(m.role)}</div><div class="tiptext">${esc(m.text)}</div></div>`).join('')
     :'<div class="tipmsg">没有可展示的 user / assistant 文本消息</div>');
 function syncSortMark(){
   document.querySelectorAll('th[data-k]').forEach(h=>{
@@ -1186,10 +1194,10 @@ function cancelTipShow(){clearTimeout(tipShowTimer);tipShowTimer=null}
 function hideTip(){cancelTipHide();cancelTipShow();tipKey='';tipVisible=false;tip.classList.remove('show','instant')}
 function scheduleTipHide(){cancelTipHide();tipHideTimer=setTimeout(hideTip,100)}
 function placeTip(td){
-  const r=td.getBoundingClientRect(),w=Math.min(820,innerWidth-24);
+  const overlap=4,r=td.getBoundingClientRect(),w=Math.min(820,innerWidth-24);
   tip.style.left=Math.max(12,Math.min(r.left,innerWidth-w-12))+'px';
-  let top=r.bottom+6,above=false;
-  if(top+tip.offsetHeight>innerHeight-8){top=Math.max(8,r.top-tip.offsetHeight-6);above=true}
+  let top=r.bottom-overlap,above=false;
+  if(top+tip.offsetHeight>innerHeight-8){top=Math.max(8,r.top-tip.offsetHeight+overlap);above=true}
   tip.style.transformOrigin=above?'bottom left':'top left';
   tip.style.top=top+'px';
 }

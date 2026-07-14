@@ -90,6 +90,9 @@ class SessionsTest(unittest.TestCase):
         self.assertIn("overscroll-behavior:contain", sessions.DASH_TEMPLATE)
         self.assertIn("tip.addEventListener('mouseenter',cancelTipHide)", sessions.DASH_TEMPLATE)
         self.assertIn("if(e.target!==tip)hideTip()", sessions.DASH_TEMPLATE)
+        self.assertIn("const overlap=4,r=td.getBoundingClientRect()", sessions.DASH_TEMPLATE)
+        self.assertIn("let top=r.bottom-overlap", sessions.DASH_TEMPLATE)
+        self.assertIn("r.top-tip.offsetHeight+overlap", sessions.DASH_TEMPLATE)
 
     def test_dashboard_paginates_rows_in_the_browser(self):
         self.assertIn("const PAGE_SIZE=100;", sessions.DASH_TEMPLATE)
@@ -106,6 +109,9 @@ class SessionsTest(unittest.TestCase):
         self.assertIn("prefers-reduced-transparency:reduce", sessions.DASH_TEMPLATE)
         self.assertIn('id="menu" class="menu" role="listbox"', sessions.DASH_TEMPLATE)
         self.assertIn('data-k="starred" class="action-head"', sessions.DASH_TEMPLATE)
+        self.assertIn('class="tipmsg ${m.role}"', sessions.DASH_TEMPLATE)
+        self.assertIn('.tipmsg.user{', sessions.DASH_TEMPLATE)
+        self.assertIn('.tipmsg.assistant{', sessions.DASH_TEMPLATE)
         self.assertNotIn('<select id="path"', sessions.DASH_TEMPLATE)
 
 
