@@ -1,0 +1,62 @@
+<h2>Session detail entry</h2>
+<p class="subtitle">Pick the click behavior for the dashboard table. A is my recommendation: it matches your wording and keeps the feature tiny.</p>
+
+<div class="cards">
+  <div class="card" data-choice="a-row-opens-detail" onclick="toggleSelect(this)">
+    <div class="card-image">
+      <div class="mockup">
+        <div class="mockup-header">A. Row click opens detail</div>
+        <div class="mockup-body">
+          <div class="mock-nav">Sessions / Detail</div>
+          <div style="display:grid;grid-template-columns:1fr;gap:8px;margin-top:10px">
+            <div class="placeholder">table row: name, tool, path, first message</div>
+            <div class="placeholder" style="height:80px">detail page: user / assistant messages</div>
+            <button class="mock-button">Copy resume command</button>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="card-body">
+      <h3>A. Row click opens detail</h3>
+      <p>Clicking any session row navigates to its transcript. Copy resume moves to an explicit button/menu.</p>
+    </div>
+  </div>
+
+  <div class="card" data-choice="b-name-opens-detail" onclick="toggleSelect(this)">
+    <div class="card-image">
+      <div class="mockup">
+        <div class="mockup-header">B. Name/message opens detail</div>
+        <div class="mockup-body">
+          <div class="mock-nav">Sessions table</div>
+          <div style="display:grid;grid-template-columns:1fr 80px;gap:8px;margin-top:10px">
+            <div class="placeholder">click name/message to detail</div>
+            <button class="mock-button">Copy</button>
+          </div>
+          <div class="placeholder" style="height:80px;margin-top:8px">detail page</div>
+        </div>
+      </div>
+    </div>
+    <div class="card-body">
+      <h3>B. Name/message opens detail</h3>
+      <p>Preserves current row-click-to-copy habit, but detail entry is less obvious.</p>
+    </div>
+  </div>
+
+  <div class="card" data-choice="c-side-panel" onclick="toggleSelect(this)">
+    <div class="card-image">
+      <div class="mockup">
+        <div class="mockup-header">C. Side panel</div>
+        <div class="mockup-body">
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
+            <div class="placeholder" style="height:120px">session table</div>
+            <div class="placeholder" style="height:120px">message panel</div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="card-body">
+      <h3>C. Side panel</h3>
+      <p>Good for quick scanning, but more code and tighter responsive layout problems.</p>
+    </div>
+  </div>
+</div>
