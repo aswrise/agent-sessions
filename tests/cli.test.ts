@@ -8,7 +8,7 @@ afterEach(() => cleanups.splice(0).forEach((cleanup) => cleanup()));
 
 async function command(args: string[], path = process.env.PATH ?? "") {
   const fixture = fixtureHome(); cleanups.push(fixture.cleanup);
-  const result = Bun.spawnSync([process.execPath, new URL("../src/cli.ts", import.meta.url).pathname, ...args], {
+  const result = Bun.spawnSync([process.execPath, new URL("../sessions", import.meta.url).pathname, ...args], {
     env: { ...process.env, HOME: fixture.home, USERPROFILE: fixture.home, PATH: path, NO_COLOR: "1" },
   });
   return { fixture, exitCode: result.exitCode, stdout: result.stdout.toString(), stderr: result.stderr.toString() };
@@ -38,7 +38,7 @@ describe("CLI process seam", () => {
     const fixture = fixtureHome(); cleanups.push(fixture.cleanup);
     const snapshot = join(fixture.home, ".local/share/session-snapshots/last-active.txt");
     mkdirSync(join(fixture.home, ".local/share/session-snapshots"), { recursive: true }); writeFileSync(snapshot, "fixture snapshot");
-    const result = Bun.spawnSync([process.execPath, new URL("../src/cli.ts", import.meta.url).pathname], { env: { ...process.env, HOME: fixture.home } });
+    const result = Bun.spawnSync([process.execPath, new URL("../sessions", import.meta.url).pathname], { env: { ...process.env, HOME: fixture.home } });
     expect(result.stdout.toString().trim()).toBe("fixture snapshot");
   });
 });
