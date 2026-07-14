@@ -465,6 +465,20 @@ export class SessionCatalog {
     return matches[0]!;
   }
 
+  async listStars(): Promise<{ id: string; added: string; note: string }[]> {
+    return Object.entries(this.loadMarks())
+      .filter(([, mark]) => isStarred(mark))
+      .map(([id, mark]) => ({ id, added: mark.added ?? "", note: mark.note ?? "" }))
+      .sort((left, right) => right.added.localeCompare(left.added));
+  }
+
+  async unstar(prefix: string): Promise<string> {
+    const matches = (await this.listStars()).filter(({ id }) => id.startsWith(prefix));
+    if (matches.length !== 1) throw new CatalogError(matches.length ? "ambiguous" : "not_found", `'${prefix}' 匹配到 ${matches.length} 个已标记 session`);
+    await this.updateMark(matches[0]!.id, { star: false });
+    return matches[0]!.id;
+  }
+
   async updateMark(id: string, patch: MarkPatch): Promise<void> {
     await this.exact(id);
     const marks = this.loadMarks(), mark: Mark = marks[id] ?? { starred: false, note: "" };

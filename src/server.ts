@@ -50,7 +50,7 @@ export function startServer(options: ServerOptions): Bun.Server<undefined> {
       if (request.method !== "GET" && request.method !== "POST") return json({ error: "Not found" }, 404);
       try {
         if (request.method === "GET" && url.pathname === "/health")
-          return url.searchParams.get("nonce") === nonce ? json({ ok: true }) : json({ error: "Not found" }, 404);
+          return url.searchParams.get("nonce") === nonce ? json({ ok: true, nonce }) : json({ error: "Not found" }, 404);
         if (request.method === "GET" && (url.pathname === "/" || url.pathname === "/index.html"))
           return new Response(html, { headers: { "content-type": "text/html; charset=utf-8" } });
         if (request.method === "GET" && url.pathname === "/api/sessions") {
