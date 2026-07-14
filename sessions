@@ -142,7 +142,9 @@ def parse_codex(path):
     try:
         with open(path, errors="replace") as fh:
             meta = json.loads(fh.readline())
-            payload = meta.get("payload", {})
+            if not isinstance(meta, dict) or not isinstance(meta.get("payload"), dict):
+                return None
+            payload = meta["payload"]
             sid, cwd = payload.get("id"), payload.get("cwd") or "?"
             if not sid:
                 return None
@@ -209,6 +211,17 @@ def parse_pi(path):
 PARSERS = {"claude": parse_claude, "codex": parse_codex, "pi": parse_pi}
 
 
+def is_codex_subagent(path):
+    """子 agent rollout 只需读首条 session_meta 即可识别。"""
+    try:
+        with open(path, errors="replace") as fh:
+            meta = json.loads(fh.readline())
+        payload = meta.get("payload") if isinstance(meta, dict) else None
+        return isinstance(payload, dict) and payload.get("thread_source") == "subagent"
+    except (OSError, json.JSONDecodeError):
+        return False
+
+
 def iter_files(only=None):
     if only in (None, "claude"):
         for f in CLAUDE_DIR.glob("*/*.jsonl"):
@@ -216,7 +229,8 @@ def iter_files(only=None):
                 yield "claude", f
     if only in (None, "codex"):
         for f in CODEX_DIR.glob("*/*/*/rollout-*.jsonl"):
-            yield "codex", f
+            if not is_codex_subagent(f):
+                yield "codex", f
     if only in (None, "pi"):
         for f in PI_DIR.glob("*/*.jsonl"):
             yield "pi", f

@@ -65,6 +65,27 @@ class SessionsTest(unittest.TestCase):
             self.assertEqual(sessions.load_codex_names(), {
                 "explicit": "手动名称", "automatic": "自动名称"})
 
+    def test_iter_files_skips_codex_subagents(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "2026" / "07" / "14"
+            root.mkdir(parents=True)
+            normal = root / "rollout-normal.jsonl"
+            child = root / "rollout-child.jsonl"
+            normal.write_text(json.dumps({"payload": {"id": "normal"}}) + "\n")
+            child.write_text(json.dumps({"payload": {
+                "id": "child", "thread_source": "subagent"}}) + "\n")
+            with mock.patch.object(sessions, "CODEX_DIR", Path(tmp)):
+                self.assertEqual(list(sessions.iter_files("codex")),
+                                 [("codex", normal)])
+
+    def test_parse_codex_ignores_malformed_session_metadata(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "rollout.jsonl"
+            for raw in ("[]\n", '{"payload": null}\n', '{"payload": []}\n'):
+                path.write_text(raw)
+                self.assertIsNone(sessions.parse_codex(path))
+                self.assertFalse(sessions.is_codex_subagent(path))
+
     def test_preview_keeps_pointer_and_scroll(self):
         self.assertIn("overscroll-behavior:contain", sessions.DASH_TEMPLATE)
         self.assertIn("tip.addEventListener('mouseenter',cancelTipHide)", sessions.DASH_TEMPLATE)
