@@ -14,6 +14,7 @@ import {
 import type { Stats } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 import { isStatus, type MarkPatch, type Session, type SessionStatus, type Tool, type Transcript, type TranscriptMessage } from "./contracts.ts";
+import { userDataDirectory } from "./paths.ts";
 
 const MIN_SIZE = 2048;
 const MAX_HEAD_LINES = 400;
@@ -41,6 +42,9 @@ type Marks = Record<string, Mark>;
 
 export interface CatalogOptions {
   home?: string;
+  dataDirectory?: string;
+  environment?: NodeJS.ProcessEnv;
+  platform?: NodeJS.Platform;
   rgPath?: string | null;
   now?: () => Date;
 }
@@ -415,7 +419,8 @@ export class SessionCatalog {
       new CodexAdapter(join(codex, "sessions"), join(codex, "session_index.jsonl"), join(codex, "state_5.sqlite")),
       new PiAdapter(pi),
     ];
-    this.marksFile = join(home, ".local", "share", "session-snapshots", "stars.json");
+    const dataDirectory = options.dataDirectory ?? userDataDirectory(home, options.environment, options.platform);
+    this.marksFile = join(dataDirectory, "stars.json");
     this.now = options.now ?? (() => new Date());
     this.rgPath = options.rgPath;
   }

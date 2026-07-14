@@ -1,75 +1,90 @@
 # agent-sessions
 
-跨路径检索 Claude Code / Codex / pi 的历史会话，单文件 Python 脚本，零第三方依赖（仅需 [ripgrep](https://github.com/BurntSushi/ripgrep)）。
+跨项目目录检索 Claude Code、Codex 和 pi 的 Session 历史。CLI 与 localhost
+dashboard 由一个 Bun 可执行文件提供，Vue 页面已内嵌；唯一外部运行时依赖是
+[ripgrep](https://github.com/BurntSushi/ripgrep)。
 
 [English](README.md)
 
-解决的痛点：CLI agent 的 resume 只检索当前目录的会话，换个目录打开就"找不到之前的对话"。实际上对话全量存在本地磁盘，缺的只是一个跨路径的检索入口。
-
 ## 安装
 
+从 GitHub Releases 下载对应系统和架构的文件，改名为 `sessions`（Windows 为
+`sessions.exe`）并放入 `PATH`。发布目标覆盖 Linux、macOS、Windows 的 x64
+与 ARM64。
+
+从源码构建需安装 Bun 1.3.14 和 `rg`：
+
 ```bash
-cp sessions ~/.local/bin/ && chmod +x ~/.local/bin/sessions
-# 依赖：python3（仅标准库）、ripgrep（rg）
+bun install --frozen-lockfile
+bun run compile
+install -m 755 build/sessions ~/.local/bin/sessions
 ```
 
 ## 用法
 
 ```bash
-sessions list -n 30              # 最近会话，跨全路径、三工具混排
-sessions list claude             # 只看某个工具（claude / codex / pi）
-sessions find "关键词"            # rg 全文搜索全部历史
-sessions star 48e17d64 备注       # 按 id 前缀标记重要会话
-sessions unstar 48e17d64         # 取消标记
-sessions stars                   # 列出已标记
-sessions dash                    # 打开 dashboard（localhost 常驻服务）
-sessions dash --stop             # 停止 dashboard 服务
+sessions list -n 30              # 跨工具、跨路径列出最近 Session
+sessions list claude             # 只看 claude / codex / pi
+sessions find "关键词"           # 通过 rg 全文搜索
+sessions star 48e17d64 备注       # 按 id 前缀标记
+sessions unstar 48e17d64
+sessions stars
+sessions dash                    # 启动/打开 localhost 常驻 dashboard
+sessions dash --stop
 ```
 
-每条结果带可直接复制的恢复命令（`claude -r` / `codex resume` / `pi --session`），会先 `cd` 到原目录再恢复。
+恢复命令保留原工作目录和最后使用的模型。POSIX 系统输出安全转义的 shell
+命令；原生 Windows 输出安全转义的 PowerShell 命令。
 
 ## Dashboard
 
-### 会话总览
+### Session 总览
 
-![会话面板总览](docs/dashboard.png)
+![Session dashboard 总览](docs/dashboard.png)
 
-### 筛选与状态
+### 筛选和状态
 
-![展开的筛选面板与状态菜单](docs/dashboard-filters.png)
+![展开后的筛选和状态](docs/dashboard-filters.png)
 
-### 对话详情
+### Transcript 详情
 
-![深色模式下的对话详情](docs/dashboard-detail.png)
+![Transcript 详情](docs/dashboard-detail.png)
 
-`sessions dash` 在 `localhost:7867` 起一个常驻微服务（python stdlib `http.server`）：
+Dashboard 仅绑定 `127.0.0.1:7867`，保留以下行为：
 
-- 名称列：Claude 的 `/rename` 手动命名 > AI 自动标题；Codex 的显式 `thread_name` > 独立自动标题；pi 的 `--name`
-- 页内点 ★ 标记，备注支持原地编辑；标记和备注 POST 回写 `stars.json`，与命令行共用数据
-- 名称支持原地编辑：Claude 往 jsonl 追加 `custom-title` 记录（与 `/rename` 同机制，Claude Code 本体可见）；pi 改写首行 `name`；Codex 仅写本工具本地 override，不改内部索引
-- 垃圾 session 可归档（默认所有视图不再出现，“已归档”视图可查看并解除归档）
-- 每个 session 可设状态（todo / in progress / review / blocked / done / archived，默认无），支持按状态筛选
-- 筛选可叠加：关键词、工具、路径（带计数下拉）；更新/创建时间、大小和状态收进按需展开的高级筛选
-- 模型列：从会话文件尾部提取最后使用的模型，恢复命令自动带上（`claude -r <id> --model <m>` / `codex resume <id> -m <m>` / `pi --session <id> --model <m>`）
-- 任意列内容截断时悬停即浮出完整预览，首条消息悬停会预览 user/assistant 可读对话；点击行复制恢复命令；点详情按钮打开对话详情页；列宽可拖拽（localStorage 记忆）；深浅主题切换
-- 数据 30 秒缓存，"刷新"按钮强制重扫
+- 全部/工具/已标记/已归档视图，关键词、路径、日期、大小、状态筛选，可排序
+  列、每页 100 行和强制刷新；
+- 点击行复制恢复命令，query-string Transcript 详情与前进/后退，悬浮预览，
+  主题和列宽本地记忆；
+- 页内标记、备注、名称、状态、归档操作，失败时保留原值并可重试；
+- Claude 追加 `/rename` 记录、pi 改首行名称、Codex 仅保存本工具 override；
+- 减少动态、减少透明度、高对比度和键盘操作适配。
 
-界面采用克制的自适应工作台设计：系统字体、半透明浮动控件、即时按压反馈、渐进式信息披露，并适配减少动态、减少透明度和高对比度偏好。
+生命周期状态包含经校验的 pid、端口和随机 nonce。启动/停止只信任回显该
+nonce 的普通 GET 健康响应，不会接管占用端口的无关进程。
 
-## 数据源
+## 数据与隐私
 
-| 工具 | 路径 | 说明 |
-|---|---|---|
-| Claude Code | `~/.claude/projects/<路径slug>/*.jsonl` | 名称取 jsonl 内 `custom-title` / `ai-title` 记录 |
-| Codex | `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl` | `session_meta` 提供元数据，名称来自 `session_index.jsonl` 与 `state_5.sqlite` |
-| pi | `~/.pi/agent/sessions/<路径slug>/*.jsonl` | 首行 `type=session` |
+| 工具 | Session 来源 |
+| --- | --- |
+| Claude Code | `~/.claude/projects/<路径-slug>/*.jsonl` |
+| Codex | `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl` 及只读索引 |
+| pi | `~/.pi/agent/sessions/<路径-slug>/*.jsonl` |
 
-扫描只读；唯一写入会话文件的操作是改名（Claude 追加 jsonl 记录 / pi 改写首行）。标记与备注数据写在 `~/.local/share/session-snapshots/stars.json`。
+扫描、搜索、列表、详情和刷新均只读；只有明确改名会写 Session 文件。
+`stars.json` 保持兼容：POSIX 位于 `~/.local/share/session-snapshots/`，原生
+Windows 位于平台本地应用数据目录。
 
-注意：Claude Code 默认 30 天清理会话（`cleanupPeriodDays`），想长期保留需在 `~/.claude/settings.json` 调大。
+## 开发
 
-## 跨平台
+```bash
+bun run test                    # Bun seam 测试 + Vue DOM 测试
+bun run typecheck               # vue-tsc --noEmit
+bun run build                   # Vite 构建并内联资源
+bun run compile                 # 构建当前主机可执行文件
+bun scripts/real-data-check.ts  # 只读形状/数量检查，不输出 Transcript 文本
+```
 
-Linux / WSL / macOS。打开浏览器自动探测（WSL 用 `explorer.exe`，macOS 用 `open`，其余 `xdg-open`）。
-
-已知坑：`~/.claude/.gitignore` 会让 rg 静默跳过整个子树，脚本内所有 rg 调用都带了 `--no-ignore --hidden`。
+Tag 构建生成六个目标及 SHA-256，运行宿主 x64 烟测，并附带明确的验证状态。
+ARM64 交叉构建在原生或等效 runner 验证前保持 `executed: false`，不会被误报
+为已执行。

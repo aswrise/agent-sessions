@@ -6,7 +6,7 @@
   "packageManager": "bun@1.3.14",
   "scripts": {
     "test": "bun run test:backend && bun run test:ui",
-    "test:backend": "bun test tests/contracts.test.ts tests/catalog.test.ts tests/http.test.ts tests/cli.test.ts tests/lifecycle.test.ts",
+    "test:backend": "bun test tests/contracts.test.ts tests/paths.test.ts tests/catalog.test.ts tests/http.test.ts tests/cli.test.ts tests/lifecycle.test.ts",
     "test:ui": "vitest run",
     "typecheck": "vue-tsc --noEmit",
     "build:ui": "vite build",

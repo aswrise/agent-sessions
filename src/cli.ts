@@ -5,6 +5,7 @@ import { CatalogError, SessionCatalog } from "./catalog.ts";
 import { isTool, type Session, type Tool } from "./contracts.ts";
 import { formatResumeCommand } from "./resume.ts";
 import { serveResident, startDashboard, stopDashboard } from "./lifecycle.ts";
+import { userDataDirectory } from "./paths.ts";
 
 const VERSION = "1.0.0";
 const HELP = `Agent Sessions
@@ -55,7 +56,7 @@ export async function main(argv = process.argv.slice(2), options: { html?: strin
   try {
     const args = [...argv];
     if (!args.length) {
-      try { console.log(readFileSync(join(home(), ".local", "share", "session-snapshots", "last-active.txt"), "utf8")); }
+      try { console.log(readFileSync(join(userDataDirectory(home()), "last-active.txt"), "utf8")); }
       catch { console.log("还没有快照（session-tracker 每 5 分钟生成）"); }
       return 0;
     }
