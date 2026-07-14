@@ -65,6 +65,7 @@ interface Adapter {
   readonly root: string;
   discover(): string[];
   parse(path: string): ParsedMetadata | null;
+  metadataSignature(path: string): string;
   loadNames(): Map<string, string>;
   transcript(id: string, path?: string): TranscriptMessage[];
   rename(id: string, name: string, path?: string): Promise<void>;
@@ -85,6 +86,8 @@ function parseRecord(line: string): Json | undefined {
 }
 
 const stringValue = (value: unknown): string => typeof value === "string" ? value : "";
+const numberValue = (value: unknown): number | undefined =>
+  typeof value === "number" && Number.isFinite(value) ? value : undefined;
 
 function isoToEpoch(value: unknown): number | undefined {
   if (typeof value !== "string") return;
@@ -259,6 +262,8 @@ abstract class JsonlAdapter implements Adapter {
   abstract loadNames(): Map<string, string>;
   abstract rename(id: string, name: string): Promise<void>;
 
+  metadataSignature(_path: string): string { return ""; }
+
   allowed(path: string): boolean {
     const child = relative(resolve(this.root), resolve(path));
     return child !== "" && child !== ".." && !child.startsWith(`..${sep}`) && !isAbsolute(child);
@@ -291,6 +296,10 @@ abstract class JsonlAdapter implements Adapter {
 
 class ClaudeAdapter extends JsonlAdapter {
   readonly tool = "claude" as const;
+  private titleFiles = new Map<string, { signature: string; ai: Map<string, string>; custom: Map<string, string> }>();
+  private titlesLoaded = false;
+
+  constructor(root: string, private rgPath: string | null) { super(root); }
 
   discover(): string[] {
     if (!existsSync(this.root)) return [];
@@ -317,24 +326,20 @@ class ClaudeAdapter extends JsonlAdapter {
   }
 
   loadNames(): Map<string, string> {
+    const current = new Map<string, string>();
+    for (const path of this.discover()) try {
+      const stat = statSync(path);
+      current.set(resolve(path), `${stat.ctimeMs}:${stat.size}`);
+    } catch {}
+    const changed = [...current].filter(([path, signature]) => this.titleFiles.get(path)?.signature !== signature);
+    if (!this.titlesLoaded) this.titlesLoaded = this.scanTitles([...current], true);
+    else if (changed.length) this.scanTitles(changed, false);
+    for (const path of this.titleFiles.keys()) if (!current.has(path)) this.titleFiles.delete(path);
+
     const ai = new Map<string, string>(), custom = new Map<string, string>();
-    const titleLines: string[] = [];
-    const rg = Bun.which("rg");
-    if (rg && existsSync(this.root)) {
-      const result = Bun.spawnSync([rg, "--json", "-N", "--no-messages", "--no-ignore", "--hidden",
-        String.raw`"type"\s*:\s*"(?:ai|custom)-title"`, this.root]);
-      if (result.exitCode <= 1) for (const line of result.stdout.toString().split(/\r?\n/)) {
-        const event = parseRecord(line), data = event && isRecord(event.data) ? event.data : undefined;
-        const lines = data && isRecord(data.lines) ? data.lines : undefined;
-        if (event?.type === "match" && lines) titleLines.push(stringValue(lines.text).trimEnd());
-      }
-    } else for (const path of this.discover()) titleLines.push(...readLines(path));
-    for (const line of titleLines) {
-      const record = parseRecord(line);
-      const id = record && stringValue(record.sessionId);
-      if (!record || !id) continue;
-      if (record.type === "custom-title" && record.customTitle) custom.set(id, stringValue(record.customTitle));
-      else if (record.type === "ai-title" && record.aiTitle) ai.set(id, stringValue(record.aiTitle));
+    for (const value of this.titleFiles.values()) {
+      for (const [id, name] of value.ai) ai.set(id, name);
+      for (const [id, name] of value.custom) custom.set(id, name);
     }
     if (existsSync(this.root)) for (const path of new Bun.Glob("*/sessions-index.json").scanSync({ cwd: this.root, absolute: true, dot: true })) {
       try {
@@ -346,6 +351,32 @@ class ClaudeAdapter extends JsonlAdapter {
     }
     for (const [id, name] of custom) ai.set(id, name);
     return ai;
+  }
+
+  private scanTitles(files: [string, string][], initial: boolean): boolean {
+    const values = new Map(files.map(([path, signature]) => [path, {
+      signature, ai: new Map<string, string>(), custom: new Map<string, string>(),
+    }]));
+    const add = (path: string, line: string) => {
+      const value = values.get(resolve(path)), record = parseRecord(line), id = record && stringValue(record.sessionId);
+      if (!value || !record || !id) return;
+      if (record.type === "custom-title" && record.customTitle) value.custom.set(id, stringValue(record.customTitle));
+      else if (record.type === "ai-title" && record.aiTitle) value.ai.set(id, stringValue(record.aiTitle));
+    };
+    if (this.rgPath && existsSync(this.root)) {
+      const targets = initial ? [this.root] : [...values.keys()];
+      const result = Bun.spawnSync([this.rgPath, "--json", "-N", "--no-messages", "--no-ignore", "--hidden",
+        String.raw`"type"\s*:\s*"(?:ai|custom)-title"`, ...targets]);
+      if (result.exitCode > 1) return false;
+      for (const line of result.stdout.toString().split(/\r?\n/)) {
+        const event = parseRecord(line), data = event && isRecord(event.data) ? event.data : undefined;
+        const path = data && isRecord(data.path) ? stringValue(data.path.text) : "";
+        const lines = data && isRecord(data.lines) ? data.lines : undefined;
+        if (event?.type === "match" && path && lines) add(path, stringValue(lines.text).trimEnd());
+      }
+    } else for (const path of values.keys()) for (const line of readLines(path)) add(path, line);
+    for (const [path, value] of values) this.titleFiles.set(path, value);
+    return true;
   }
 
   transcript(id: string, path?: string): TranscriptMessage[] {
@@ -366,6 +397,11 @@ class CodexAdapter extends JsonlAdapter {
   readonly tool = "codex" as const;
   private firstMessages = new Map<string, string>();
   private models = new Map<string, string>();
+  private indexedMetadata = new Map<string, ParsedMetadata | null>();
+  private names = new Map<string, string>();
+  private namesSignature = "";
+  private namesLoaded = false;
+  private metadataRevision = "";
   constructor(root: string, private indexFile: string, private stateFile: string, private codexPath: string | null) { super(root); }
 
   discover(): string[] {
@@ -374,6 +410,16 @@ class CodexAdapter extends JsonlAdapter {
   }
 
   parse(path: string): ParsedMetadata | null {
+    const indexedPath = resolve(path);
+    if (this.indexedMetadata.has(indexedPath)) {
+      const indexed = this.indexedMetadata.get(indexedPath);
+      if (!indexed) return null;
+      const meta = parseRecord(readHeadLines(path, 1).next().value ?? "");
+      const payload = meta && isRecord(meta.payload) ? meta.payload : undefined;
+      const birth = isoToEpoch(payload?.timestamp) ?? isoToEpoch(meta?.timestamp);
+      const cwd = stringValue(payload?.cwd);
+      return { ...indexed, ...(cwd ? { cwd } : {}), ...(birth === undefined ? {} : { birth }) };
+    }
     const lines = readHeadLines(path, MAX_HEAD_LINES + 1);
     const meta = parseRecord(lines.next().value ?? "");
     const payload = meta && isRecord(meta.payload) ? meta.payload : undefined;
@@ -410,30 +456,72 @@ class CodexAdapter extends JsonlAdapter {
     };
   }
 
+  metadataSignature(path: string): string {
+    const indexedPath = resolve(path);
+    return this.indexedMetadata.has(indexedPath)
+      ? JSON.stringify(this.indexedMetadata.get(indexedPath))
+      : this.metadataRevision;
+  }
+
   loadNames(): Map<string, string> {
+    const signature = [this.indexFile, this.stateFile, `${this.stateFile}-wal`].map((path) => {
+      try { const stat = statSync(path); return `${stat.ctimeMs}:${stat.size}`; } catch { return ""; }
+    }).join("|");
+    if (this.namesLoaded && signature === this.namesSignature) return this.names;
     const names = new Map<string, string>();
-    this.firstMessages.clear();
-    this.models.clear();
-    for (const line of readLines(this.indexFile)) {
+    const firstMessages = new Map<string, string>();
+    const models = new Map<string, string>();
+    const indexedMetadata = new Map<string, ParsedMetadata | null>();
+    let indexLines: string[];
+    try { indexLines = readLines(this.indexFile, existsSync(this.indexFile)); }
+    catch { return this.namesLoaded ? this.names : names; }
+    for (const line of indexLines) {
       const record = parseRecord(line), id = record && stringValue(record.id);
       if (!record || !id) continue;
       const name = stringValue(record.thread_name);
       if (name) names.set(id, name); else names.delete(id);
     }
-    if (!existsSync(this.stateFile)) return names;
+    if (!existsSync(this.stateFile)) {
+      this.firstMessages = firstMessages;
+      this.models = models;
+      this.indexedMetadata = indexedMetadata;
+      this.names = names;
+      this.namesSignature = signature;
+      this.namesLoaded = true;
+      this.metadataRevision = signature;
+      return this.names;
+    }
     let database: Database | undefined;
     try {
       database = new Database(this.stateFile, { readonly: true });
-      const hasModel = Boolean(database.query("SELECT 1 FROM pragma_table_info('threads') WHERE name = 'model'").get());
-      const rows = database.query(`SELECT id, title, first_user_message${hasModel ? ", model" : ""} FROM threads`).all() as Json[];
+      const columns = new Set((database.query("SELECT name FROM pragma_table_info('threads')").all() as Json[]).map((row) => stringValue(row.name)));
+      const optional = (name: string) => columns.has(name) ? name : `NULL AS ${name}`;
+      const rows = database.query(`SELECT id, title, first_user_message, ${optional("model")}, ${optional("rollout_path")}, ${optional("cwd")}, ${optional("created_at")}, ${optional("created_at_ms")}, ${optional("thread_source")} FROM threads`).all() as Json[];
       for (const row of rows) {
         const id = stringValue(row.id), title = stringValue(row.title), first = stringValue(row.first_user_message);
-        if (id && first) this.firstMessages.set(id, first);
-        if (id && stringValue(row.model)) this.models.set(id, stringValue(row.model));
+        if (id && first) firstMessages.set(id, first);
+        if (id && stringValue(row.model)) models.set(id, stringValue(row.model));
         if (!names.has(id) && title && title !== stringValue(row.first_user_message)) names.set(id, title);
+        const path = stringValue(row.rollout_path);
+        if (!id || !path) continue;
+        if (row.thread_source === "subagent") indexedMetadata.set(resolve(path), null);
+        else if (first && !["<", "#", "⚠"].some((prefix) => first.startsWith(prefix))) indexedMetadata.set(resolve(path), {
+          id, cwd: stringValue(row.cwd) || "?", first_msg: first,
+          birth: numberValue(row.created_at_ms) === undefined ? numberValue(row.created_at) : numberValue(row.created_at_ms)! / 1000,
+          upstream_name: "",
+          ...(stringValue(row.model) ? { model: stringValue(row.model) } : {}),
+        });
       }
-    } catch {} finally { database?.close(); }
-    return names;
+    } catch { return this.namesLoaded ? this.names : names; }
+    finally { database?.close(); }
+    this.firstMessages = firstMessages;
+    this.models = models;
+    this.indexedMetadata = indexedMetadata;
+    this.names = names;
+    this.namesSignature = signature;
+    this.namesLoaded = true;
+    this.metadataRevision = signature;
+    return this.names;
   }
 
   transcript(id: string, path?: string): TranscriptMessage[] {
@@ -533,8 +621,9 @@ export class SessionCatalog {
     const claude = join(home, ".claude", "projects");
     const codex = join(home, ".codex");
     const pi = join(home, ".pi", "agent", "sessions");
+    const rg = options.rgPath === undefined ? Bun.which("rg") : options.rgPath;
     this.adapters = [
-      new ClaudeAdapter(claude),
+      new ClaudeAdapter(claude, rg),
       new CodexAdapter(join(codex, "sessions"), join(codex, "session_index.jsonl"), join(codex, "state_5.sqlite"),
         options.codexPath === undefined ? Bun.which("codex") : options.codexPath),
       new PiAdapter(pi),
@@ -683,7 +772,7 @@ export class SessionCatalog {
 
   private cached(file: Located): Metadata | null {
     const key = `${file.adapter.tool}:${resolve(file.path)}`;
-    const signature = `${file.stat.mtimeMs}:${file.stat.size}`;
+    const signature = `${file.stat.mtimeMs}:${file.stat.size}:${file.adapter.metadataSignature(file.path)}`;
     const previous = this.metadata.get(key);
     if (previous?.signature === signature) return previous.value;
     const parsed = file.adapter.parse(file.path);

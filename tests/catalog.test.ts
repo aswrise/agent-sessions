@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
-import { appendFileSync, chmodSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { Database } from "bun:sqlite";
+import { appendFileSync, chmodSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, test } from "bun:test";
 import { CatalogError, SessionCatalog } from "../src/catalog.ts";
@@ -58,6 +59,70 @@ describe("SessionCatalog", () => {
 
     await catalog.updateMark("claude-a", { star: false, note: "" });
     expect(JSON.parse(readFileSync(join(home, ".local/share/session-snapshots/stars.json"), "utf8"))["claude-a"]).toBeUndefined();
+  });
+
+  test("scans Claude titles once, then only rescans changed files", async () => {
+    const fixture = fixtureHome();
+    cleanups.push(fixture.cleanup);
+    const realRg = Bun.which("rg")!;
+    const counter = join(fixture.home, "rg-calls");
+    const fail = join(fixture.home, "rg-fail");
+    const fakeRg = join(fixture.home, "rg");
+    writeFileSync(fakeRg, `#!/bin/sh
+printf '%s\\n' "$*" >> '${counter}'
+[ -f '${fail}' ] && exit 2
+exec '${realRg}' "$@"
+`);
+    chmodSync(fakeRg, 0o755);
+    const catalog = new SessionCatalog({ home: fixture.home, rgPath: fakeRg });
+
+    await catalog.list({ fresh: true });
+    await catalog.list({ fresh: true });
+    expect(readFileSync(counter, "utf8").trim().split("\n")).toHaveLength(1);
+
+    appendFileSync(join(fixture.home, ".claude/projects/-tmp-alpha/claude-a.jsonl"),
+      JSON.stringify({ type: "custom-title", customTitle: "Incremental title", sessionId: "claude-a" }) + "\n");
+    expect((await catalog.list({ fresh: true })).find(({ id }) => id === "claude-a")?.name).toBe("Incremental title");
+    expect(readFileSync(counter, "utf8").trim().split("\n")).toHaveLength(2);
+
+    writeFileSync(fail, "fail");
+    appendFileSync(join(fixture.home, ".claude/projects/-tmp-alpha/claude-a.jsonl"),
+      JSON.stringify({ type: "custom-title", customTitle: "Retried title", sessionId: "claude-a" }) + "\n");
+    expect((await catalog.list({ fresh: true })).find(({ id }) => id === "claude-a")?.name).toBe("Incremental title");
+    rmSync(fail);
+    expect((await catalog.list({ fresh: true })).find(({ id }) => id === "claude-a")?.name).toBe("Retried title");
+    expect(readFileSync(counter, "utf8").trim().split("\n")).toHaveLength(4);
+  });
+
+  test("uses the Codex SQLite index when rollout metadata is unreadable", async () => {
+    const { home, catalog } = setup();
+    const rollout = join(home, ".codex/sessions/2026/07/14/rollout-codex-b.jsonl");
+    const database = new Database(join(home, ".codex/state_5.sqlite"));
+    for (const column of ["rollout_path", "cwd", "created_at", "model", "thread_source"])
+      database.run(`ALTER TABLE threads ADD COLUMN ${column}`);
+    database.run("UPDATE threads SET rollout_path = ?, cwd = ?, created_at = ?, model = ?, thread_source = ? WHERE id = ?",
+      [rollout, "/tmp/from-sqlite", 123, "sqlite-model", "", "codex-b"]);
+    database.close();
+    const text = readFileSync(rollout, "utf8");
+    writeFileSync(rollout, "not-json" + text.slice(text.indexOf("\n")));
+
+    expect((await catalog.list({ fresh: true })).find(({ id }) => id === "codex-b")).toMatchObject({
+      cwd: "/tmp/from-sqlite", first_msg: "fixture-user-codex", birth: 123, model: "sqlite-model",
+    });
+    const updated = new Database(join(home, ".codex/state_5.sqlite"));
+    updated.run("UPDATE threads SET model = ? WHERE id = ?", ["updated-model", "codex-b"]);
+    updated.close();
+    expect((await catalog.list({ fresh: true })).find(({ id }) => id === "codex-b")?.model).toBe("updated-model");
+  });
+
+  test("does not expose the mutable cached Session list", async () => {
+    const { catalog } = setup();
+    const rows = await catalog.list({ fresh: true });
+    rows[0]!.name = "caller mutation";
+    rows.pop();
+    const cached = await catalog.list();
+    expect(cached).toHaveLength(3);
+    expect(cached[0]!.name).not.toBe("caller mutation");
   });
 
   test("prefers Codex thread_name over a legacy local name", async () => {

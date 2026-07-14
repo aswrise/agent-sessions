@@ -44,6 +44,7 @@ const rows = ref<SessionView[]>([]);
 const generatedAt = ref("");
 const home = ref("");
 const loading = ref(true);
+const refreshing = ref(false);
 const error = ref("");
 const notice = ref("");
 const tab = ref<Tab>("");
@@ -204,7 +205,9 @@ function showToast(message: string, failed = false): void {
 }
 
 async function load(fresh = false): Promise<void> {
-  loading.value = true;
+  const keepRows = fresh && rows.value.length > 0;
+  if (keepRows) refreshing.value = true;
+  else loading.value = true;
   error.value = "";
   try {
     const response = await fetch(`/api/sessions${fresh ? "?fresh=1" : ""}`);
@@ -216,7 +219,8 @@ async function load(fresh = false): Promise<void> {
   } catch (cause) {
     error.value = cause instanceof Error ? cause.message : "加载失败";
   } finally {
-    loading.value = false;
+    if (keepRows) refreshing.value = false;
+    else loading.value = false;
   }
 }
 
@@ -464,23 +468,25 @@ function showTranscriptPreview(row: SessionView, event: MouseEvent): void {
   clearTimeout(previewShowTimer);
   const state: PreviewState = { key, kind: "transcript", loading: true, anchor, style: {} };
   if (preview.value) revealPreview(state);
-  else previewShowTimer = setTimeout(() => revealPreview(state), 180);
-  void fetchDetail(row.id).then((value) => {
-    if (preview.value?.key === key) {
-      preview.value = { ...preview.value, kind: "transcript", detail: value, loading: false };
-      void placePreview();
-    } else if (previewShowTimer) {
-      state.detail = value;
-      state.loading = false;
-    }
-  }).catch(() => {
-    if (preview.value?.key === key && preview.value.kind === "transcript") {
-      preview.value = { ...preview.value, loading: false };
-    }
-  });
+  previewShowTimer = setTimeout(() => {
+    previewShowTimer = undefined;
+    if (!preview.value) revealPreview(state);
+    if (preview.value?.key !== key) return;
+    void fetchDetail(row.id).then((value) => {
+      if (preview.value?.key === key && preview.value.kind === "transcript") {
+        preview.value = { ...preview.value, detail: value, loading: false };
+        void placePreview();
+      }
+    }).catch(() => {
+      if (preview.value?.key === key && preview.value.kind === "transcript")
+        preview.value = { ...preview.value, loading: false };
+    });
+  }, 180);
 }
 
 function schedulePreviewHide(): void {
+  clearTimeout(previewShowTimer);
+  previewShowTimer = undefined;
   clearTimeout(previewHideTimer);
   previewHideTimer = setTimeout(hidePreview, 100);
 }
@@ -599,7 +605,7 @@ onBeforeUnmount(() => {
       <button id="filterToggle" type="button" class="f act filter-toggle" :class="{ on: advanced || activeFilterCount > 0 }" :aria-expanded="advanced" @click="advanced = !advanced">
         筛选<span v-if="activeFilterCount" class="filter-count">{{ activeFilterCount }}</span>
       </button>
-      <button id="reload" type="button" class="f act" title="重新扫描 session 数据" @click="load(true)">刷新</button>
+      <button id="reload" type="button" class="f act" title="重新扫描 session 数据" :disabled="loading || refreshing" @click="load(true)">{{ refreshing ? "刷新中…" : "刷新" }}</button>
       <button id="theme" type="button" class="f act" :title="theme === 'dark' ? '切换到浅色主题' : '切换到深色主题'" :aria-label="theme === 'dark' ? '切换到浅色主题' : '切换到深色主题'" @click="toggleTheme">{{ theme === "dark" ? "☀︎" : "☾" }}</button>
     </div>
     <div v-show="advanced" id="advancedFilters" class="bar2">

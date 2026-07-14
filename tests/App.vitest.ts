@@ -228,6 +228,59 @@ describe("dashboard", () => {
     wrapper.unmount();
   });
 
+  test("keeps the current list visible while a refresh is pending", async () => {
+    let finishRefresh!: (value: Response) => void;
+    fetchMock
+      .mockResolvedValueOnce(response({ generatedAt: new Date(0).toISOString(), home: "/home/fixture", sessions: [makeRow(1)] }))
+      .mockImplementationOnce(() => new Promise<Response>((resolve) => { finishRefresh = resolve; }));
+    const wrapper = mount(App, { attachTo: document.body });
+    await flushPromises();
+
+    await wrapper.get("#reload").trigger("click");
+    expect(wrapper.get("tbody .namecell").text()).toBe("Session 1");
+    expect(wrapper.get<HTMLButtonElement>("#reload").element.disabled).toBe(true);
+    expect(wrapper.get("#reload").text()).toBe("刷新中…");
+
+    finishRefresh(response({ generatedAt: new Date(1).toISOString(), home: "/home/fixture", sessions: [makeRow(2)] }));
+    await flushPromises();
+    expect(wrapper.get("tbody .namecell").text()).toBe("Session 2");
+    wrapper.unmount();
+  });
+
+  test("does not load a Transcript when preview hover ends before the delay", async () => {
+    vi.useFakeTimers();
+    const wrapper = mount(App, { attachTo: document.body });
+    await flushPromises();
+    const message = wrapper.get("td.msg");
+
+    await message.trigger("mouseenter");
+    await vi.advanceTimersByTimeAsync(100);
+    await message.trigger("mouseleave");
+    await vi.advanceTimersByTimeAsync(200);
+
+    expect(fetchMock.mock.calls.filter(([input]) => String(input).startsWith("/api/session?id=")).length).toBe(0);
+    wrapper.unmount();
+  });
+
+  test("delays Transcript loading even while another preview is visible", async () => {
+    vi.useFakeTimers();
+    const wrapper = mount(App, { attachTo: document.body });
+    await flushPromises();
+    const messages = wrapper.findAll("td.msg");
+
+    await messages[0]!.trigger("mouseenter");
+    await vi.advanceTimersByTimeAsync(181);
+    await flushPromises();
+    expect(fetchMock.mock.calls.filter(([input]) => String(input).startsWith("/api/session?id=")).length).toBe(1);
+
+    await messages[1]!.trigger("mouseenter");
+    await vi.advanceTimersByTimeAsync(179);
+    expect(fetchMock.mock.calls.filter(([input]) => String(input).startsWith("/api/session?id=")).length).toBe(1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(fetchMock.mock.calls.filter(([input]) => String(input).startsWith("/api/session?id=")).length).toBe(2);
+    wrapper.unmount();
+  });
+
   test("preserves Python search scope, custom menu keyboard behavior, and edit cancellation", async () => {
     vi.useFakeTimers();
     const wrapper = mount(App, { attachTo: document.body });

@@ -3,7 +3,12 @@ import { SessionCatalog } from "../src/catalog.ts";
 import { startServer } from "../src/server.ts";
 
 const catalog = new SessionCatalog();
+const coldStarted = performance.now();
 const sessions = await catalog.list({ fresh: true });
+const coldMs = performance.now() - coldStarted;
+const warmStarted = performance.now();
+await catalog.list({ fresh: true });
+const warmMs = performance.now() - warmStarted;
 const ids = new Set(sessions.map(({ id }) => id));
 if (ids.size !== sessions.length) throw new Error("duplicate Session ids");
 for (const session of sessions) {
@@ -20,4 +25,5 @@ try {
 
 const counts = Object.fromEntries(["claude", "codex", "pi"].map((tool) => [tool, sessions.filter((session) => session.tool === tool).length]));
 const idShapeHash = createHash("sha256").update([...ids].sort().join("\n")).digest("hex");
-console.log(JSON.stringify({ count: sessions.length, counts, idShapeHash, httpStatus: 200 }));
+console.log(JSON.stringify({ count: sessions.length, counts, idShapeHash, httpStatus: 200,
+  coldMs: Math.round(coldMs), warmMs: Math.round(warmMs) }));
