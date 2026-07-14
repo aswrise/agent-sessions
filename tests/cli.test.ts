@@ -26,7 +26,9 @@ describe("CLI process seam", () => {
     const listed = await command(["list", "-n", "2"]);
     expect(listed.exitCode).toBe(0);
     expect(listed.stdout).toContain("codex-b");
-    expect(listed.stdout).toContain("cd -- /tmp/beta && codex resume codex-b -m gpt-fixture");
+    expect(listed.stdout).toContain(process.platform === "win32"
+      ? "Set-Location -LiteralPath '/tmp/beta'; if ($?) { & 'codex' 'resume' 'codex-b' '-m' 'gpt-fixture' }"
+      : "cd -- /tmp/beta && codex resume codex-b -m gpt-fixture");
     expect(listed.stdout).not.toContain("pi-c");
 
     const found = await command(["find", "fixture", "-n", "10"]);
