@@ -1,0 +1,4 @@
+{"type":"user","sessionId":"claude-a","cwd":"/tmp/alpha project","timestamp":"2026-07-14T01:00:00Z","message":{"role":"user","content":"fixture-user-claude"}}
+{"type":"assistant","sessionId":"claude-a","timestamp":"2026-07-14T01:01:00Z","message":{"role":"assistant","content":[{"type":"text","text":"fixture-assistant-claude"}]},"model":"claude-fixture"}
+{"type":"ai-title","sessionId":"claude-a","aiTitle":"Claude generated"}
+{"type":"custom-title","sessionId":"claude-a","customTitle":"Claude custom"}

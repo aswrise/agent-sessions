@@ -1,0 +1,2 @@
+{"timestamp":"2026-07-14T04:00:00Z","payload":{"id":"codex-child","cwd":"/tmp/child","thread_source":"subagent"}}
+{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"fixture-subagent-secret"}]}}

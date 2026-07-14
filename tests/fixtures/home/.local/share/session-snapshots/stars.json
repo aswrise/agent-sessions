@@ -1,0 +1,5 @@
+{
+ "claude-a": {"note": "legacy note"},
+ "codex-b": {"starred": false, "name": "Codex local", "status": "review"},
+ "pi-c": {"starred": true, "archived": true, "added": "2026-07-14 12:00"}
+}

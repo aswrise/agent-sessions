@@ -1,0 +1,92 @@
+{
+  "resume": {
+    "claude-a": "cd /tmp/alpha project && claude -r claude-a --model claude-fixture",
+    "codex-b": "cd /tmp/beta && codex resume codex-b -m gpt-fixture",
+    "pi-c": "cd /tmp/gamma's path && pi --session pi-c --model fixture/pi-model"
+  },
+  "sessions": [
+    {
+      "archived": true,
+      "birth": 1783998000.0,
+      "cwd": "/tmp/gamma's path",
+      "first_msg": "fixture-user-pi",
+      "id": "pi-c",
+      "model": "fixture/pi-model",
+      "mtime": 300.0,
+      "name": "Pi fixture",
+      "size_kb": 2,
+      "star_note": "",
+      "starred": true,
+      "status": "",
+      "tool": "pi"
+    },
+    {
+      "archived": false,
+      "birth": 1783994400.0,
+      "cwd": "/tmp/beta",
+      "first_msg": "fixture-user-codex",
+      "id": "codex-b",
+      "model": "gpt-fixture",
+      "mtime": 200.0,
+      "name": "Codex local",
+      "size_kb": 2,
+      "star_note": "",
+      "starred": false,
+      "status": "review",
+      "tool": "codex"
+    },
+    {
+      "archived": false,
+      "birth": 1783990800.0,
+      "cwd": "/tmp/alpha project",
+      "first_msg": "fixture-user-claude",
+      "id": "claude-a",
+      "model": "claude-fixture",
+      "mtime": 100.0,
+      "name": "Claude custom",
+      "size_kb": 2,
+      "star_note": "legacy note",
+      "starred": true,
+      "status": "",
+      "tool": "claude"
+    }
+  ],
+  "transcripts": {
+    "claude-a": [
+      {
+        "role": "user",
+        "text_sha256": "744e9a144d5ace23f3856d667d276dd807a673f35f68cf4c4be3af3f5e0594a7",
+        "timestamp": "2026-07-14T01:00:00Z"
+      },
+      {
+        "role": "assistant",
+        "text_sha256": "3973ad79ff07d2f226512728bf3de45df12d946c6fcd6ccc9ab1273ef8c4ed1b",
+        "timestamp": "2026-07-14T01:01:00Z"
+      }
+    ],
+    "codex-b": [
+      {
+        "role": "user",
+        "text_sha256": "6485a0ae49413c74ef487c2f7bdd837d232199f553fb008fb3d8f79e41ec7baa",
+        "timestamp": "2026-07-14T02:01:00Z"
+      },
+      {
+        "role": "assistant",
+        "text_sha256": "e58b554581bfe3464688f8c77c398edcafe716e4363ae9e357b0327bb0dc79e1",
+        "timestamp": "2026-07-14T02:02:00Z"
+      }
+    ],
+    "pi-c": [
+      {
+        "role": "user",
+        "text_sha256": "6bbbb77bebcc9fbba0e5583accbaf4f9d3cf4ba4e02599f5e291afcfdc0f882c",
+        "timestamp": "2026-07-14T03:01:00Z"
+      },
+      {
+        "role": "assistant",
+        "text_sha256": "1b300484d8d9bdc092b9c044f81e714c25b52df4bb52ffa277d2f0f5cad1fc2f",
+        "timestamp": "2026-07-14T03:02:00Z"
+      }
+    ]
+  }
+}
