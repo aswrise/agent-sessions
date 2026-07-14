@@ -1,9 +1,10 @@
 import { Database } from "bun:sqlite";
 import { appendFileSync, cpSync, mkdtempSync, readFileSync, rmSync, utimesSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
+import { fileURLToPath } from "node:url";
 
-const source = new URL("./fixtures/home/", import.meta.url).pathname;
+const source = fileURLToPath(new URL("./fixtures/home/", import.meta.url));
 
 export function fixtureHome(): { home: string; cleanup: () => void } {
   const root = mkdtempSync(join(tmpdir(), "agent-sessions-"));
@@ -12,7 +13,7 @@ export function fixtureHome(): { home: string; cleanup: () => void } {
   for (const path of new Bun.Glob("**/*.jsonl").scanSync({ cwd: home, absolute: true, dot: true })) {
     if (!path.endsWith("small.jsonl"))
       appendFileSync(path, JSON.stringify({ padding: "x".repeat(2200) }) + "\n");
-    const name = path.split("/").at(-1);
+    const name = basename(path);
     const timestamp = name === "claude-a.jsonl" ? 100 : name === "rollout-codex-b.jsonl" ? 200 : name === "pi-c.jsonl" ? 300 : 50;
     utimesSync(path, timestamp, timestamp);
   }

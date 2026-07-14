@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { readFileSync, statSync } from "node:fs";
+import { chmodSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, test } from "bun:test";
 import { CatalogError, SessionCatalog } from "../src/catalog.ts";
@@ -36,8 +36,10 @@ describe("SessionCatalog", () => {
 
   test("search excludes malformed, tiny, and Codex subagent files", async () => {
     const { catalog } = setup();
-    expect((await catalog.find("fixture", 20)).map((result) => result.id)).toEqual([
-      "pi-c", "codex-b", "claude-a",
+    const found = await catalog.find("fixture", 2);
+    expect(found.total).toBe(3);
+    expect(found.results.map((result) => result.id)).toEqual([
+      "pi-c", "codex-b",
     ]);
     expect((await catalog.list({ fresh: true })).map((session) => session.id)).not.toContain("codex-child");
   });
@@ -60,6 +62,8 @@ describe("SessionCatalog", () => {
 
   test("keeps each adapter's rename behavior behind the Catalog", async () => {
     const { home, catalog } = setup();
+    const pi = join(home, ".pi/agent/sessions/-tmp-gamma/pi-c.jsonl");
+    if (process.platform !== "win32") chmodSync(pi, 0o640);
     await catalog.rename("claude-a", "Claude new");
     await catalog.rename("codex-b", "Codex new");
     await catalog.rename("pi-c", "Pi new");
@@ -68,13 +72,25 @@ describe("SessionCatalog", () => {
       "pi-c": "Pi new", "claude-a": "Claude new", "codex-b": "Codex new",
     });
     expect(readFileSync(join(home, ".claude/projects/-tmp-alpha/claude-a.jsonl"), "utf8")).toContain('"customTitle":"Claude new"');
-    expect(JSON.parse(readFileSync(join(home, ".pi/agent/sessions/-tmp-gamma/pi-c.jsonl"), "utf8").split("\n")[0]!).name).toBe("Pi new");
+    expect(JSON.parse(readFileSync(pi, "utf8").split("\n")[0]!).name).toBe("Pi new");
+    if (process.platform !== "win32") expect(statSync(pi).mode & 0o777).toBe(0o640);
     expect(JSON.parse(readFileSync(join(home, ".local/share/session-snapshots/stars.json"), "utf8"))["codex-b"].name).toBe("Codex new");
   });
 
   test("resolves only unique prefixes", async () => {
     const { catalog } = setup();
     expect((await catalog.resolve("claude-")).id).toBe("claude-a");
+    await expect(catalog.resolve("c")).rejects.toEqual(new CatalogError("ambiguous", "id 前缀 'c' 匹配到 2 个 session，需要更长前缀"));
     await expect(catalog.resolve("missing")).rejects.toEqual(new CatalogError("not_found", "没有 session 匹配 'missing'"));
+  });
+
+  test("can remove legacy stars after the source session disappears", async () => {
+    const { home, catalog } = setup();
+    const marks = join(home, ".local/share/session-snapshots/stars.json");
+    const value = JSON.parse(readFileSync(marks, "utf8"));
+    value.orphan = { note: "legacy" };
+    writeFileSync(marks, JSON.stringify(value));
+    expect(await catalog.unstar("orphan")).toBe("orphan");
+    expect((await catalog.listStars()).map(({ id }) => id)).not.toContain("orphan");
   });
 });

@@ -1,5 +1,6 @@
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, test } from "bun:test";
 import { dashboardStateFile, startDashboard, stopDashboard } from "../src/lifecycle.ts";
 import { fixtureHome } from "./fixture-home.ts";
@@ -18,7 +19,7 @@ describe("dashboard lifecycle", () => {
     const stateDir = join(fixture.home, "state"), port = freePort();
     const options = {
       stateDir, port, open: false,
-      command: [process.execPath, new URL("../src/cli.ts", import.meta.url).pathname],
+      command: [process.execPath, fileURLToPath(new URL("../src/cli.ts", import.meta.url))],
       env: { ...process.env, HOME: fixture.home, USERPROFILE: fixture.home },
     };
     const first = await startDashboard(options); cleanups.push(async () => { await stopDashboard({ stateDir }); });

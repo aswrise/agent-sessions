@@ -11,7 +11,7 @@ afterEach(() => stops.splice(0).forEach((stop) => stop()));
 
 async function setup() {
   const fixture = fixtureHome();
-  const server = startServer({ catalog: new SessionCatalog({ home: fixture.home }), port: 0, nonce: "fixture-nonce", html: "<!doctype html><main>fixture app</main>" });
+  const server = startServer({ catalog: new SessionCatalog({ home: fixture.home }), port: 0, nonce: "fixture-nonce", html: "<!doctype html><main>fixture app</main>", platform: "linux" });
   stops.push(() => { server.stop(true); fixture.cleanup(); });
   return { home: fixture.home, base: `http://127.0.0.1:${server.port}` };
 }
@@ -46,12 +46,26 @@ describe("Bun HTTP seam", () => {
     expect((await fetch(base + "/missing")).status).toBe(404);
     expect((await fetch(base + "/api/session?id=missing")).status).toBe(404);
     expect((await fetch(base + "/star", { method: "POST", body: "{" })).status).toBe(400);
+    expect((await fetch(base + "/star", { method: "POST", body: JSON.stringify({ star: true }) })).status).toBe(400);
     expect((await fetch(base + "/star", { method: "POST", body: JSON.stringify({ id: "codex-b", status: "waiting" }) })).status).toBe(400);
     expect((await fetch(base + "/star", { method: "POST", body: JSON.stringify({ id: "missing", star: true }) })).status).toBe(404);
-    expect((await fetch(base + "/star", { method: "POST", body: JSON.stringify({ id: "codex-b", star: true, note: "kept", status: "done" }) })).status).toBe(200);
+    expect((await fetch(base + "/star", { method: "POST", body: JSON.stringify({ id: "codex-b", star: true, note: "kept", archive: true, status: "done" }) })).status).toBe(200);
     expect((await fetch(base + "/rename", { method: "POST", body: JSON.stringify({ id: "codex-b", name: "HTTP name" }) })).status).toBe(200);
+    expect((await fetch(base + "/api/star", { method: "POST", body: JSON.stringify({ id: "codex-b", star: true }) })).status).toBe(404);
     const row = (await (await fetch(base + "/api/sessions?fresh=1")).json()).sessions.find(({ id }: { id: string }) => id === "codex-b");
-    expect(row).toMatchObject({ starred: true, star_note: "kept", status: "done", name: "HTTP name" });
+    expect(row).toMatchObject({ starred: true, star_note: "kept", archived: true, status: "done", name: "HTTP name" });
+  });
+
+  test("returns safe JSON when detail parsing fails", async () => {
+    const catalog = {
+      list: async () => [],
+      detail: async () => { throw new Error("private parser detail"); },
+    } as unknown as SessionCatalog;
+    const server = startServer({ catalog, port: 0, platform: "linux" });
+    stops.push(() => server.stop(true));
+    const response = await fetch(`http://127.0.0.1:${server.port}/api/session?id=broken`);
+    expect(response.status).toBe(500);
+    expect(await response.json()).toEqual({ error: "操作失败" });
   });
 
   test("returns a safe 500 when persistence fails", async () => {
@@ -60,7 +74,7 @@ describe("Bun HTTP seam", () => {
     rmSync(data, { recursive: true });
     mkdirSync(dirname(data), { recursive: true });
     writeFileSync(data, "not a directory");
-    const server = startServer({ catalog: new SessionCatalog({ home: fixture.home }), port: 0, nonce: "n", html: "ok" });
+    const server = startServer({ catalog: new SessionCatalog({ home: fixture.home }), port: 0, nonce: "n", html: "ok", platform: "linux" });
     stops.push(() => { server.stop(true); fixture.cleanup(); });
     const response = await fetch(`http://127.0.0.1:${server.port}/star`, { method: "POST", body: JSON.stringify({ id: "claude-a", star: false }) });
     expect(response.status).toBe(500);

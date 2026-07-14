@@ -1,9 +1,9 @@
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, onMounted, ref } from "vue";
-import { STATUSES, type SessionStatus, type SessionsEnvelope, type SessionView, type Tool, type TranscriptView } from "./contracts.ts";
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { parseSessionsEnvelope, parseTranscriptView, STATUSES, type SessionStatus, type SessionView, type Tool, type TranscriptView } from "./contracts.ts";
 
 type Tab = "" | Tool | "starred" | "archived";
-type SortKey = keyof Pick<SessionView, "mtime" | "birth" | "tool" | "model" | "name" | "status" | "first_msg" | "cwd" | "size_kb">;
+type SortKey = keyof Pick<SessionView, "starred" | "mtime" | "birth" | "tool" | "model" | "name" | "star_note" | "status" | "first_msg" | "cwd" | "size_kb">;
 
 const rows = ref<SessionView[]>([]);
 const loading = ref(true);
@@ -25,7 +25,13 @@ const preview = ref<TranscriptView>();
 const previewPosition = ref({ left: 0, top: 0 });
 const previewCache = new Map<string, TranscriptView>();
 let previewTimer: ReturnType<typeof setTimeout> | undefined;
-const widths = ref<number[]>(JSON.parse(localStorage.getItem("column-widths") || "[]"));
+function savedWidths(): number[] {
+  try {
+    const value: unknown = JSON.parse(localStorage.getItem("column-widths") || "[]");
+    return Array.isArray(value) ? value.map((width) => typeof width === "number" && Number.isFinite(width) && width >= 48 ? width : 0) : [];
+  } catch { return []; }
+}
+const widths = ref(savedWidths());
 const dark = ref(localStorage.getItem("theme") === "dark");
 
 const tabs: { value: Tab; label: string }[] = [
@@ -58,14 +64,16 @@ const filtered = computed(() => {
   });
 });
 const pages = computed(() => Math.max(1, Math.ceil(filtered.value.length / 100)));
-const visible = computed(() => filtered.value.slice((Math.min(page.value, pages.value) - 1) * 100, Math.min(page.value, pages.value) * 100));
+const visible = computed(() => filtered.value.slice((page.value - 1) * 100, page.value * 100));
+watch(pages, (value) => { page.value = Math.min(page.value, value); });
+watch([keyword, path, status, updatedFrom, updatedTo, createdFrom, createdTo, sizeMin, sizeMax], () => { page.value = 1; });
 
 async function load(fresh = false) {
   loading.value = true; error.value = "";
   try {
     const response = await fetch(`/api/sessions${fresh ? "?fresh=1" : ""}`);
     if (!response.ok) throw new Error("加载失败");
-    rows.value = ((await response.json()) as SessionsEnvelope).sessions;
+    rows.value = parseSessionsEnvelope(await response.json()).sessions;
   } catch (cause) { error.value = cause instanceof Error ? cause.message : "加载失败"; }
   finally { loading.value = false; }
 }
@@ -107,7 +115,7 @@ async function fetchDetail(id: string): Promise<TranscriptView> {
   const cached = previewCache.get(id); if (cached) return cached;
   const response = await fetch(`/api/session?id=${encodeURIComponent(id)}`);
   if (!response.ok) throw new Error("加载失败");
-  const value = await response.json() as TranscriptView; previewCache.set(id, value); return value;
+  const value = parseTranscriptView(await response.json()); previewCache.set(id, value); return value;
 }
 
 async function openDetail(id: string, push = true) {
@@ -131,22 +139,24 @@ function resize(index: number, event: PointerEvent) {
   event.preventDefault();
   const start = event.clientX, initial = widths.value[index] || (event.currentTarget as HTMLElement).parentElement!.getBoundingClientRect().width;
   const move = (next: PointerEvent) => { const values = [...widths.value]; values[index] = Math.max(48, initial + next.clientX - start); widths.value = values; };
-  const up = () => { removeEventListener("pointermove", move); removeEventListener("pointerup", up); localStorage.setItem("column-widths", JSON.stringify(widths.value)); };
-  addEventListener("pointermove", move); addEventListener("pointerup", up);
+  const up = () => { window.removeEventListener("pointermove", move); window.removeEventListener("pointerup", up); localStorage.setItem("column-widths", JSON.stringify(widths.value)); };
+  window.addEventListener("pointermove", move); window.addEventListener("pointerup", up);
 }
 
 function keydown(event: KeyboardEvent) {
   const editing = ["INPUT", "TEXTAREA", "SELECT"].includes((event.target as HTMLElement).tagName);
   if (event.key === "/" && !editing) { event.preventDefault(); document.querySelector<HTMLInputElement>("#keyword")?.focus(); }
-  if (event.key === "Escape" && detail.value) showList();
+  if (event.key === "Escape" && document.activeElement?.id === "keyword") {
+    keyword.value = ""; page.value = 1; (document.activeElement as HTMLElement).blur();
+  } else if (event.key === "Escape" && detail.value) showList();
 }
 
 onMounted(async () => {
   document.documentElement.dataset.theme = dark.value ? "dark" : "light";
-  addEventListener("popstate", syncHistory); addEventListener("keydown", keydown);
+  window.addEventListener("popstate", syncHistory); window.addEventListener("keydown", keydown);
   await load(); await nextTick(); syncHistory();
 });
-onBeforeUnmount(() => { removeEventListener("popstate", syncHistory); removeEventListener("keydown", keydown); });
+onBeforeUnmount(() => { window.removeEventListener("popstate", syncHistory); window.removeEventListener("keydown", keydown); });
 function toggleTheme() { dark.value = !dark.value; const value = dark.value ? "dark" : "light"; document.documentElement.dataset.theme = value; localStorage.setItem("theme", value); }
 </script>
 
@@ -176,10 +186,10 @@ function toggleTheme() { dark.value = !dark.value; const value = dark.value ? "d
       <p v-if="loading" class="empty">加载中…</p><p v-else-if="!filtered.length" class="empty">没有匹配的 Session</p>
       <div v-else class="table-wrap"><table><colgroup><col v-for="(_, index) in 12" :key="index" :style="widths[index] ? { width: widths[index] + 'px' } : undefined" /></colgroup>
         <thead><tr>
-          <th>标记<span class="resize" @pointerdown="resize(0, $event)" /></th><th><button @click="sort('mtime')">更新</button><span class="resize" @pointerdown="resize(1, $event)" /></th>
-          <th><button @click="sort('birth')">创建</button><span class="resize" @pointerdown="resize(2, $event)" /></th><th><button @click="sort('tool')">工具</button></th>
-          <th><button @click="sort('model')">模型</button></th><th><button @click="sort('name')">名称</button></th><th>备注</th><th><button @click="sort('status')">状态</button></th>
-          <th><button @click="sort('first_msg')">首条消息</button></th><th><button @click="sort('cwd')">路径</button></th><th><button @click="sort('size_kb')">大小</button></th><th>操作</th>
+          <th><button @click="sort('starred')">标记</button><span class="resize" @pointerdown="resize(0, $event)" /></th><th><button @click="sort('mtime')">更新</button><span class="resize" @pointerdown="resize(1, $event)" /></th>
+          <th><button @click="sort('birth')">创建</button><span class="resize" @pointerdown="resize(2, $event)" /></th><th><button @click="sort('tool')">工具</button><span class="resize" @pointerdown="resize(3, $event)" /></th>
+          <th><button @click="sort('model')">模型</button><span class="resize" @pointerdown="resize(4, $event)" /></th><th><button @click="sort('name')">名称</button><span class="resize" @pointerdown="resize(5, $event)" /></th><th><button @click="sort('star_note')">备注</button><span class="resize" @pointerdown="resize(6, $event)" /></th><th><button @click="sort('status')">状态</button><span class="resize" @pointerdown="resize(7, $event)" /></th>
+          <th><button @click="sort('first_msg')">首条消息</button><span class="resize" @pointerdown="resize(8, $event)" /></th><th><button @click="sort('cwd')">路径</button><span class="resize" @pointerdown="resize(9, $event)" /></th><th><button @click="sort('size_kb')">大小</button><span class="resize" @pointerdown="resize(10, $event)" /></th><th>操作<span class="resize" @pointerdown="resize(11, $event)" /></th>
         </tr></thead><tbody>
           <tr v-for="row in visible" :key="row.id" tabindex="0" @click="copy(row)" @keydown.enter="copy(row)">
             <td><button type="button" :disabled="pending.has(row.id)" :aria-label="row.starred ? '取消标记' : '标记重要'" @click.stop="mutate(row, '/star', { star: !row.starred }, () => row.starred = !row.starred)">{{ row.starred ? '★' : '☆' }}</button></td>

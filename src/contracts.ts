@@ -55,3 +55,31 @@ export const isTool = (value: unknown): value is Tool =>
 
 export const isStatus = (value: unknown): value is SessionStatus =>
   typeof value === "string" && STATUSES.includes(value as SessionStatus);
+
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === "object" && value !== null && !Array.isArray(value);
+const stringFields = (value: Record<string, unknown>, fields: string[]) => fields.every((field) => typeof value[field] === "string");
+const numberFields = (value: Record<string, unknown>, fields: string[]) => fields.every((field) => typeof value[field] === "number" && Number.isFinite(value[field]));
+
+export function isSessionView(value: unknown): value is SessionView {
+  if (!isRecord(value)) return false;
+  return stringFields(value, ["id", "cwd", "name", "first_msg", "model", "star_note", "resume_command"])
+    && numberFields(value, ["mtime", "birth", "size_kb"])
+    && isTool(value.tool) && isStatus(value.status)
+    && typeof value.starred === "boolean" && typeof value.archived === "boolean";
+}
+
+export function parseSessionsEnvelope(value: unknown): SessionsEnvelope {
+  if (!isRecord(value) || typeof value.generatedAt !== "string" || !Array.isArray(value.sessions) || !value.sessions.every(isSessionView))
+    throw new Error("Session 列表响应无效");
+  return value as unknown as SessionsEnvelope;
+}
+
+export function parseTranscriptView(value: unknown): TranscriptView {
+  if (!isSessionView(value) || !isRecord(value) || !Array.isArray(value.messages)
+      || !value.messages.every((message) => isRecord(message)
+        && (message.role === "user" || message.role === "assistant")
+        && typeof message.text === "string" && typeof message.timestamp === "string"))
+    throw new Error("Transcript 响应无效");
+  return value as unknown as TranscriptView;
+}

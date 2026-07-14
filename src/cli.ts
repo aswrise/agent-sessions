@@ -6,8 +6,8 @@ import { isTool, type Session, type Tool } from "./contracts.ts";
 import { formatResumeCommand } from "./resume.ts";
 import { serveResident, startDashboard, stopDashboard } from "./lifecycle.ts";
 import { userDataDirectory } from "./paths.ts";
+import packageJson from "../package.json" with { type: "json" };
 
-const VERSION = "1.0.0";
 const HELP = `Agent Sessions
 
 Usage:
@@ -61,7 +61,7 @@ export async function main(argv = process.argv.slice(2), options: { html?: strin
       return 0;
     }
     if (["-h", "--help"].includes(args[0]!)) { console.log(HELP); return 0; }
-    if (args[0] === "--version") { console.log(`sessions ${VERSION}`); return 0; }
+    if (args[0] === "--version") { console.log(`sessions ${packageJson.version}`); return 0; }
     if (args[0] === "_serve") {
       await serveResident({ port: Number(internal(args, "--port")), nonce: internal(args, "--nonce"), stateFile: internal(args, "--state"), ...(options.html === undefined ? {} : { html: options.html }) });
       return 0;
@@ -75,9 +75,9 @@ export async function main(argv = process.argv.slice(2), options: { html?: strin
       return 0;
     }
     if (command === "find" && args.length) {
-      const results = await catalog.find(args.join(" "), n);
+      const { total, results } = await catalog.find(args.join(" "), n);
       if (!results.length) { console.log("没有匹配的 session"); return 0; }
-      console.log(`共 ${results.length} 个匹配 session，显示最近 ${results.length} 个：\n`);
+      console.log(`共 ${total} 个匹配 session，显示最近 ${results.length} 个：\n`);
       results.forEach((row) => printEntry(row, row.snippet)); return 0;
     }
     if (command === "star" && args.length) {

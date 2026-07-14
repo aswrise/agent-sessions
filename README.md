@@ -12,6 +12,8 @@ application. The only external runtime dependency is
 Download the artifact for your OS and architecture from GitHub Releases, rename
 it to `sessions` (`sessions.exe` on Windows), and put it on `PATH`. Release
 artifacts target Linux, macOS, and Windows on x64 and ARM64.
+Standard x64 artifacts follow Bun's standard target and require an AVX2-capable
+CPU. Older x64 CPUs need a separately built `-baseline` target.
 
 To build from source, install Bun 1.3.14 and `rg`, then run:
 

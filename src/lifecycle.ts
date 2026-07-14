@@ -1,6 +1,6 @@
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync, renameSync } from "node:fs";
 import { homedir } from "node:os";
-import { basename, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { SessionCatalog } from "./catalog.ts";
 import { startServer } from "./server.ts";
 
@@ -33,7 +33,7 @@ function readState(file: string): DashboardState | undefined {
 }
 
 function writeState(file: string, state: DashboardState): void {
-  mkdirSync(join(file, ".."), { recursive: true });
+  mkdirSync(dirname(file), { recursive: true });
   const temporary = `${file}.${process.pid}.tmp`;
   writeFileSync(temporary, JSON.stringify(state)); renameSync(temporary, file);
 }

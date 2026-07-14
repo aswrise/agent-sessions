@@ -1,6 +1,7 @@
 import { existsSync, mkdirSync, readFileSync, statSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { fixtureHome } from "../tests/fixture-home.ts";
+import packageJson from "../package.json" with { type: "json" };
 
 const artifact = resolve(process.argv[2] ?? "");
 if (!existsSync(artifact)) throw new Error(`artifact not found: ${artifact}`);
@@ -16,7 +17,7 @@ function run(args: string[], env = environment) {
 
 try {
   if (!run(["--help"]).includes("sessions dash --stop")) throw new Error("help output missing");
-  if (!run(["--version"]).includes("1.0.0")) throw new Error("version output missing");
+  if (!run(["--version"]).includes(packageJson.version)) throw new Error("version output missing");
   const database = join(fixture.home, ".codex/state_5.sqlite"), before = statSync(database).mtimeMs;
   if (!run(["list", "-n", "3"]).includes("codex-b")) throw new Error("fixture SQLite/list smoke failed");
   if (statSync(database).mtimeMs !== before) throw new Error("Codex SQLite was modified");

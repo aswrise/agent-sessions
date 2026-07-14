@@ -25,7 +25,7 @@ async function body(request: Request): Promise<Record<string, unknown>> {
   return value;
 }
 
-function view<T extends Session | Transcript>(session: T, platform: NodeJS.Platform): T & { resume_command: string } {
+function withResumeCommand<T extends Session | Transcript>(session: T, platform: NodeJS.Platform): T & { resume_command: string } {
   return { ...session, resume_command: formatResumeCommand(session, platform) };
 }
 
@@ -55,14 +55,14 @@ export function startServer(options: ServerOptions): Bun.Server<undefined> {
           return new Response(html, { headers: { "content-type": "text/html; charset=utf-8" } });
         if (request.method === "GET" && url.pathname === "/api/sessions") {
           const sessions = await catalog.list({ fresh: url.searchParams.get("fresh") === "1" });
-          return json({ generatedAt: new Date().toISOString(), sessions: sessions.map((session) => view(session, platform)) });
+          return json({ generatedAt: new Date().toISOString(), sessions: sessions.map((session) => withResumeCommand(session, platform)) });
         }
         if (request.method === "GET" && url.pathname === "/api/session") {
           const id = url.searchParams.get("id");
           if (!id) throw new RequestError(400, "缺少 id");
-          return json(view(await catalog.detail(id), platform));
+          return json(withResumeCommand(await catalog.detail(id), platform));
         }
-        if (request.method === "POST" && ["/star", "/api/star"].includes(url.pathname)) {
+        if (request.method === "POST" && url.pathname === "/star") {
           const value = await body(request), id = value.id;
           if (typeof id !== "string" || !id) throw new RequestError(400, "缺少 id");
           const patch: MarkPatch = {};
@@ -85,7 +85,7 @@ export function startServer(options: ServerOptions): Bun.Server<undefined> {
           await catalog.updateMark(id, patch);
           return json({ ok: true });
         }
-        if (request.method === "POST" && ["/rename", "/api/rename"].includes(url.pathname)) {
+        if (request.method === "POST" && url.pathname === "/rename") {
           const value = await body(request), id = value.id, name = value.name;
           if (typeof id !== "string" || !id) throw new RequestError(400, "缺少 id");
           if (typeof name !== "string" || !name.trim()) throw new RequestError(400, "名称不能为空");

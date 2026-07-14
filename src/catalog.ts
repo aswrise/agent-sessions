@@ -1,6 +1,7 @@
 import { Database } from "bun:sqlite";
 import {
   appendFileSync,
+  chmodSync,
   closeSync,
   existsSync,
   mkdirSync,
@@ -113,7 +114,8 @@ function skipTranscript(role: string, text: string): boolean {
   ].some((prefix) => text.startsWith(prefix));
 }
 
-function readLines(path: string): string[] {
+function readLines(path: string, strict = false): string[] {
+  if (strict) return readFileSync(path, "utf8").split(/\r?\n/);
   try {
     return readFileSync(path, "utf8").split(/\r?\n/);
   } catch {
@@ -178,7 +180,7 @@ abstract class JsonlAdapter implements Adapter {
     const path = this.findFile(id);
     if (!path) throw new CatalogError("not_found", `找不到 ${this.tool} session 文件: ${id}`);
     const output: TranscriptMessage[] = [];
-    for (const line of readLines(path)) {
+    for (const line of readLines(path, true)) {
       const record = parseRecord(line);
       const message = record && pick(record);
       if (!record || !message) continue;
@@ -311,15 +313,15 @@ class CodexAdapter extends JsonlAdapter {
       if (name) names.set(id, name); else names.delete(id);
     }
     if (!existsSync(this.stateFile)) return names;
+    let database: Database | undefined;
     try {
-      const database = new Database(this.stateFile, { readonly: true });
+      database = new Database(this.stateFile, { readonly: true });
       const rows = database.query("SELECT id, title, first_user_message FROM threads").all() as Json[];
-      database.close();
       for (const row of rows) {
         const id = stringValue(row.id), title = stringValue(row.title);
         if (!names.has(id) && title && title !== stringValue(row.first_user_message)) names.set(id, title);
       }
-    } catch {}
+    } catch {} finally { database?.close(); }
     return names;
   }
 
@@ -384,6 +386,7 @@ function atomicWrite(path: string, text: string): void {
   mkdirSync(dirname(path), { recursive: true });
   const temporary = `${path}.${process.pid}.${crypto.randomUUID()}.tmp`;
   writeFileSync(temporary, text);
+  if (existsSync(path)) chmodSync(temporary, statSync(path).mode & 0o7777);
   renameSync(temporary, path);
 }
 
@@ -439,11 +442,11 @@ export class SessionCatalog {
     return { ...session, messages: adapter.transcript(id) };
   }
 
-  async find(keyword: string, limit = 20): Promise<(Session & { snippet: string })[]> {
+  async find(keyword: string, limit = 20): Promise<{ total: number; results: (Session & { snippet: string })[] }> {
     const rg = this.rgPath === undefined ? Bun.which("rg") : this.rgPath;
     if (!rg) throw new CatalogError("missing_rg", "需要 ripgrep (rg)，请安装并加入 PATH");
     const roots = this.adapters.map((adapter) => adapter.root).filter((root) => existsSync(root));
-    const processResult = Bun.spawnSync([rg, "-l", "--no-messages", "--no-ignore", "--hidden", keyword, ...roots]);
+    const processResult = Bun.spawnSync([rg, "-l", "--no-messages", "--no-ignore", "--hidden", "--", keyword, ...roots]);
     if (processResult.exitCode > 1)
       throw new CatalogError("search_failed", processResult.stderr.toString().trim() || "ripgrep 搜索失败");
     const indexed = new Map((await this.list({ fresh: true })).map((session) => [session.id, session]));
@@ -457,10 +460,12 @@ export class SessionCatalog {
       seen.add(session.id);
       hits.push({ session, path, mtime: statSync(path).mtimeMs });
     }
-    return hits.sort((left, right) => right.mtime - left.mtime).slice(0, limit).map(({ session, path }) => {
+    const sorted = hits.sort((left, right) => right.mtime - left.mtime);
+    const results = sorted.slice(0, limit).map(({ session, path }) => {
       const excerpt = Bun.spawnSync([rg, "-m1", "-o", "--no-ignore", "--hidden", `.{0,40}${escapeRegex(keyword)}.{0,60}`, path]);
       return { ...session, snippet: oneLine(excerpt.stdout.toString().trim().split(/\r?\n/)[0] ?? keyword, 100) };
     });
+    return { total: sorted.length, results };
   }
 
   async resolve(prefix: string): Promise<Session> {
@@ -480,8 +485,11 @@ export class SessionCatalog {
   async unstar(prefix: string): Promise<string> {
     const matches = (await this.listStars()).filter(({ id }) => id.startsWith(prefix));
     if (matches.length !== 1) throw new CatalogError(matches.length ? "ambiguous" : "not_found", `'${prefix}' 匹配到 ${matches.length} 个已标记 session`);
-    await this.updateMark(matches[0]!.id, { star: false });
-    return matches[0]!.id;
+    const id = matches[0]!.id, marks = this.loadMarks(), mark = marks[id]!;
+    mark.starred = false;
+    if (meaningful(mark)) marks[id] = mark; else delete marks[id];
+    this.saveMarks(marks); this.index = undefined;
+    return id;
   }
 
   async updateMark(id: string, patch: MarkPatch): Promise<void> {
