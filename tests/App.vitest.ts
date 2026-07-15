@@ -29,6 +29,7 @@ beforeEach(() => {
   fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input);
     if (url.startsWith("/api/sessions")) return response({ generatedAt: new Date(0).toISOString(), home: "/home/fixture", sessions: Array.from({ length: 101 }, (_, index) => makeRow(index)) });
+    if (url.startsWith("/api/search")) return response({ total: 1, results: [{ ...makeRow(42), snippet: "deep transcript needle" }] });
     if (url.startsWith("/api/session")) {
       const id = new URL(url, "http://local").searchParams.get("id")!;
       if (id === "missing") return response({ error: "missing" }, 404);
@@ -113,6 +114,48 @@ describe("dashboard", () => {
     await wrapper.findAll(".tabs button").find((button) => button.text().startsWith("★ 标记"))!.trigger("click");
     expect(wrapper.findAll("tbody tr")).toHaveLength(1);
     expect(wrapper.get("tbody .notecell").text()).toBe("priority");
+    wrapper.unmount();
+  });
+
+  test("runs deep search only on submit and renders its Transcript snippet", async () => {
+    const wrapper = mount(App, { attachTo: document.body });
+    await flushPromises();
+    await wrapper.get("#searchModeDeep").trigger("click");
+    const keyword = wrapper.get<HTMLInputElement>("#q");
+    await keyword.setValue("transcript needle");
+    expect(fetchMock.mock.calls.some(([input]) => String(input).startsWith("/api/search"))).toBe(false);
+
+    await keyword.trigger("keydown", { key: "Enter" });
+    await flushPromises();
+    expect(fetchMock).toHaveBeenCalledWith("/api/search?q=transcript%20needle&limit=500");
+    expect(wrapper.findAll("tbody tr.row")).toHaveLength(1);
+    expect(wrapper.get("tbody .msg").text()).toBe("deep transcript needle");
+
+    await wrapper.get("#searchModeNormal").trigger("click");
+    await new Promise((resolve) => setTimeout(resolve, 130));
+    expect(wrapper.get("tbody .empty").text()).toContain("没有匹配");
+    wrapper.unmount();
+  });
+
+  test("ignores a stale deep-search response after the query changes", async () => {
+    let finishSearch!: (value: Response) => void;
+    fetchMock.mockImplementation(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.startsWith("/api/sessions"))
+        return response({ generatedAt: new Date(0).toISOString(), home: "/home/fixture", sessions: Array.from({ length: 101 }, (_, index) => makeRow(index)) });
+      return new Promise<Response>((resolve) => { finishSearch = resolve; });
+    });
+    const wrapper = mount(App, { attachTo: document.body });
+    await flushPromises();
+    await wrapper.get("#searchModeDeep").trigger("click");
+    const keyword = wrapper.get<HTMLInputElement>("#q");
+    await keyword.setValue("old query");
+    await keyword.trigger("keydown", { key: "Enter" });
+    await keyword.setValue("new query");
+    finishSearch(response({ total: 1, results: [{ ...makeRow(42), snippet: "old query" }] }));
+    await flushPromises();
+    expect(wrapper.findAll("tbody tr.row")).toHaveLength(100);
+    expect(wrapper.get<HTMLButtonElement>("#deepSearch").element.disabled).toBe(false);
     wrapper.unmount();
   });
 

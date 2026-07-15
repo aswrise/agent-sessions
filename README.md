@@ -28,7 +28,10 @@ install -m 755 build/sessions ~/.local/bin/sessions
 ```bash
 sessions list -n 30              # recent Sessions across all tools and paths
 sessions list claude             # one tool: claude / codex / pi
-sessions find "keyword"          # full-text search through rg
+sessions list --json             # stable machine-readable output for agents
+sessions find "keyword"          # summary + readable Transcript search through rg
+sessions find "keyword" --json
+sessions show 48e17d64 --json    # full Transcript by unique id prefix
 sessions star 48e17d64 note      # star an id prefix, with an optional note
 sessions unstar 48e17d64
 sessions stars
@@ -56,8 +59,9 @@ safely quoted PowerShell command.
 
 The dashboard binds only to `127.0.0.1:7867` and provides:
 
-- all/tool/starred/archived tabs, keyword/path/date/size/status filters, sortable
-  columns, 100-row pagination, and forced refresh;
+- all/tool/starred/archived tabs, normal summary search, explicit deep Transcript
+  search, path/date/size/status filters, sortable columns, 100-row pagination,
+  and forced refresh;
 - row-click resume-command copying, query-string Transcript detail navigation,
   hover preview, theme and draggable-width preferences;
 - inline stars, notes, names, statuses, and archive state with recoverable errors;

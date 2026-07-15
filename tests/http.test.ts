@@ -59,6 +59,19 @@ describe("Bun HTTP seam", () => {
     expect(rows.find(({ id }: { id: string }) => id === "claude-a")).toMatchObject({ name: "HTTP name" });
   });
 
+  test("searches readable Transcript text through a validated GET route", async () => {
+    const { base } = await setup();
+    const response = await fetch(base + "/api/search?q=FIXTURE-ASSISTANT-CODEX&limit=10");
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({
+      total: 1,
+      results: [{ id: "codex-b", snippet: "fixture-assistant-codex", resume_command: "cd -- /tmp/beta && codex resume codex-b -m gpt-fixture" }],
+    });
+    expect((await fetch(base + "/api/search")).status).toBe(400);
+    expect((await fetch(base + "/api/search?q=fixture&limit=0")).status).toBe(400);
+    expect((await fetch(base + "/api/search?q=fixture&limit=501")).status).toBe(400);
+  });
+
   test("returns safe JSON when detail parsing fails", async () => {
     const catalog = {
       list: async () => [],

@@ -37,8 +37,31 @@ describe("CLI process seam", () => {
     expect(found.stdout).not.toContain("codex-child");
   });
 
+  test("provides stable JSON list, find, and show output for terminal agents", async () => {
+    const listed = await command(["list", "-n", "2", "--json"]);
+    expect(listed.exitCode).toBe(0);
+    const listValue = JSON.parse(listed.stdout);
+    expect(listValue.sessions).toHaveLength(2);
+    expect(listValue.sessions[0]).toMatchObject({ id: "codex-b", resume_command: "cd -- /tmp/beta && codex resume codex-b -m gpt-fixture" });
+
+    const found = await command(["find", "FIXTURE-ASSISTANT-CODEX", "--json"]);
+    expect(found.exitCode).toBe(0);
+    const findValue = JSON.parse(found.stdout);
+    expect(findValue).toMatchObject({ total: 1, results: [{ id: "codex-b", snippet: "fixture-assistant-codex" }] });
+
+    const shown = await command(["show", "claude-", "--json"]);
+    expect(shown.exitCode).toBe(0);
+    const showValue = JSON.parse(shown.stdout);
+    expect(showValue).toMatchObject({ id: "claude-a", resume_command: "cd -- '/tmp/alpha project' && claude -r claude-a --model claude-fixture" });
+    expect(showValue.messages.map(({ text }: { text: string }) => text)).toEqual(["fixture-user-claude", "fixture-assistant-claude"]);
+
+    const readable = await command(["show", "codex-"]);
+    expect(readable.stdout).toContain("[user] fixture-user-codex");
+    expect(readable.stdout).toContain("[assistant] fixture-assistant-codex");
+  });
+
   test("preserves marks, archive hiding, help, snapshot, and failures", async () => {
-    const help = await command(["--help"]); expect(help.stdout).toContain("sessions dash --stop");
+    const help = await command(["--help"]); expect(help.stdout).toContain("sessions show <id-prefix> [--json]");
     const version = await command(["--version"]); expect(version.stdout.trim()).toBe(`sessions ${packageJson.version}`);
     const missing = await command(["find", "fixture"], "/missing");
     expect(missing.exitCode).toBe(1); expect(missing.stderr).toContain("需要 ripgrep (rg)");

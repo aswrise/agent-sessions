@@ -60,6 +60,14 @@ export function startServer(options: ServerOptions): Bun.Server<undefined> {
           const sessions = await catalog.list({ fresh: url.searchParams.get("fresh") === "1" });
           return json({ generatedAt: new Date().toISOString(), home, sessions: sessions.map((session) => withResumeCommand(session, platform)) });
         }
+        if (request.method === "GET" && url.pathname === "/api/search") {
+          const query = url.searchParams.get("q")?.trim();
+          if (!query) throw new RequestError(400, "缺少 q");
+          const rawLimit = url.searchParams.get("limit"), limit = rawLimit === null ? 100 : Number(rawLimit);
+          if (!Number.isInteger(limit) || limit < 1 || limit > 500) throw new RequestError(400, "limit 必须是 1 到 500 的整数");
+          const result = await catalog.find(query, limit);
+          return json({ ...result, results: result.results.map((session) => withResumeCommand(session, platform)) });
+        }
         if (request.method === "GET" && url.pathname === "/api/session") {
           const id = url.searchParams.get("id");
           if (!id) throw new RequestError(400, "缺少 id");

@@ -1,5 +1,46 @@
 # Implementation Notes: Python Dashboard Parity in Vue
 
+## 2026-07-15: Agent CLI and Deep Search
+
+### Objective
+
+- 为 terminal agent 提供稳定的 JSON 输出：`sessions list --json`、`sessions find <keyword> --json`、`sessions show <id-prefix> --json`。
+- 保留现有人类可读输出，并让 `show` 可以直接读取完整 Transcript。
+- 页面保留当前普通检索，新增显式触发的深度检索；深度检索覆盖普通字段与全部可读 user/assistant Transcript。
+- 深度检索继续复用 `SessionCatalog` 和 `rg`，只使用进程内 Session 索引，不增加磁盘缓存或外部服务。
+
+### Confirmed Test Seams
+
+- `SessionCatalog`：固定文本、忽略大小写、普通字段与 Transcript 合并命中、缓存索引复用。
+- CLI 进程：JSON list/find/show 契约及人类可读 show。
+- localhost HTTP：深度检索路由的输入校验和响应契约。
+- Vue DOM：普通/深度模式切换、显式提交、加载及错误恢复。
+
+### Progress
+
+- [x] Catalog 深度检索
+- [x] CLI JSON 与 show
+- [x] HTTP 深度检索路由
+- [x] Vue 普通/深度模式
+- [ ] 完整验证与双轴 review
+
+### Deviations
+
+- 深度检索请求期间修改关键词会让旧响应变成过期结果；保守处理为立即失效旧请求并保留未筛选列表，不尝试缓存或合并旧结果。
+- `code-review` 要求以已提交的 `HEAD` 做三点 diff；因此先创建仅含本功能的 scoped commit，再执行双轴 review，发现问题后追加修复提交。
+
+### Verification Log
+
+- `bun test tests/catalog.test.ts`：通过；新增普通字段、大小写、固定文本及可读 Transcript 搜索覆盖。
+- `bun test tests/cli.test.ts`：通过；新增 list/find/show JSON 与人类可读 show 覆盖。
+- `bun test tests/http.test.ts`：通过；新增深度检索路由及 limit 输入校验覆盖。
+- `bun run test:ui`：通过；12 个 Vue DOM/交互测试，包含过期深度检索响应保护。
+- `bun run typecheck`：通过。
+- `bun run test`：通过；26 个 Bun 后端测试、12 个 Vue DOM/交互测试。
+- `bun run build`：通过；Vite 产物已内嵌。
+- staged-tree 独立验证：精确暂存树测试、构建、类型检查均通过，未依赖工作区中的源文件路径改动。
+- 真实 6196 文件 / 1.9GB 数据：常驻进程首次深度检索 1.218 秒，后续 0.204–0.222 秒；未新增磁盘缓存。
+
 ## Objective
 
 把 `master:sessions` 中 Python dashboard 的视觉与交互完整迁移到当前 Vue 版本，同时保留 Bun 后端、现有 API 契约及当前工作树中的 Markdown Transcript 渲染。

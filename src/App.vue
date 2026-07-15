@@ -2,6 +2,7 @@
 import MarkdownIt from "markdown-it";
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import {
+  parseSearchEnvelope,
   parseSessionsEnvelope,
   parseTranscriptView,
   STATUSES,
@@ -12,6 +13,7 @@ import {
 } from "./contracts.ts";
 
 type Tab = "" | Tool | "__star__" | "__arch__";
+type SearchMode = "normal" | "deep";
 type SortKey = keyof Pick<SessionView, "starred" | "mtime" | "birth" | "tool" | "model" | "name" | "star_note" | "status" | "first_msg" | "cwd" | "size_kb">;
 type MenuItem = { value: string; label: string };
 type MenuState = {
@@ -50,6 +52,12 @@ const notice = ref("");
 const tab = ref<Tab>("");
 const keyword = ref("");
 const effectiveKeyword = ref("");
+const searchMode = ref<SearchMode>("normal");
+const deepSearching = ref(false);
+const deepSearched = ref(false);
+const deepTotal = ref(0);
+const deepIds = ref(new Set<string>());
+const deepSnippets = ref(new Map<string, string>());
 const path = ref("");
 const status = ref<SessionStatus>("");
 const updatedFrom = ref("");
@@ -75,6 +83,7 @@ const previewElement = ref<HTMLElement>();
 const previewCache = new Map<string, TranscriptView>();
 const previewRequests = new Map<string, Promise<TranscriptView>>();
 let searchTimer: ReturnType<typeof setTimeout> | undefined;
+let deepSearchRequest = 0;
 let toastTimer: ReturnType<typeof setTimeout> | undefined;
 let previewShowTimer: ReturnType<typeof setTimeout> | undefined;
 let previewHideTimer: ReturnType<typeof setTimeout> | undefined;
@@ -131,7 +140,7 @@ function toEpoch(value: string, end = false): number | undefined {
 }
 
 const filtered = computed(() => {
-  const query = effectiveKeyword.value.trim().toLowerCase();
+  const query = searchMode.value === "normal" ? effectiveKeyword.value.trim().toLowerCase() : "";
   const fromUpdate = toEpoch(updatedFrom.value);
   const toUpdate = toEpoch(updatedTo.value, true);
   const fromCreate = toEpoch(createdFrom.value);
@@ -147,6 +156,7 @@ const filtered = computed(() => {
     if (fromUpdate && row.mtime < fromUpdate || toUpdate && row.mtime > toUpdate) return false;
     if (fromCreate && row.birth < fromCreate || toCreate && row.birth > toCreate) return false;
     if (!Number.isNaN(min) && row.size_kb < min * 1024 || !Number.isNaN(max) && row.size_kb > max * 1024) return false;
+    if (searchMode.value === "deep" && deepSearched.value) return deepIds.value.has(row.id);
     return !query || `${row.name} ${row.star_note} ${row.first_msg}`.toLowerCase().includes(query);
   });
   if (!sortKey.value) return result.sort((left, right) => right.mtime - left.mtime);
@@ -163,12 +173,18 @@ const footerText = computed(() => {
   if (!total) return "";
   const start = (page.value - 1) * PAGE_SIZE;
   const range = pages.value > 1 ? `显示第 ${start + 1}-${start + visible.value.length} 行，共 ${total} 个匹配` : `${total} 个匹配`;
-  return `${range}。点击行复制恢复命令，点详情打开详情页，首条消息悬停预览对话`;
+  const deep = searchMode.value === "deep" && deepSearched.value && deepTotal.value > total ? `，深度检索共 ${deepTotal.value} 个` : "";
+  return `${range}${deep}。点击行复制恢复命令，点详情打开详情页，首条消息悬停预览对话`;
 });
 
 watch(keyword, (value) => {
   clearTimeout(searchTimer);
-  searchTimer = setTimeout(() => { effectiveKeyword.value = value; page.value = 1; }, 120);
+  page.value = 1;
+  if (searchMode.value === "deep") {
+    resetDeepSearch();
+    return;
+  }
+  searchTimer = setTimeout(() => { effectiveKeyword.value = value; }, 120);
 });
 watch([path, status, updatedFrom, updatedTo, createdFrom, createdTo, sizeMin, sizeMax], () => { page.value = 1; });
 watch(pages, (value) => { page.value = value ? Math.min(page.value, value) : 1; });
@@ -222,6 +238,53 @@ async function load(fresh = false): Promise<void> {
     if (keepRows) refreshing.value = false;
     else loading.value = false;
   }
+}
+
+function resetDeepSearch(): void {
+  deepSearchRequest++;
+  deepSearching.value = false;
+  deepSearched.value = false;
+  deepTotal.value = 0;
+  deepIds.value = new Set();
+  deepSnippets.value = new Map();
+}
+
+function setSearchMode(value: SearchMode): void {
+  clearTimeout(searchTimer);
+  searchMode.value = value;
+  effectiveKeyword.value = value === "normal" ? keyword.value : "";
+  resetDeepSearch();
+  page.value = 1;
+}
+
+async function runDeepSearch(): Promise<void> {
+  if (searchMode.value !== "deep") return;
+  const query = keyword.value.trim();
+  if (!query) {
+    resetDeepSearch();
+    return;
+  }
+  const request = ++deepSearchRequest;
+  deepSearching.value = true;
+  try {
+    const response = await fetch(`/api/search?q=${encodeURIComponent(query)}&limit=500`);
+    if (!response.ok) throw new Error("深度检索失败");
+    const result = parseSearchEnvelope(await response.json());
+    if (request !== deepSearchRequest) return;
+    deepTotal.value = result.total;
+    deepIds.value = new Set(result.results.map(({ id }) => id));
+    deepSnippets.value = new Map(result.results.map(({ id, snippet }) => [id, snippet]));
+    deepSearched.value = true;
+    page.value = 1;
+  } catch {
+    if (request === deepSearchRequest) showToast("深度检索失败", true);
+  } finally {
+    if (request === deepSearchRequest) deepSearching.value = false;
+  }
+}
+
+function messageText(row: SessionView): string {
+  return searchMode.value === "deep" && deepSearched.value ? deepSnippets.value.get(row.id) || row.first_msg || "(空)" : row.first_msg || "(空)";
 }
 
 async function persist(row: SessionView, route: "/star" | "/rename", body: Record<string, unknown>, apply: () => void, success: string): Promise<boolean> {
@@ -310,6 +373,7 @@ function clearFilters(): void {
   tab.value = "";
   page.value = 1;
   advanced.value = false;
+  resetDeepSearch();
   closeMenu();
 }
 
@@ -543,6 +607,7 @@ function keydown(event: KeyboardEvent): void {
   } else if (event.key === "Escape" && document.activeElement?.id === "q") {
     keyword.value = "";
     effectiveKeyword.value = "";
+    resetDeepSearch();
     page.value = 1;
     (document.activeElement as HTMLElement).blur();
   } else if (event.key === "Escape" && (detail.value || detailError.value)) showList();
@@ -591,11 +656,16 @@ onBeforeUnmount(() => {
 
   <div v-if="!detail && !detailError && !detailLoading" id="chrome" class="chrome">
     <div class="bar">
+      <div class="search-modes" role="group" aria-label="检索范围">
+        <button id="searchModeNormal" type="button" class="f" :class="{ on: searchMode === 'normal' }" :aria-pressed="searchMode === 'normal'" @click="setSearchMode('normal')">普通</button>
+        <button id="searchModeDeep" type="button" class="f" :class="{ on: searchMode === 'deep' }" :aria-pressed="searchMode === 'deep'" @click="setSearchMode('deep')">深度</button>
+      </div>
       <label class="searchbox">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="11" cy="11" r="7" /><path d="m16.5 16.5 4 4" /></svg>
-        <input id="q" v-model="keyword" type="search" placeholder="搜索名称、备注或首条消息…" aria-label="搜索会话" />
+        <input id="q" v-model="keyword" type="search" :placeholder="searchMode === 'deep' ? '搜索完整 Transcript，按 Enter…' : '搜索名称、备注或首条消息…'" aria-label="搜索会话" @keydown.enter.prevent="runDeepSearch" />
         <kbd aria-hidden="true">/</kbd>
       </label>
+      <button v-if="searchMode === 'deep'" id="deepSearch" type="button" class="f act" :disabled="deepSearching || !keyword.trim()" @click="runDeepSearch">{{ deepSearching ? "检索中…" : "检索" }}</button>
       <div class="tabs" role="group" aria-label="会话来源">
         <button v-for="item in tabs" :key="item.value" type="button" class="f" :class="{ on: tab === item.value }" :data-count="tabCounts[item.value]" :aria-pressed="tab === item.value" @click="setTab(item.value)">{{ item.label }}</button>
       </div>
@@ -655,7 +725,7 @@ onBeforeUnmount(() => {
               <template v-else>{{ row.star_note }}</template>
             </td>
             <td><button type="button" class="status statusbtn" aria-haspopup="listbox" :aria-expanded="menu?.key === `status:${row.id}`" :style="{ '--sc': statusMeta[row.status].color }" @click.stop="openRowStatus(row, $event)"><span :class="{ none: !row.status }">{{ statusMeta[row.status].label }}</span></button></td>
-            <td class="msg" @mouseenter="showTranscriptPreview(row, $event)" @mouseleave="schedulePreviewHide">{{ row.first_msg || "(空)" }}</td>
+            <td class="msg" @mouseenter="showTranscriptPreview(row, $event)" @mouseleave="schedulePreviewHide">{{ messageText(row) }}</td>
             <td class="p" @mouseenter="showTextPreview($event, `${row.id}:path`, shortPath(row.cwd))" @mouseleave="schedulePreviewHide">{{ shortPath(row.cwd) }}</td>
             <td class="num sz">{{ formatSize(row.size_kb) }}</td>
             <td class="detailcell"><button type="button" class="rowbtn detailbtn" title="打开详情页" @click.stop="openDetail(row.id)">查看</button></td>
@@ -757,7 +827,7 @@ input[type=search]{width:100%;padding:9px 38px 9px 34px;font:inherit;color:var(-
 input[type=search]::placeholder{color:var(--ash)}
 input[type=search]:focus{border-color:color-mix(in srgb,var(--lime) 65%,var(--graphite));
   box-shadow:0 0 0 3px color-mix(in srgb,var(--lime) 12%,transparent)}
-.tabs{display:flex;align-items:center;gap:2px;padding:3px;border:1px solid var(--obsidian);border-radius:9px;background:color-mix(in srgb,var(--void) 76%,transparent)}
+.tabs,.search-modes{display:flex;align-items:center;gap:2px;padding:3px;border:1px solid var(--obsidian);border-radius:9px;background:color-mix(in srgb,var(--void) 76%,transparent)}
 .f{padding:5px 10px;font:inherit;font-size:12px;border:none;border-radius:7px;
   background:none;color:var(--fog);cursor:pointer;transition:transform 140ms var(--ease-out),background-color 140ms ease,color 140ms ease}
 .f.on{background:var(--chip);color:var(--paper);font-weight:560;box-shadow:0 1px 2px rgba(0,0,0,.16)}

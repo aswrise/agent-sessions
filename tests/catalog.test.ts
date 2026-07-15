@@ -45,6 +45,14 @@ describe("SessionCatalog", () => {
     expect((await catalog.list({ fresh: true })).map((session) => session.id)).not.toContain("codex-child");
   });
 
+  test("deep search combines summary fields with readable Transcript text", async () => {
+    const { catalog } = setup();
+    expect((await catalog.find("LEGACY NOTE")).results.map(({ id }) => id)).toEqual(["claude-a"]);
+    expect((await catalog.find("FIXTURE-ASSISTANT-CODEX")).results.map(({ id }) => id)).toEqual(["codex-b"]);
+    expect((await catalog.find("fixture-user-[codex")).results).toEqual([]);
+    expect((await catalog.find("x".repeat(50))).results).toEqual([]);
+  });
+
   test("refreshes names and marks without reparsing unchanged metadata", async () => {
     const { home, catalog } = setup();
     await catalog.list({ fresh: true });

@@ -651,27 +651,32 @@ export class SessionCatalog {
   async find(keyword: string, limit = 20): Promise<{ total: number; results: (Session & { snippet: string })[] }> {
     const rg = this.rgPath === undefined ? Bun.which("rg") : this.rgPath;
     if (!rg) throw new CatalogError("missing_rg", "需要 ripgrep (rg)，请安装并加入 PATH");
-    const roots = this.adapters.map((adapter) => adapter.root).filter((root) => existsSync(root));
-    const processResult = Bun.spawnSync([rg, "-l", "--no-messages", "--no-ignore", "--hidden", "--", keyword, ...roots]);
-    if (processResult.exitCode > 1)
-      throw new CatalogError("search_failed", processResult.stderr.toString().trim() || "ripgrep 搜索失败");
-    const indexed = new Map((await this.list({ fresh: true })).map((session) => [session.id, session]));
-    const hits: { session: Session; path: string; mtime: number }[] = [];
-    const seen = new Set<string>();
-    for (const path of processResult.stdout.toString().split(/\r?\n/).filter(Boolean)) {
-      const adapter = this.adapters.find((candidate) => candidate.allowed(path));
-      const metadata = adapter?.parse(path);
-      const session = metadata && indexed.get(metadata.id);
-      if (!session || seen.has(session.id)) continue;
-      seen.add(session.id);
-      hits.push({ session, path, mtime: statSync(path).mtimeMs });
+    const query = keyword.trim();
+    if (!query) return { total: 0, results: [] };
+    const rows = await this.list();
+    const indexed = new Map(rows.map((session) => [session.id, session]));
+    const hits = new Map<string, Session & { snippet: string }>();
+    for (const session of rows) {
+      const summary = [session.name, session.star_note, session.first_msg].find((value) => value.toLowerCase().includes(query.toLowerCase()));
+      if (summary) hits.set(session.id, { ...session, snippet: matchSnippet(summary, query) });
     }
-    const sorted = hits.sort((left, right) => right.mtime - left.mtime);
-    const results = sorted.slice(0, limit).map(({ session, path }) => {
-      const excerpt = Bun.spawnSync([rg, "-m1", "-o", "--no-ignore", "--hidden", `.{0,40}${escapeRegex(keyword)}.{0,60}`, path]);
-      return { ...session, snippet: oneLine(excerpt.stdout.toString().trim().split(/\r?\n/)[0] ?? keyword, 100) };
-    });
-    return { total: sorted.length, results };
+    const roots = this.adapters.map((adapter) => adapter.root).filter((root) => existsSync(root));
+    if (roots.length) {
+      const processResult = Bun.spawnSync([rg, "-i", "-F", "-l", "--no-messages", "--no-ignore", "--hidden", "--", query, ...roots]);
+      if (processResult.exitCode > 1)
+        throw new CatalogError("search_failed", processResult.stderr.toString().trim() || "ripgrep 搜索失败");
+      for (const path of processResult.stdout.toString().split(/\r?\n/).filter(Boolean)) {
+        const adapter = this.adapters.find((candidate) => candidate.allowed(path));
+        const metadata = adapter?.parse(path);
+        const session = metadata && indexed.get(metadata.id);
+        if (!adapter || !session || hits.has(session.id)) continue;
+        const message = adapter.transcript(session.id, path)
+          .find(({ text }) => text.toLowerCase().includes(query.toLowerCase()));
+        if (message) hits.set(session.id, { ...session, snippet: matchSnippet(message.text, query) });
+      }
+    }
+    const sorted = [...hits.values()].sort((left, right) => right.mtime - left.mtime);
+    return { total: sorted.length, results: sorted.slice(0, limit) };
   }
 
   async resolve(prefix: string): Promise<Session> {
@@ -814,6 +819,10 @@ export class SessionCatalog {
   }
 }
 
-function escapeRegex(value: string): string {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+function matchSnippet(value: string, query: string): string {
+  const text = value.replace(/\s+/g, " ").trim();
+  const index = text.toLowerCase().indexOf(query.toLowerCase());
+  if (index < 0) return oneLine(text, 100);
+  const start = Math.max(0, index - 40), end = Math.min(text.length, index + query.length + 60);
+  return `${start ? "…" : ""}${text.slice(start, end)}${end < text.length ? "…" : ""}`;
 }

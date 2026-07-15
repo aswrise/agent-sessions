@@ -44,6 +44,15 @@ export interface SessionsEnvelope {
   sessions: SessionView[];
 }
 
+export interface SearchHitView extends SessionView {
+  snippet: string;
+}
+
+export interface SearchEnvelope {
+  total: number;
+  results: SearchHitView[];
+}
+
 export interface MarkPatch {
   star?: boolean;
   note?: string;
@@ -75,6 +84,14 @@ export function parseSessionsEnvelope(value: unknown): SessionsEnvelope {
       || !Array.isArray(value.sessions) || !value.sessions.every(isSessionView))
     throw new Error("Session 列表响应无效");
   return value as unknown as SessionsEnvelope;
+}
+
+export function parseSearchEnvelope(value: unknown): SearchEnvelope {
+  if (!isRecord(value) || !Number.isInteger(value.total) || (value.total as number) < 0
+      || !Array.isArray(value.results) || !value.results.every((result) => isRecord(result)
+        && isSessionView(result) && typeof result.snippet === "string"))
+    throw new Error("Session 搜索响应无效");
+  return value as unknown as SearchEnvelope;
 }
 
 export function parseTranscriptView(value: unknown): TranscriptView {

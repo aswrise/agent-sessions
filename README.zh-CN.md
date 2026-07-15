@@ -27,7 +27,10 @@ install -m 755 build/sessions ~/.local/bin/sessions
 ```bash
 sessions list -n 30              # 跨工具、跨路径列出最近 Session
 sessions list claude             # 只看 claude / codex / pi
-sessions find "关键词"           # 通过 rg 全文搜索
+sessions list --json             # 面向 agent 的稳定结构化输出
+sessions find "关键词"           # 通过 rg 搜索摘要及可读 Transcript
+sessions find "关键词" --json
+sessions show 48e17d64 --json    # 按唯一 id 前缀读取完整 Transcript
 sessions star 48e17d64 备注       # 按 id 前缀标记
 sessions unstar 48e17d64
 sessions stars
@@ -54,8 +57,8 @@ sessions dash --stop
 
 Dashboard 仅绑定 `127.0.0.1:7867`，保留以下行为：
 
-- 全部/工具/已标记/已归档视图，关键词、路径、日期、大小、状态筛选，可排序
-  列、每页 100 行和强制刷新；
+- 全部/工具/已标记/已归档视图，普通摘要检索、显式深度 Transcript 检索，
+  路径、日期、大小、状态筛选，可排序列、每页 100 行和强制刷新；
 - 点击行复制恢复命令，query-string Transcript 详情与前进/后退，悬浮预览，
   主题和列宽本地记忆；
 - 页内标记、备注、名称、状态、归档操作，失败时保留原值并可重试；

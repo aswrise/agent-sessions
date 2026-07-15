@@ -2,7 +2,7 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { CatalogError, SessionCatalog } from "./catalog.ts";
-import { isTool, type Session, type Tool } from "./contracts.ts";
+import { isTool, type Session, type Tool, type Transcript } from "./contracts.ts";
 import { formatResumeCommand } from "./resume.ts";
 import { serveResident, startDashboard, stopDashboard } from "./lifecycle.ts";
 import { userDataDirectory } from "./paths.ts";
@@ -12,8 +12,9 @@ const HELP = `Agent Sessions
 
 Usage:
   sessions                         print the active-session snapshot
-  sessions list [-n 20] [claude|codex|pi]
-  sessions find <keyword> [-n 20]
+  sessions list [-n 20] [claude|codex|pi] [--json]
+  sessions find <keyword> [-n 20] [--json]
+  sessions show <id-prefix> [--json]
   sessions star <id-prefix> [note]
   sessions unstar <id-prefix>
   sessions stars
@@ -36,6 +37,17 @@ function printEntry(row: Session, snippet?: string): void {
   console.log(`${row.starred ? "★" : " "} [${stamp(row.mtime)}] ${row.tool.padEnd(6)} ${row.cwd}`);
   console.log(`    ${snippet ?? (row.name || row.first_msg)}`);
   console.log(`    ↳ ${formatResumeCommand(row)}\n`);
+}
+
+function withResumeCommand<T extends Session | Transcript>(row: T): T & { resume_command: string } {
+  return { ...row, resume_command: formatResumeCommand(row) };
+}
+
+function flag(args: string[], name: string): boolean {
+  const index = args.indexOf(name);
+  if (index < 0) return false;
+  args.splice(index, 1);
+  return true;
 }
 
 function limit(args: string[]): number {
@@ -70,19 +82,31 @@ export async function main(argv = process.argv.slice(2), options: { html?: strin
       await serveResident({ port: Number(internal(args, "--port")), nonce: internal(args, "--nonce"), stateFile: internal(args, "--state"), ...(html === undefined ? {} : { html }) });
       return 0;
     }
-    const n = limit(args), command = args.shift(), catalog = new SessionCatalog({ home: home() });
+    const json = flag(args, "--json"), n = limit(args), command = args.shift(), catalog = new SessionCatalog({ home: home() });
     if (command === "list") {
       const rawTool = args[0]; if (rawTool && !isTool(rawTool)) throw new Error(`未知工具: ${rawTool}`);
       const tool: Tool | undefined = rawTool && isTool(rawTool) ? rawTool : undefined;
-      const rows = await catalog.list({ fresh: true, ...(tool ? { tool } : {}) });
-      rows.filter((row) => !row.archived).slice(0, n).forEach((row) => printEntry(row));
+      const rows = (await catalog.list({ fresh: true, ...(tool ? { tool } : {}) })).filter((row) => !row.archived).slice(0, n);
+      if (json) console.log(JSON.stringify({ sessions: rows.map(withResumeCommand) }, null, 2));
+      else rows.forEach((row) => printEntry(row));
       return 0;
     }
     if (command === "find" && args.length) {
       const { total, results } = await catalog.find(args.join(" "), n);
+      if (json) { console.log(JSON.stringify({ total, results: results.map(withResumeCommand) }, null, 2)); return 0; }
       if (!results.length) { console.log("没有匹配的 session"); return 0; }
       console.log(`共 ${total} 个匹配 session，显示最近 ${results.length} 个：\n`);
       results.forEach((row) => printEntry(row, row.snippet)); return 0;
+    }
+    if (command === "show" && args.length === 1) {
+      const row = await catalog.resolve(args[0]!);
+      const transcript = await catalog.detail(row.id);
+      if (json) console.log(JSON.stringify(withResumeCommand(transcript), null, 2));
+      else {
+        printEntry(transcript);
+        transcript.messages.forEach((message) => console.log(`[${message.role}] ${message.text}\n`));
+      }
+      return 0;
     }
     if (command === "star" && args.length) {
       const row = await catalog.resolve(args[0]!); const note = args.slice(1).join(" ");
