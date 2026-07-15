@@ -267,7 +267,7 @@ async function runDeepSearch(): Promise<void> {
   const request = ++deepSearchRequest;
   deepSearching.value = true;
   try {
-    const response = await fetch(`/api/search?q=${encodeURIComponent(query)}&limit=500`);
+    const response = await fetch(`/api/search?q=${encodeURIComponent(query)}`);
     if (!response.ok) throw new Error("深度检索失败");
     const result = parseSearchEnvelope(await response.json());
     if (request !== deepSearchRequest) return;

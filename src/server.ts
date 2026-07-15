@@ -1,6 +1,6 @@
 import { CatalogError, SessionCatalog } from "./catalog.ts";
-import { isStatus, type MarkPatch, type Session, type Transcript } from "./contracts.ts";
-import { formatResumeCommand } from "./resume.ts";
+import { isStatus, type MarkPatch } from "./contracts.ts";
+import { withResumeCommand } from "./resume.ts";
 import { homedir } from "node:os";
 
 type ServerOptions = {
@@ -25,10 +25,6 @@ async function body(request: Request): Promise<Record<string, unknown>> {
   try { value = await request.json(); } catch { throw new RequestError(400, "请求 JSON 无效"); }
   if (!isRecord(value)) throw new RequestError(400, "请求 JSON 无效");
   return value;
-}
-
-function withResumeCommand<T extends Session | Transcript>(session: T, platform: NodeJS.Platform): T & { resume_command: string } {
-  return { ...session, resume_command: formatResumeCommand(session, platform) };
 }
 
 function catalogStatus(error: unknown): number {
@@ -63,8 +59,8 @@ export function startServer(options: ServerOptions): Bun.Server<undefined> {
         if (request.method === "GET" && url.pathname === "/api/search") {
           const query = url.searchParams.get("q")?.trim();
           if (!query) throw new RequestError(400, "缺少 q");
-          const rawLimit = url.searchParams.get("limit"), limit = rawLimit === null ? 100 : Number(rawLimit);
-          if (!Number.isInteger(limit) || limit < 1 || limit > 500) throw new RequestError(400, "limit 必须是 1 到 500 的整数");
+          const rawLimit = url.searchParams.get("limit"), limit = rawLimit === null ? Number.MAX_SAFE_INTEGER : Number(rawLimit);
+          if (!Number.isSafeInteger(limit) || limit < 1) throw new RequestError(400, "limit 必须是正整数");
           const result = await catalog.find(query, limit);
           return json({ ...result, results: result.results.map((session) => withResumeCommand(session, platform)) });
         }

@@ -69,7 +69,8 @@ describe("Bun HTTP seam", () => {
     });
     expect((await fetch(base + "/api/search")).status).toBe(400);
     expect((await fetch(base + "/api/search?q=fixture&limit=0")).status).toBe(400);
-    expect((await fetch(base + "/api/search?q=fixture&limit=501")).status).toBe(400);
+    expect((await fetch(base + "/api/search?q=fixture&limit=501")).status).toBe(200);
+    expect((await fetch(base + "/api/search?q=fixture&limit=1.5")).status).toBe(400);
   });
 
   test("returns safe JSON when detail parsing fails", async () => {

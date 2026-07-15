@@ -46,9 +46,15 @@ describe("SessionCatalog", () => {
   });
 
   test("deep search combines summary fields with readable Transcript text", async () => {
-    const { catalog } = setup();
+    const { home, catalog } = setup();
+    appendFileSync(join(home, ".claude/projects/-tmp-alpha/claude-a.jsonl"), JSON.stringify({
+      type: "assistant", sessionId: "claude-a", message: { role: "assistant", content: "special \"quoted\" C:\\temp\nnext" },
+    }) + "\n");
     expect((await catalog.find("LEGACY NOTE")).results.map(({ id }) => id)).toEqual(["claude-a"]);
     expect((await catalog.find("FIXTURE-ASSISTANT-CODEX")).results.map(({ id }) => id)).toEqual(["codex-b"]);
+    expect((await catalog.find("\"quoted\"")).results.map(({ id }) => id)).toEqual(["claude-a"]);
+    expect((await catalog.find(String.raw`C:\temp`)).results.map(({ id }) => id)).toEqual(["claude-a"]);
+    expect((await catalog.find("temp\nnext")).results.map(({ id }) => id)).toEqual(["claude-a"]);
     expect((await catalog.find("fixture-user-[codex")).results).toEqual([]);
     expect((await catalog.find("x".repeat(50))).results).toEqual([]);
   });

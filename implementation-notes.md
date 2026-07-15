@@ -22,12 +22,17 @@
 - [x] CLI JSON 与 show
 - [x] HTTP 深度检索路由
 - [x] Vue 普通/深度模式
-- [ ] 完整验证与双轴 review
+- [x] 完整验证与双轴 review
 
 ### Deviations
 
 - 深度检索请求期间修改关键词会让旧响应变成过期结果；保守处理为立即失效旧请求并保留未筛选列表，不尝试缓存或合并旧结果。
 - `code-review` 要求以已提交的 `HEAD` 做三点 diff；因此先创建仅含本功能的 scoped commit，再执行双轴 review，发现问题后追加修复提交。
+
+### Review
+
+- Standards：0 个 hard violation；恢复命令包装重复与 Vue 深搜状态组为 2 个 judgement call。前者已合并到 `resume.ts`，后者维持 Vue refs，等状态继续增长时再收敛。
+- Spec：发现 JSONL 转义查询漏检与页面 500 条截断两项。已增加原文/JSON 转义双候选并在解析后的 Transcript 上复核；页面深搜不再设置固定结果上限。
 
 ### Verification Log
 

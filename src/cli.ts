@@ -2,8 +2,8 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { CatalogError, SessionCatalog } from "./catalog.ts";
-import { isTool, type Session, type Tool, type Transcript } from "./contracts.ts";
-import { formatResumeCommand } from "./resume.ts";
+import { isTool, type Session, type Tool } from "./contracts.ts";
+import { formatResumeCommand, withResumeCommand } from "./resume.ts";
 import { serveResident, startDashboard, stopDashboard } from "./lifecycle.ts";
 import { userDataDirectory } from "./paths.ts";
 import packageJson from "../package.json" with { type: "json" };
@@ -37,10 +37,6 @@ function printEntry(row: Session, snippet?: string): void {
   console.log(`${row.starred ? "★" : " "} [${stamp(row.mtime)}] ${row.tool.padEnd(6)} ${row.cwd}`);
   console.log(`    ${snippet ?? (row.name || row.first_msg)}`);
   console.log(`    ↳ ${formatResumeCommand(row)}\n`);
-}
-
-function withResumeCommand<T extends Session | Transcript>(row: T): T & { resume_command: string } {
-  return { ...row, resume_command: formatResumeCommand(row) };
 }
 
 function flag(args: string[], name: string): boolean {
@@ -87,13 +83,13 @@ export async function main(argv = process.argv.slice(2), options: { html?: strin
       const rawTool = args[0]; if (rawTool && !isTool(rawTool)) throw new Error(`未知工具: ${rawTool}`);
       const tool: Tool | undefined = rawTool && isTool(rawTool) ? rawTool : undefined;
       const rows = (await catalog.list({ fresh: true, ...(tool ? { tool } : {}) })).filter((row) => !row.archived).slice(0, n);
-      if (json) console.log(JSON.stringify({ sessions: rows.map(withResumeCommand) }, null, 2));
+      if (json) console.log(JSON.stringify({ sessions: rows.map((row) => withResumeCommand(row)) }, null, 2));
       else rows.forEach((row) => printEntry(row));
       return 0;
     }
     if (command === "find" && args.length) {
       const { total, results } = await catalog.find(args.join(" "), n);
-      if (json) { console.log(JSON.stringify({ total, results: results.map(withResumeCommand) }, null, 2)); return 0; }
+      if (json) { console.log(JSON.stringify({ total, results: results.map((row) => withResumeCommand(row)) }, null, 2)); return 0; }
       if (!results.length) { console.log("没有匹配的 session"); return 0; }
       console.log(`共 ${total} 个匹配 session，显示最近 ${results.length} 个：\n`);
       results.forEach((row) => printEntry(row, row.snippet)); return 0;

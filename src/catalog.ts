@@ -662,7 +662,10 @@ export class SessionCatalog {
     }
     const roots = this.adapters.map((adapter) => adapter.root).filter((root) => existsSync(root));
     if (roots.length) {
-      const processResult = Bun.spawnSync([rg, "-i", "-F", "-l", "--no-messages", "--no-ignore", "--hidden", "--", query, ...roots]);
+      const patterns = [...new Set([query, JSON.stringify(query).slice(1, -1)]
+        .filter((pattern) => !pattern.includes("\n") && !pattern.includes("\r")))];
+      const processResult = Bun.spawnSync([rg, "-i", "-F", "-l", "--no-messages", "--no-ignore", "--hidden",
+        ...patterns.flatMap((pattern) => ["-e", pattern]), "--", ...roots]);
       if (processResult.exitCode > 1)
         throw new CatalogError("search_failed", processResult.stderr.toString().trim() || "ripgrep 搜索失败");
       for (const path of processResult.stdout.toString().split(/\r?\n/).filter(Boolean)) {

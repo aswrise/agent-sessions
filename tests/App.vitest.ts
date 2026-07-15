@@ -127,7 +127,7 @@ describe("dashboard", () => {
 
     await keyword.trigger("keydown", { key: "Enter" });
     await flushPromises();
-    expect(fetchMock).toHaveBeenCalledWith("/api/search?q=transcript%20needle&limit=500");
+    expect(fetchMock).toHaveBeenCalledWith("/api/search?q=transcript%20needle");
     expect(wrapper.findAll("tbody tr.row")).toHaveLength(1);
     expect(wrapper.get("tbody .msg").text()).toBe("deep transcript needle");
 

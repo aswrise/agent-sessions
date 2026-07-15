@@ -26,3 +26,7 @@ export function formatResumeCommand(input: ResumeInput, platform: NodeJS.Platfor
     return `Set-Location -LiteralPath ${powershell(input.cwd)}; if ($?) { & ${command.map(powershell).join(" ")} }`;
   return `cd -- ${posix(input.cwd)} && ${command.map(posix).join(" ")}`;
 }
+
+export function withResumeCommand<T extends ResumeInput>(input: T, platform: NodeJS.Platform = process.platform): T & { resume_command: string } {
+  return { ...input, resume_command: formatResumeCommand(input, platform) };
+}
