@@ -760,6 +760,7 @@ export class SessionCatalog {
       rows.push({
         id: metadata.id,
         tool: file.adapter.tool,
+        source_path: resolve(file.path),
         cwd: metadata.cwd,
         name: oneLine(name, 120),
         first_msg: oneLine(metadata.first_msg, 240),

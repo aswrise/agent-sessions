@@ -22,7 +22,12 @@ describe("SessionCatalog", () => {
     const database = join(home, ".codex/state_5.sqlite");
     const before = statSync(database).mtimeMs;
     const sessions = await catalog.list({ fresh: true });
-    expect(sessions).toEqual(oracle.sessions);
+    expect(sessions.map(({ source_path: _, ...session }) => session)).toEqual(oracle.sessions);
+    expect(Object.fromEntries(sessions.map(({ id, source_path }) => [id, source_path]))).toEqual({
+      "pi-c": join(home, ".pi/agent/sessions/-tmp-gamma/pi-c.jsonl"),
+      "codex-b": join(home, ".codex/sessions/2026/07/14/rollout-codex-b.jsonl"),
+      "claude-a": join(home, ".claude/projects/-tmp-alpha/claude-a.jsonl"),
+    });
     expect(statSync(database).mtimeMs).toBe(before);
 
     for (const session of sessions) {

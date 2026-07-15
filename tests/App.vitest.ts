@@ -6,6 +6,7 @@ import type { SessionView, TranscriptView } from "../src/contracts.ts";
 const makeRow = (index: number): SessionView => ({
   id: `session-${index}`,
   tool: index % 2 ? "claude" : "codex",
+  source_path: `/home/fixture/sessions/session-${index}.jsonl`,
   cwd: index === 100 ? "/home/fixture/project" : index % 3 ? "/tmp/project" : "/tmp/other",
   name: `Session ${index}`,
   first_msg: `First ${index}`,
@@ -55,7 +56,7 @@ describe("dashboard", () => {
     expect(wrapper.findAll("tbody tr")).toHaveLength(100);
     expect(wrapper.text()).toContain("第 1 / 2 页");
     expect(wrapper.findAll(".rs")).toHaveLength(12);
-    expect(wrapper.findAll("thead th")).toHaveLength(13);
+    expect(wrapper.findAll("thead th")).toHaveLength(14);
     expect(wrapper.find(".tool-pill").exists()).toBe(true);
     expect(wrapper.get("tbody .p").text()).toBe("~/project");
 
@@ -164,6 +165,13 @@ describe("dashboard", () => {
     await flushPromises();
     await wrapper.find("tbody tr").trigger("click");
     expect(navigator.clipboard.writeText).toHaveBeenCalledWith("resume 100");
+    vi.useFakeTimers();
+    const copyPath = wrapper.findAll("button").find((button) => button.text() === "复制路径")!;
+    await copyPath.trigger("click");
+    expect(navigator.clipboard.writeText).toHaveBeenLastCalledWith("/home/fixture/sessions/session-100.jsonl");
+    expect(copyPath.text()).toBe("已复制");
+    await vi.advanceTimersByTimeAsync(1500);
+    expect(copyPath.text()).toBe("复制路径");
     await wrapper.findAll("button").find((button) => button.text() === "查看")!.trigger("click");
     await flushPromises();
     expect(location.search).toBe("?session=session-100");

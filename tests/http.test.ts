@@ -34,6 +34,8 @@ describe("Bun HTTP seam", () => {
     expect((await fetch(base + "/", { method: "HEAD" })).status).toBe(404);
     const envelope = await (await fetch(base + "/api/sessions?fresh=1")).json();
     expect(envelope.sessions.map(({ id }: { id: string }) => id)).toEqual(["pi-c", "codex-b", "claude-a"]);
+    expect(envelope.sessions.find(({ id }: { id: string }) => id === "codex-b").source_path)
+      .toBe(join(home, ".codex/sessions/2026/07/14/rollout-codex-b.jsonl"));
     expect(envelope.generatedAt).toBeString();
     expect(envelope.home).toBe(home);
     const detail = await (await fetch(base + "/api/session?id=codex-b")).json();

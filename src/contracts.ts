@@ -7,6 +7,7 @@ export type SessionStatus = (typeof STATUSES)[number];
 export interface Session {
   id: string;
   tool: Tool;
+  source_path: string;
   cwd: string;
   name: string;
   first_msg: string;
@@ -73,7 +74,7 @@ const numberFields = (value: Record<string, unknown>, fields: string[]) => field
 
 export function isSessionView(value: unknown): value is SessionView {
   if (!isRecord(value)) return false;
-  return stringFields(value, ["id", "cwd", "name", "first_msg", "model", "star_note", "resume_command"])
+  return stringFields(value, ["id", "source_path", "cwd", "name", "first_msg", "model", "star_note", "resume_command"])
     && numberFields(value, ["mtime", "birth", "size_kb"])
     && isTool(value.tool) && isStatus(value.status)
     && typeof value.starred === "boolean" && typeof value.archived === "boolean";

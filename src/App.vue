@@ -71,6 +71,7 @@ const sortKey = ref<SortKey | "">("");
 const sortAscending = ref(false);
 const page = ref(1);
 const pending = ref(new Set<string>());
+const copiedPathId = ref("");
 const detail = ref<TranscriptView>();
 const detailLoading = ref(false);
 const detailError = ref("");
@@ -85,6 +86,7 @@ const previewRequests = new Map<string, Promise<TranscriptView>>();
 let searchTimer: ReturnType<typeof setTimeout> | undefined;
 let deepSearchRequest = 0;
 let toastTimer: ReturnType<typeof setTimeout> | undefined;
+let copiedPathTimer: ReturnType<typeof setTimeout> | undefined;
 let previewShowTimer: ReturnType<typeof setTimeout> | undefined;
 let previewHideTimer: ReturnType<typeof setTimeout> | undefined;
 
@@ -363,6 +365,13 @@ async function copy(row: SessionView | TranscriptView): Promise<void> {
   showToast("已复制恢复命令");
 }
 
+async function copySourcePath(row: SessionView): Promise<void> {
+  await navigator.clipboard.writeText(row.source_path);
+  clearTimeout(copiedPathTimer);
+  copiedPathId.value = row.id;
+  copiedPathTimer = setTimeout(() => { copiedPathId.value = ""; }, 1500);
+}
+
 function clearFilters(): void {
   keyword.value = "";
   effectiveKeyword.value = "";
@@ -636,6 +645,7 @@ onMounted(async () => {
 onBeforeUnmount(() => {
   clearTimeout(searchTimer);
   clearTimeout(toastTimer);
+  clearTimeout(copiedPathTimer);
   clearTimeout(previewShowTimer);
   clearTimeout(previewHideTimer);
   window.removeEventListener("popstate", syncHistory);
@@ -694,7 +704,7 @@ onBeforeUnmount(() => {
     <section v-if="!detail && !detailError && !detailLoading" id="list" aria-label="Session 列表">
       <table>
         <colgroup>
-          <col v-for="(className, index) in ['c-star','c-date','c-date','c-tool','c-model','c-name','c-note','c-stat','','c-path','c-size','c-detail','c-archive']" :key="index" :class="className" :style="widths[index] ? { width: `${widths[index]}px` } : undefined" />
+          <col v-for="(className, index) in ['c-star','c-date','c-date','c-tool','c-model','c-name','c-note','c-stat','','c-path','c-size','c-detail','c-archive','c-source']" :key="index" :class="className" :style="widths[index] ? { width: `${widths[index]}px` } : undefined" />
         </colgroup>
         <thead><tr>
           <th v-for="(column, index) in [
@@ -706,10 +716,11 @@ onBeforeUnmount(() => {
           </th>
           <th title="详情" class="action-head">详情<span class="rs" @pointerdown="resize(11, $event)" /></th>
           <th title="归档" class="action-head">归档</th>
+          <th title="复制源文件路径" class="action-head">源文件</th>
         </tr></thead>
         <tbody>
-          <tr v-if="loading"><td colspan="13"><div class="empty">加载中...</div></td></tr>
-          <tr v-else-if="!filtered.length"><td colspan="13"><div class="empty">没有匹配的 session，试试更短的关键词或切换筛选</div></td></tr>
+          <tr v-if="loading"><td colspan="14"><div class="empty">加载中...</div></td></tr>
+          <tr v-else-if="!filtered.length"><td colspan="14"><div class="empty">没有匹配的 session，试试更短的关键词或切换筛选</div></td></tr>
           <tr v-for="row in visible" v-else :key="row.id" class="row" :class="{ starred: row.starred, archived: row.archived, pending: pending.has(row.id) }" tabindex="0" @click="copy(row)" @keydown.enter="copy(row)">
             <td class="starcell"><button type="button" class="rowbtn starbtn" :disabled="pending.has(row.id)" :aria-label="row.starred ? '取消标记' : '标记重要'" :title="row.starred ? '取消标记' : '标记重要'" @click.stop="toggleStar(row)">{{ row.starred ? "★" : "☆" }}</button></td>
             <td class="dt" @mouseenter="showTextPreview($event, `${row.id}:mtime`, formatDate(row.mtime))" @mouseleave="schedulePreviewHide">{{ formatDate(row.mtime) }}</td>
@@ -730,6 +741,7 @@ onBeforeUnmount(() => {
             <td class="num sz">{{ formatSize(row.size_kb) }}</td>
             <td class="detailcell"><button type="button" class="rowbtn detailbtn" title="打开详情页" @click.stop="openDetail(row.id)">查看</button></td>
             <td class="archcell"><button type="button" class="rowbtn archivebtn" :disabled="pending.has(row.id)" :title="row.archived ? '解除归档' : '归档（在“已归档”视图可找回）'" @click.stop="toggleArchive(row)">{{ row.archived ? "恢复" : "归档" }}</button></td>
+            <td class="sourcecell"><button type="button" class="rowbtn sourcebtn" title="复制源文件路径" aria-live="polite" @click.stop="copySourcePath(row)">{{ copiedPathId === row.id ? "已复制" : "复制路径" }}</button></td>
           </tr>
         </tbody>
       </table>
@@ -843,10 +855,10 @@ input[type=search]:focus{border-color:color-mix(in srgb,var(--lime) 65%,var(--gr
 main{max-width:1600px;margin:0 auto;padding:0 32px 56px}
 #list{overflow-x:auto;border:1px solid var(--obsidian);border-radius:14px;background:var(--carbon);
   box-shadow:0 16px 40px rgba(0,0,0,.08)}
-table{width:100%;min-width:1490px;border-collapse:collapse;table-layout:fixed}
+table{width:100%;min-width:1570px;border-collapse:collapse;table-layout:fixed}
 col.c-star{width:36px}col.c-date{width:92px}col.c-tool{width:70px}
 col.c-name{width:230px}col.c-note{width:120px}col.c-path{width:180px}col.c-size{width:70px}
-col.c-detail{width:58px}col.c-archive{width:66px}
+col.c-detail{width:58px}col.c-archive{width:66px}col.c-source{width:80px}
 .select-button{display:inline-flex;align-items:center;justify-content:space-between;gap:8px;max-width:240px;height:34px;
   padding:0 10px;border:1px solid var(--input-line);border-radius:9px;background:var(--input-bg);
   color:var(--fog);font:inherit;font-size:12px;cursor:pointer;white-space:nowrap}
@@ -887,7 +899,7 @@ tr.row.starred td{background:var(--star-wash)}
 .tool-pill.codex{color:#aab5ff;background:rgba(139,156,255,.1)}
 .tool-pill.claude{color:#e9a884;background:rgba(222,137,91,.1)}
 .tool-pill.pi{color:#76d5b0;background:rgba(77,190,147,.1)}
-td.starcell,td.detailcell,td.archcell{text-align:center}
+td.starcell,td.detailcell,td.archcell,td.sourcecell{text-align:center}
 td.starcell{padding-left:3px;padding-right:3px}
 .rowbtn{display:inline-grid;place-items:center;min-width:28px;height:28px;padding:0 7px;border:0;border-radius:7px;
   background:transparent;color:var(--ash);font:inherit;font-size:11px;cursor:pointer;
