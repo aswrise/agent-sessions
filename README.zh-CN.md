@@ -77,6 +77,29 @@ nonce 的普通 GET 健康响应，不会接管占用端口的无关进程。
 `stars.json` 保持兼容：POSIX 位于 `~/.local/share/session-snapshots/`，原生
 Windows 位于平台本地应用数据目录。
 
+## 启动 Dashboard
+
+根据安装方式选择对应命令：
+
+```bash
+# 已安装到 PATH 的可执行文件
+sessions dash
+
+# 从源码构建的独立可执行文件
+./build/sessions dash
+
+# 源码目录直接启动（首次启动前先构建内嵌页面）
+bun install --frozen-lockfile
+bun run build
+./sessions dash
+```
+
+前两种方式要求对应的可执行文件已经存在。源码方式首次启动前需要先执行
+构建命令。如果浏览器没有自动打开，可访问 `http://127.0.0.1:7867/`。使用
+`sessions dash --no-open`（或将 `sessions` 替换为上面的其他命令）可禁止自动
+打开浏览器，使用 `sessions dash --stop` 可停止常驻 Dashboard。只有需要构建
+独立可执行文件时才需要执行 `bun run compile`。
+
 ## 开发
 
 ```bash

@@ -82,6 +82,31 @@ only write to a Session file. Marks remain compatible with the existing
 `stars.json` at `~/.local/share/session-snapshots/` on POSIX and the platform
 local application-data directory on native Windows.
 
+## Starting the Dashboard
+
+Choose the command that matches how you installed the project:
+
+```bash
+# Installed executable on PATH
+sessions dash
+
+# Standalone executable built from source
+./build/sessions dash
+
+# Source checkout (builds the embedded Dashboard first)
+bun install --frozen-lockfile
+bun run build
+./sessions dash
+```
+
+The installed and standalone commands require the executable to be available
+as shown. For a source checkout, run the build commands before the first start.
+Open `http://127.0.0.1:7867/` if the browser does not open automatically. Use
+`sessions dash --no-open` (or replace `sessions` with the command above) to
+suppress browser opening and `sessions dash --stop` to stop the resident
+Dashboard. `bun run compile` is only needed when you want to build the
+standalone executable.
+
 ## Development
 
 ```bash

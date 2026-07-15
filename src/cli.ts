@@ -63,7 +63,11 @@ export async function main(argv = process.argv.slice(2), options: { html?: strin
     if (["-h", "--help"].includes(args[0]!)) { console.log(HELP); return 0; }
     if (args[0] === "--version") { console.log(`sessions ${packageJson.version}`); return 0; }
     if (args[0] === "_serve") {
-      await serveResident({ port: Number(internal(args, "--port")), nonce: internal(args, "--nonce"), stateFile: internal(args, "--state"), ...(options.html === undefined ? {} : { html: options.html }) });
+      let html = options.html;
+      if (html === undefined) {
+        try { html = (await import("../build/generated-html.ts")).INDEX_HTML; } catch {}
+      }
+      await serveResident({ port: Number(internal(args, "--port")), nonce: internal(args, "--nonce"), stateFile: internal(args, "--state"), ...(html === undefined ? {} : { html }) });
       return 0;
     }
     const n = limit(args), command = args.shift(), catalog = new SessionCatalog({ home: home() });

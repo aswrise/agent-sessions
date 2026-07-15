@@ -1,3 +1,8 @@
 #!/usr/bin/env bun
 const { main } = await import("./src/cli.ts");
-process.exit(await main());
+let options = {};
+try {
+  const { INDEX_HTML } = await import("./build/generated-html.ts");
+  options = { html: INDEX_HTML };
+} catch {}
+process.exit(await main(process.argv.slice(2), options));
