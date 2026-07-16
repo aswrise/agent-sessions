@@ -4,14 +4,13 @@ import { dirname, normalize } from "node:path";
 import type { LineageEdge, LineageRefresh, Session } from "./contracts.ts";
 
 type Json = Record<string, unknown>;
-type ReferenceSource = "user" | "goal";
 type WriteKind = "add" | "update";
-type TextInput = { text: string; source: ReferenceSource; at: number };
+type TextInput = { text: string; at: number };
 type Write = { path: string; at: number; turn: number; kind: WriteKind };
 type Turn = { texts: TextInput[]; writes: Omit<Write, "turn">[] };
 type Facts = { references: Reference[]; writes: Write[] };
-type Reference = { session_id: string; path: string; at: number; turn: number; source: ReferenceSource };
-const INDEX_VERSION = 1;
+type Reference = { session_id: string; path: string; at: number; turn: number; source: "user" };
+const INDEX_VERSION = 2;
 
 interface LineageGraph {
   session_ids: string[];
@@ -76,9 +75,9 @@ function facts(session: Session): Facts {
       ? claudeTurns(parsed, session.birth)
       : piTurns(parsed, session.birth);
   const effective = turns.filter((turn) => turn.texts.length > 0);
-  const references = effective.slice(0, 3).flatMap((turn, turnIndex) => turn.texts.flatMap((input) =>
+  const references = effective.slice(0, 2).flatMap((turn, turnIndex) => turn.texts.flatMap((input) =>
     artifactPaths(input.text).map((path) => ({
-      session_id: session.id, path, at: input.at, turn: turnIndex, source: input.source,
+      session_id: session.id, path, at: input.at, turn: turnIndex, source: "user" as const,
     }))));
   const offset = Math.max(0, effective.length - 3);
   const writes = effective.slice(-3).flatMap((turn, index) => turn.writes.map((write) => ({
@@ -93,7 +92,6 @@ function codexTurns(input: Json[], birth: number): Turn[] {
   const hasUserEvents = input.some((record) => record.type === "event_msg"
     && isRecord(record.payload) && record.payload.type === "user_message");
   let current: Turn | undefined;
-  let pendingGoals: TextInput[] = [];
   const create = (id = ""): Turn => {
     if (id && byId.has(id)) return byId.get(id)!;
     const turn = { texts: [], writes: [] } satisfies Turn;
@@ -106,27 +104,20 @@ function codexTurns(input: Json[], birth: number): Turn[] {
   input.forEach((record, line) => {
     const payload = isRecord(record.payload) ? record.payload : undefined;
     const at = epoch(record.timestamp, birth + line / 1_000_000);
-    if (record.type === "event_msg" && payload?.type === "thread_goal_updated") {
-      const goal = isRecord(payload.goal) ? stringValue(payload.goal.objective).trim() : "";
-      if (goal && !injected(goal)) pendingGoals.push({ text: goal, source: "goal", at });
-      return;
-    }
     if (record.type === "event_msg" && payload?.type === "task_started") {
-      const turn = create(stringValue(payload.turn_id));
-      turn.texts.push(...pendingGoals);
-      pendingGoals = [];
+      create(stringValue(payload.turn_id));
       return;
     }
     if (record.type === "event_msg" && payload?.type === "user_message") {
       const text = stringValue(payload.message).trim();
       if (!text || injected(text)) return;
-      const turn = current && !current.texts.some((input) => input.source === "user") ? current : create();
-      turn.texts.push({ text, source: "user", at });
+      const turn = current && current.texts.length === 0 ? current : create();
+      turn.texts.push({ text, at });
       return;
     }
     if (!hasUserEvents && record.type === "response_item" && payload?.type === "message" && payload.role === "user") {
       const text = contentText(payload.content);
-      if (text && !injected(text)) create().texts.push({ text, source: "user", at });
+      if (text && !injected(text)) create().texts.push({ text, at });
       return;
     }
     if (record.type === "event_msg" && payload?.type === "patch_apply_end" && payload.success === true) {
@@ -139,7 +130,6 @@ function codexTurns(input: Json[], birth: number): Turn[] {
       }
     }
   });
-  if (pendingGoals.length) create().texts.push(...pendingGoals);
   return turns;
 }
 
@@ -154,7 +144,7 @@ function claudeTurns(input: Json[], birth: number): Turn[] {
     if (message?.role === "user" && !(Array.isArray(content) && content.some((part) => isRecord(part) && part.type === "tool_result"))) {
       const text = contentText(content);
       if (text && !injected(text)) {
-        current = { texts: [{ text, source: "user", at }], writes: [] };
+        current = { texts: [{ text, at }], writes: [] };
         turns.push(current);
       }
     }
@@ -196,7 +186,7 @@ function piTurns(input: Json[], birth: number): Turn[] {
     if (message.role === "user") {
       const text = contentText(content);
       if (text && !injected(text)) {
-        current = { texts: [{ text, source: "user", at }], writes: [] };
+        current = { texts: [{ text, at }], writes: [] };
         turns.push(current);
       }
     }
@@ -286,6 +276,19 @@ export class LineageIndex {
       return {
         session_ids: [...visited].sort(),
         edges: all.filter((edge) => visited.has(edge.upstream_id) && visited.has(edge.downstream_id)),
+      };
+    } finally {
+      db.close();
+    }
+  }
+
+  all(): LineageGraph {
+    const db = this.open();
+    try {
+      const edges = db.query("SELECT * FROM lineage_edges ORDER BY referenced_at, upstream_id, downstream_id, path").all() as LineageEdge[];
+      return {
+        session_ids: [...new Set(edges.flatMap((edge) => [edge.upstream_id, edge.downstream_id]))].sort(),
+        edges,
       };
     } finally {
       db.close();

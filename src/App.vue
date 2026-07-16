@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import MarkdownIt from "markdown-it";
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import LineageGraph from "./LineageGraph.vue";
 import {
   parseLineageRefresh,
   parseLineageView,
@@ -17,6 +18,7 @@ import {
 
 type Tab = "" | Tool | "__star__" | "__arch__";
 type SearchMode = "normal" | "deep";
+type ViewMode = "sessions" | "lineage";
 type SortKey = keyof Pick<SessionView, "starred" | "mtime" | "birth" | "tool" | "model" | "name" | "star_note" | "status" | "first_msg" | "cwd" | "size_kb">;
 type MenuItem = { value: string; label: string };
 type MenuState = {
@@ -52,6 +54,7 @@ const loading = ref(true);
 const refreshing = ref(false);
 const error = ref("");
 const notice = ref("");
+const viewMode = ref<ViewMode>("sessions");
 const tab = ref<Tab>("");
 const keyword = ref("");
 const effectiveKeyword = ref("");
@@ -81,6 +84,8 @@ const detailError = ref("");
 const lineage = ref<LineageView>();
 const lineageLoading = ref(false);
 const indexingLineage = ref(false);
+const globalLineage = ref<LineageView>();
+const globalLineageLoading = ref(false);
 const editing = ref<Editing>();
 const editValue = ref("");
 const menu = ref<MenuState>();
@@ -255,10 +260,24 @@ async function indexLineage(): Promise<void> {
     if (!response.ok) throw new Error();
     const result = parseLineageRefresh(await response.json());
     showToast(`已分析 ${result.sessions} 个 Session，发现 ${result.edges} 条关系`);
+    if (viewMode.value === "lineage") await loadGlobalLineage();
   } catch {
     showToast("关系分析失败", true);
   } finally {
     indexingLineage.value = false;
+  }
+}
+
+async function loadGlobalLineage(): Promise<void> {
+  globalLineageLoading.value = true;
+  try {
+    const response = await fetch("/api/lineages");
+    if (!response.ok) throw new Error();
+    globalLineage.value = parseLineageView(await response.json());
+  } catch {
+    showToast("关系图加载失败", true);
+  } finally {
+    globalLineageLoading.value = false;
   }
 }
 
@@ -506,17 +525,17 @@ async function openDetail(id: string, push = true): Promise<void> {
   hidePreview();
   closeMenu();
   if (push) history.pushState(null, "", `/?session=${encodeURIComponent(id)}`);
+  void loadLineage(id);
   try { detail.value = await fetchDetail(id); }
   catch { detailError.value = "加载失败"; }
   finally { detailLoading.value = false; }
 }
 
-async function loadLineage(): Promise<void> {
-  if (!detail.value) return;
+async function loadLineage(id: string): Promise<void> {
   lineageLoading.value = true;
   lineage.value = undefined;
   try {
-    const response = await fetch(`/api/lineage?id=${encodeURIComponent(detail.value.id)}`);
+    const response = await fetch(`/api/lineage?id=${encodeURIComponent(id)}&refresh=0`);
     if (!response.ok) throw new Error();
     lineage.value = parseLineageView(await response.json());
   } catch {
@@ -526,23 +545,34 @@ async function loadLineage(): Promise<void> {
   }
 }
 
-function lineageName(id: string): string {
-  const session = lineage.value?.sessions.find((item) => item.id === id);
-  return session?.name || session?.first_msg || id;
-}
-
-function showList(push = true): void {
+function showSessions(push = true): void {
+  viewMode.value = "sessions";
   detail.value = undefined;
-  lineage.value = undefined;
-  lineageLoading.value = false;
   detailError.value = "";
   detailLoading.value = false;
   if (push) history.pushState(null, "", "/");
 }
 
+function showLineages(push = true): void {
+  viewMode.value = "lineage";
+  detail.value = undefined;
+  detailError.value = "";
+  detailLoading.value = false;
+  if (push) history.pushState(null, "", "/?view=lineage");
+  void loadGlobalLineage();
+}
+
+function showList(push = true): void {
+  lineage.value = undefined;
+  lineageLoading.value = false;
+  if (viewMode.value === "lineage") showLineages(push); else showSessions(push);
+}
+
 function syncHistory(): void {
-  const id = new URLSearchParams(location.search).get("session");
-  if (id) void openDetail(id, false); else showList(false);
+  const params = new URLSearchParams(location.search), id = params.get("session");
+  if (id) void openDetail(id, false);
+  else if (params.get("view") === "lineage") showLineages(false);
+  else showSessions(false);
 }
 
 async function placePreview(): Promise<void> {
@@ -705,10 +735,14 @@ onBeforeUnmount(() => {
       <span class="mark" aria-hidden="true">◆</span>
       <div><h1>Agent Sessions</h1><p class="tagline">找到上下文，继续工作。</p></div>
     </div>
+    <nav v-if="!detail && !detailError && !detailLoading" class="view-switch" aria-label="主视图">
+      <button id="showSessions" type="button" :class="{ active: viewMode === 'sessions' }" :aria-pressed="viewMode === 'sessions'" @click="showSessions()">Sessions</button>
+      <button id="showLineages" type="button" :class="{ active: viewMode === 'lineage' }" :aria-pressed="viewMode === 'lineage'" @click="showLineages()">关系图</button>
+    </nav>
     <span class="meta"><strong>{{ rows.length }}</strong> 个会话 · 更新于 {{ formatGeneratedAt(generatedAt) }}</span>
   </header>
 
-  <div v-if="!detail && !detailError && !detailLoading" id="chrome" class="chrome">
+  <div v-if="!detail && !detailError && !detailLoading && viewMode === 'sessions'" id="chrome" class="chrome">
     <div class="bar">
       <div class="search-modes" role="group" aria-label="检索范围">
         <button id="searchModeNormal" type="button" class="f" :class="{ on: searchMode === 'normal' }" :aria-pressed="searchMode === 'normal'" @click="setSearchMode('normal')">普通</button>
@@ -730,7 +764,6 @@ onBeforeUnmount(() => {
         筛选<span v-if="activeFilterCount" class="filter-count">{{ activeFilterCount }}</span>
       </button>
       <button id="reload" type="button" class="f act" title="重新扫描 session 数据" :disabled="loading || refreshing" @click="load(true)">{{ refreshing ? "刷新中…" : "刷新" }}</button>
-      <button id="lineageIndex" type="button" class="f act" title="扫描所有 Session 的 Markdown / HTML 传递关系" :disabled="indexingLineage" @click="indexLineage">{{ indexingLineage ? "分析中…" : "分析关系" }}</button>
       <button id="theme" type="button" class="f act" :title="theme === 'dark' ? '切换到浅色主题' : '切换到深色主题'" :aria-label="theme === 'dark' ? '切换到浅色主题' : '切换到深色主题'" @click="toggleTheme">{{ theme === "dark" ? "☀︎" : "☾" }}</button>
     </div>
     <div v-show="advanced" id="advancedFilters" class="bar2">
@@ -746,7 +779,20 @@ onBeforeUnmount(() => {
   </div>
 
   <main>
-    <section v-if="!detail && !detailError && !detailLoading" id="list" aria-label="Session 列表">
+    <section v-if="!detail && !detailError && !detailLoading && viewMode === 'lineage'" id="lineageOverview" aria-label="全部关系链">
+      <div class="lineage-toolbar">
+        <div><h2>Session 关系图</h2><p>按文件传递方向从左到右排列；悬停节点可聚焦直接上下游。</p></div>
+        <button id="lineageIndex" type="button" class="f act" :disabled="indexingLineage" @click="indexLineage">{{ indexingLineage ? "分析中…" : "重新分析" }}</button>
+      </div>
+      <div v-if="globalLineageLoading && !globalLineage" class="empty">正在读取关系缓存...</div>
+      <div v-else-if="!globalLineage?.edges.length" class="lineage-zero">
+        <strong>缓存中还没有关系链</strong><span>先分析一次，之后打开关系图和 Session 详情都会直接读取持久缓存。</span>
+        <button type="button" class="f act" :disabled="indexingLineage" @click="indexLineage">开始分析</button>
+      </div>
+      <LineageGraph v-else :view="globalLineage" @select="openDetail" />
+    </section>
+
+    <section v-else-if="!detail && !detailError && !detailLoading" id="list" aria-label="Session 列表">
       <table>
         <colgroup>
           <col v-for="(className, index) in ['c-star','c-date','c-date','c-tool','c-model','c-name','c-note','c-stat','','c-path','c-size','c-detail','c-archive','c-source']" :key="index" :class="className" :style="widths[index] ? { width: `${widths[index]}px` } : undefined" />
@@ -805,17 +851,12 @@ onBeforeUnmount(() => {
         <div class="detail-top">
           <button type="button" class="f act" @click="showList()">返回</button>
           <button type="button" class="f act" @click="copy(detail)">复制恢复命令</button>
-          <button id="sessionLineage" type="button" class="f act" :disabled="lineageLoading" @click="loadLineage">{{ lineageLoading ? "分析中…" : "关系链" }}</button>
           <div class="detail-title">{{ detail.name || detail.first_msg || detail.id }}</div>
           <div class="detail-meta mono">{{ detail.tool }} · {{ detail.model || "无模型" }} · {{ shortPath(detail.cwd) }} · {{ formatSize(detail.size_kb) }}</div>
         </div>
-        <section v-if="lineage" class="lineage-panel" aria-label="Session 关系链">
-          <div class="lineage-summary">{{ lineage.sessions.length }} 个 Session · {{ lineage.edges.length }} 条关系</div>
-          <div v-if="!lineage.edges.length" class="lineage-empty">暂未发现上下游 Session</div>
-          <div v-for="edge in lineage.edges" v-else :key="`${edge.upstream_id}:${edge.downstream_id}:${edge.path}`" class="lineage-edge">
-            <span>{{ lineageName(edge.upstream_id) }}</span><strong>→</strong><span>{{ lineageName(edge.downstream_id) }}</span>
-            <code>{{ edge.path }}</code>
-          </div>
+        <div v-if="lineageLoading" class="lineage-loading">正在读取关系缓存...</div>
+        <section v-else-if="lineage" class="detail-lineage" aria-label="Session 关系链">
+          <LineageGraph :view="lineage" :focus-id="detail.id" @select="openDetail" />
         </section>
         <div class="msglist">
           <div v-if="!detail.messages.length" class="empty">没有可展示的 user / assistant 文本消息</div>
@@ -876,6 +917,8 @@ header{display:flex;align-items:center;justify-content:space-between;gap:24px;fl
   font-size:15px;box-shadow:inset 0 1px 0 rgba(255,255,255,.08)}
 h1{font-size:19px;line-height:1.2;font-weight:650;letter-spacing:-.025em;margin:0;color:var(--paper)}
 .tagline{margin:3px 0 0;color:var(--ash);font-size:12px;letter-spacing:.005em}
+.view-switch{display:flex;align-items:center;gap:3px;padding:3px;border:1px solid var(--obsidian);border-radius:10px;background:var(--carbon)}
+.view-switch button{padding:6px 12px;border:0;border-radius:7px;background:transparent;color:var(--ash);font-size:12px;cursor:pointer;transition:transform 140ms var(--ease-out),background-color 140ms ease,color 140ms ease}.view-switch button.active{background:var(--chip);color:var(--paper);box-shadow:0 1px 3px rgba(0,0,0,.18)}.view-switch button:active{transform:scale(.97)}.view-switch button:focus-visible{outline:2px solid var(--lime);outline-offset:2px}
 .meta{color:var(--ash);font-size:12px;padding:7px 10px;border:1px solid var(--obsidian);
   border-radius:8px;background:var(--carbon)}
 .meta strong{color:var(--paper);font-weight:600;font-variant-numeric:tabular-nums}
@@ -909,6 +952,7 @@ input[type=search]:focus{border-color:color-mix(in srgb,var(--lime) 65%,var(--gr
 main{max-width:1600px;margin:0 auto;padding:0 32px 56px}
 #list{overflow-x:auto;border:1px solid var(--obsidian);border-radius:14px;background:var(--carbon);
   box-shadow:0 16px 40px rgba(0,0,0,.08)}
+#lineageOverview{display:grid;gap:14px}.lineage-toolbar{display:flex;align-items:center;justify-content:space-between;gap:20px;padding:16px 18px;border:1px solid var(--obsidian);border-radius:14px;background:var(--carbon)}.lineage-toolbar h2{margin:0;color:var(--paper);font-size:15px;font-weight:650}.lineage-toolbar p{margin:3px 0 0;color:var(--ash);font-size:11px}.lineage-zero{display:grid;justify-items:center;gap:8px;padding:72px 20px;border:1px dashed var(--graphite);border-radius:14px;color:var(--ash);text-align:center}.lineage-zero strong{color:var(--mist);font-size:14px}.lineage-zero span{max-width:520px;font-size:12px}.detail-lineage{margin-top:12px}.lineage-loading{margin-top:12px;padding:28px;border:1px solid var(--obsidian);border-radius:12px;background:var(--carbon);color:var(--ash);text-align:center}
 table{width:100%;min-width:1570px;border-collapse:collapse;table-layout:fixed}
 col.c-star{width:36px}col.c-date{width:92px}col.c-tool{width:70px}
 col.c-name{width:230px}col.c-note{width:120px}col.c-path{width:180px}col.c-size{width:70px}
@@ -977,12 +1021,6 @@ col.c-stat{width:116px}col.c-model{width:120px}
   border:1px solid var(--obsidian);border-radius:14px;background:var(--carbon)}
 .detail-title{font-size:16px;font-weight:620;color:var(--paper);min-width:0;flex:1}
 .detail-meta{color:var(--ash);font-size:12px;width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.lineage-panel{display:grid;gap:8px;margin-top:12px;padding:14px 18px;border:1px solid var(--obsidian);border-radius:12px;background:var(--carbon)}
-.lineage-summary{color:var(--fog);font-size:12px;font-weight:600}
-.lineage-empty{color:var(--ash);font-size:12px}
-.lineage-edge{display:grid;grid-template-columns:minmax(0,1fr) auto minmax(0,1fr);gap:8px;align-items:center;color:var(--mist);font-size:12px}
-.lineage-edge span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.lineage-edge strong{color:var(--lime)}
-.lineage-edge code{grid-column:1/-1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--ash);font-size:11px}
 .msglist{display:grid;gap:14px;padding:20px 0 48px;max-width:1040px;margin:0 auto}
 .bubble{max-width:88%;border:1px solid var(--obsidian);border-radius:14px 14px 14px 4px;
   padding:13px 15px;background:var(--carbon);box-shadow:0 5px 18px rgba(0,0,0,.06)}
@@ -1051,13 +1089,14 @@ col.c-stat{width:116px}col.c-model{width:120px}
 .markdown table{width:auto;min-width:0;table-layout:auto}.markdown th,.markdown td{height:auto;padding:5px 7px;white-space:normal}
 @media (hover:hover) and (pointer:fine){
   .f:hover{background:var(--chip);color:var(--paper)}
+  .view-switch button:hover{color:var(--paper)}
   th:hover{color:var(--mist)}
   tr.row:hover td{background:var(--hover)}
   .rowbtn:hover{background:var(--chip);color:var(--paper)}
   .menu-option:hover{background:var(--chip);color:var(--paper)}
 }
 @media (max-width:760px){
-  header{padding:24px 16px 18px}.meta{width:100%}.chrome{top:8px;margin:0 12px 14px}
+  header{padding:24px 16px 18px}.view-switch{order:3}.meta{width:100%}.chrome{top:8px;margin:0 12px 14px}
   main{padding:0 12px 36px}.searchbox{min-width:100%}.tabs{order:3;width:100%;overflow-x:auto}
 }
 @media (prefers-reduced-motion:reduce){html,body,.f,.rowbtn,.select-button svg,.menu,#tip,#toast{transition-duration:0ms}}

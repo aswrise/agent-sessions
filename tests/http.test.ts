@@ -69,6 +69,7 @@ describe("Bun HTTP seam", () => {
       total: 1,
       results: [{ id: "codex-b", snippet: "fixture-assistant-codex", resume_command: "cd -- /tmp/beta && codex resume codex-b -m gpt-fixture" }],
     });
+    expect(await (await fetch(base + "/api/lineages")).json()).toEqual({ sessions: [], edges: [] });
     expect((await fetch(base + "/api/search")).status).toBe(400);
     expect((await fetch(base + "/api/search?q=fixture&limit=0")).status).toBe(400);
     expect((await fetch(base + "/api/search?q=fixture&limit=501")).status).toBe(200);

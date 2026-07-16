@@ -36,7 +36,7 @@ function codexTurn(turn: string, at: string, user: string, writes: { path: strin
 }
 
 describe("LineageIndex", () => {
-  test("links the last three producer turns to the first three effective consumer inputs", () => {
+  test("links assistant writes from the last three turns to user references in the first two turns", () => {
     const { root, write, session, index } = setup();
     const ignored = join(root, "ignored.md"), handoff = join(root, "handoff.md"), plan = join(root, "plan.md"), deleted = join(root, "deleted.md"), windowsDoc = String.raw`C:\handoff.html`;
     const aPath = write("a", [
@@ -53,13 +53,13 @@ describe("LineageIndex", () => {
       { timestamp: "2026-07-16T00:20:00Z", type: "event_msg", payload: { type: "task_started", turn_id: "b-empty-2" } },
       { timestamp: "2026-07-16T00:30:00Z", type: "event_msg", payload: { type: "task_started", turn_id: "b-empty-3" } },
       ...codexTurn("b1", "2026-07-16T01:00:00Z", "start"),
-      ...codexTurn("b2", "2026-07-16T02:00:00Z", "continue"),
-      ...codexTurn("b3", "2026-07-16T03:00:00Z", `read ${handoff}:12, ${windowsDoc}, but not ${deleted}`, [{ path: plan }]),
+      ...codexTurn("b2", "2026-07-16T02:00:00Z", `read ${handoff}:12, ${windowsDoc}, but not ${deleted}`),
+      ...codexTurn("b3", "2026-07-16T03:00:00Z", "write the plan", [{ path: plan }]),
       ...codexTurn("b4", "2026-07-16T04:00:00Z", `too late ${ignored}`),
     ]);
     const cPath = write("c", [
       { timestamp: "2026-07-17T01:00:00Z", type: "event_msg", payload: { type: "thread_goal_updated", goal: { objective: `implement ${plan}` } } },
-      { timestamp: "2026-07-17T01:00:00Z", type: "event_msg", payload: { type: "task_started", turn_id: "c1" } },
+      ...codexTurn("c1", "2026-07-17T01:00:00Z", `implement ${plan}`),
     ]);
     const sessions = [
       session("a", "codex", aPath, 1), session("b", "codex", bPath, 2), session("c", "codex", cPath, 3),
@@ -71,9 +71,34 @@ describe("LineageIndex", () => {
       edges: [
         expect.objectContaining({ upstream_id: "a", downstream_id: "b", path: handoff, reference_source: "user" }),
         expect.objectContaining({ upstream_id: "a", downstream_id: "b", path: windowsDoc, reference_source: "user" }),
-        expect.objectContaining({ upstream_id: "b", downstream_id: "c", path: plan, reference_source: "goal" }),
+        expect.objectContaining({ upstream_id: "b", downstream_id: "c", path: plan, reference_source: "user" }),
       ],
     });
+    expect(new LineageIndex(join(root, "lineage.sqlite")).all()).toMatchObject({
+      session_ids: ["a", "b", "c"], edges: expect.any(Array),
+    });
+  });
+
+  test("ignores goal and assistant references, third user turn, and user-only producer mentions", () => {
+    const { root, write, session, index } = setup();
+    const written = join(root, "written.md"), mentioned = join(root, "mentioned.md");
+    const producerPath = write("producer", codexTurn("p1", "2026-07-15T01:00:00Z", `I mentioned ${mentioned}`, [{ path: written }]));
+    const assistantConsumerPath = write("assistant-consumer", [
+      { timestamp: "2026-07-15T02:00:00Z", type: "response_item", payload: { type: "message", role: "assistant", content: [{ type: "output_text", text: `read ${written}` }] } },
+    ]);
+    const lateConsumerPath = write("late-consumer", [
+      { timestamp: "2026-07-15T03:00:00Z", type: "event_msg", payload: { type: "thread_goal_updated", goal: { objective: `use ${written}` } } },
+      ...codexTurn("c1", "2026-07-15T03:01:00Z", "first"),
+      ...codexTurn("c2", "2026-07-15T03:02:00Z", "second"),
+      ...codexTurn("c3", "2026-07-15T03:03:00Z", `third ${written} ${mentioned}`),
+    ]);
+    const sessions = [
+      session("producer", "codex", producerPath, 1),
+      session("assistant-consumer", "codex", assistantConsumerPath, 2),
+      session("late-consumer", "codex", lateConsumerPath, 3),
+    ];
+
+    expect(index.refresh(sessions, true)).toMatchObject({ writes: 1, references: 1, edges: 0 });
   });
 
   test("uses the most recent prior writer and refreshes only changed sessions", () => {

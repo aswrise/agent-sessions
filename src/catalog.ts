@@ -661,12 +661,24 @@ export class SessionCatalog {
     if (refresh) this.lineageIndex.refresh(sessions);
     const graph = this.lineageIndex.lineage(id);
     const indexed = new Map(sessions.map((session) => [session.id, session]));
+    const present = new Set(graph.session_ids.filter((sessionId) => indexed.has(sessionId)));
     return {
-      sessions: graph.session_ids.flatMap((sessionId) => {
+      sessions: [...present].flatMap((sessionId) => {
         const session = indexed.get(sessionId);
         return session ? [session] : [];
       }),
-      edges: graph.edges,
+      edges: graph.edges.filter((edge) => present.has(edge.upstream_id) && present.has(edge.downstream_id)),
+    };
+  }
+
+  async lineages(): Promise<{ sessions: Session[]; edges: LineageEdge[] }> {
+    const sessions = await this.list();
+    const graph = this.lineageIndex.all();
+    const ids = new Set(graph.session_ids);
+    const present = new Set(sessions.filter((session) => ids.has(session.id)).map((session) => session.id));
+    return {
+      sessions: sessions.filter((session) => present.has(session.id)),
+      edges: graph.edges.filter((edge) => present.has(edge.upstream_id) && present.has(edge.downstream_id)),
     };
   }
 

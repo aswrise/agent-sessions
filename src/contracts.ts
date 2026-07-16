@@ -62,7 +62,7 @@ export interface LineageEdge {
   referenced_at: number;
   producer_turn: number;
   reference_turn: number;
-  reference_source: "user" | "goal";
+  reference_source: "user";
   kind: "add" | "update";
 }
 
@@ -136,7 +136,7 @@ export function parseLineageView(value: unknown): LineageView {
   const edge = (item: unknown): boolean => isRecord(item)
     && stringFields(item, ["upstream_id", "downstream_id", "path", "reference_source", "kind"])
     && numberFields(item, ["produced_at", "referenced_at", "producer_turn", "reference_turn"])
-    && ["user", "goal"].includes(item.reference_source as string)
+    && item.reference_source === "user"
     && ["add", "update"].includes(item.kind as string);
   if (!isRecord(value) || !Array.isArray(value.sessions) || !value.sessions.every(isSessionView)
       || !Array.isArray(value.edges) || !value.edges.every(edge))

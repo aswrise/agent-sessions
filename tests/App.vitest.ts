@@ -193,19 +193,23 @@ describe("dashboard", () => {
     wrapper.unmount();
   });
 
-  test("indexes globally and shows the complete lineage from Session detail", async () => {
+  test("shows the cached global DAG and loads the complete DAG automatically in Session detail", async () => {
     const wrapper = mount(App, { attachTo: document.body });
     await flushPromises();
+    await wrapper.get("#showLineages").trigger("click");
+    await flushPromises();
+    expect(wrapper.get("[aria-label='全部关系链']").findAll(".dag-node")).toHaveLength(2);
+    expect(wrapper.get("[aria-label='全部关系链']").findAll(".dag-link")).toHaveLength(1);
     await wrapper.get("#lineageIndex").trigger("click");
     await flushPromises();
     expect(wrapper.get("#toast").text()).toContain("发现 1 条关系");
 
+    await wrapper.get("#showSessions").trigger("click");
     await wrapper.findAll("button").find((button) => button.text() === "查看")!.trigger("click");
     await flushPromises();
-    await wrapper.get("#sessionLineage").trigger("click");
-    await flushPromises();
-    expect(wrapper.get("[aria-label='Session 关系链']").text()).toContain("Session 99→Session 100");
-    expect(wrapper.get("[aria-label='Session 关系链'] code").text()).toBe("/tmp/handoff.md");
+    expect(wrapper.find("#sessionLineage").exists()).toBe(false);
+    expect(wrapper.get("[aria-label='Session 关系链']").findAll(".dag-node")).toHaveLength(2);
+    expect(fetchMock.mock.calls.some(([input]) => String(input) === "/api/lineage?id=session-100&refresh=0")).toBe(true);
     wrapper.unmount();
   });
 
