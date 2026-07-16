@@ -1,6 +1,6 @@
 # 005 — 收敛关系高亮层级
 
-- **Status**: TODO
+- **Status**: DONE
 - **Commit**: d17ef79
 - **Severity**: MEDIUM
 - **Category**: Cohesion & tokens

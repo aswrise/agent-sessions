@@ -22,6 +22,10 @@ const makeRow = (index: number): SessionView => ({
 });
 
 const response = (value: unknown, status = 200) => new Response(JSON.stringify(value), { status, headers: { "content-type": "application/json" } });
+const lineageEdge = (upstream_id: string, downstream_id: string, path = "/tmp/handoff.md") => ({
+  upstream_id, downstream_id, path, produced_at: 1, referenced_at: 2,
+  producer_turn: 3, reference_turn: 0, reference_source: "user" as const, kind: "add" as const,
+});
 let fetchMock: ReturnType<typeof vi.fn>;
 
 beforeEach(() => {
@@ -32,7 +36,10 @@ beforeEach(() => {
     if (url.startsWith("/api/sessions")) return response({ generatedAt: new Date(0).toISOString(), home: "/home/fixture", sessions: Array.from({ length: 101 }, (_, index) => makeRow(index)) });
     if (url.startsWith("/api/search")) return response({ total: 1, results: [{ ...makeRow(42), snippet: "deep transcript needle" }] });
     if (url === "/api/lineage/index") return response({ sessions: 101, scanned: 101, unchanged: 0, removed: 0, writes: 2, references: 2, edges: 1, elapsed_ms: 12 });
-    if (url.startsWith("/api/lineage")) return response({ sessions: [makeRow(99), makeRow(100)], edges: [{
+    if (url.startsWith("/api/lineage")) return response({ sessions: [
+      { ...makeRow(99), name: "codex接管pi的submit混乱设计", birth: new Date(2026, 6, 15, 17, 40).getTime() / 1000 },
+      { ...makeRow(100), name: "草，你怎么能改 submit 接口呢？", birth: new Date(2026, 6, 16, 10, 43).getTime() / 1000 },
+    ], edges: [{
       upstream_id: "session-99", downstream_id: "session-100", path: "/tmp/handoff.md",
       produced_at: 1, referenced_at: 2, producer_turn: 3, reference_turn: 0, reference_source: "user", kind: "add",
     }] });
@@ -114,9 +121,9 @@ describe("dashboard", () => {
     expect(nameSort).toBeUndefined();
     const nameHeader = wrapper.findAll("thead th").find((header) => header.text().startsWith("名称"))!;
     await nameHeader.trigger("click");
-    expect(wrapper.get("tbody .namecell").text()).toBe("Session 99");
+    expect(wrapper.get("tbody .name-text").text()).toBe("Session 99");
     await nameHeader.trigger("click");
-    expect(wrapper.get("tbody .namecell").text()).toBe("Session 0");
+    expect(wrapper.get("tbody .name-text").text()).toBe("Session 0");
     await wrapper.findAll(".tabs button").find((button) => button.text().startsWith("★ 标记"))!.trigger("click");
     expect(wrapper.findAll("tbody tr")).toHaveLength(1);
     expect(wrapper.get("tbody .notecell").text()).toBe("priority");
@@ -198,8 +205,28 @@ describe("dashboard", () => {
     await flushPromises();
     await wrapper.get("#showLineages").trigger("click");
     await flushPromises();
-    expect(wrapper.get("[aria-label='全部关系链']").findAll(".dag-node")).toHaveLength(2);
-    expect(wrapper.get("[aria-label='全部关系链']").findAll(".dag-link")).toHaveLength(1);
+    const graph = wrapper.get("[aria-label='全部关系链']");
+    const nodes = graph.findAll(".dag-node");
+    expect(nodes).toHaveLength(2);
+    expect(graph.findAll(".dag-link")).toHaveLength(1);
+    expect(graph.get<HTMLElement>(".dag-canvas").element.style.width).toBe("596px");
+    expect(graph.get(".dag-canvas svg").attributes("viewBox")).toBe("0 0 596 168");
+    expect((nodes[1]!.element as HTMLElement).style.left).toBe("312px");
+    expect(graph.get(".dag-card-head").text()).toContain("2026-07-15 17:40");
+    expect(graph.get(".dag-card-head").text()).toContain("codex接管pi的submit混乱设计");
+    expect(graph.get(".dag-card-head").text()).toContain("17 小时 03 分钟");
+    expect(graph.get(".dag-card-head").text()).toContain("2026-07-16 10:43");
+    expect(graph.get(".dag-card-head").text()).toContain("草，你怎么能改 submit 接口呢？");
+    expect(graph.get(".dag-link text").text()).toBe("handoff.md");
+    expect(graph.get(".dag-link path title").text()).toBe("/tmp/handoff.md");
+    expect((nodes[0]!.element as HTMLElement).style.getPropertyValue("--node-delay")).toBe("");
+    await nodes[0]!.trigger("mouseenter");
+    expect(nodes.every((node) => node.classes().includes("connected"))).toBe(true);
+    expect(nodes.some((node) => node.classes().includes("dim"))).toBe(false);
+    expect(graph.get(".dag-link").classes()).toContain("active");
+    await nodes[0]!.trigger("mouseleave");
+    expect(nodes.some((node) => node.classes().includes("connected"))).toBe(false);
+    expect(graph.get(".dag-link").classes()).not.toContain("active");
     await wrapper.get("#lineageIndex").trigger("click");
     await flushPromises();
     expect(wrapper.get("#toast").text()).toContain("发现 1 条关系");
@@ -210,6 +237,163 @@ describe("dashboard", () => {
     expect(wrapper.find("#sessionLineage").exists()).toBe(false);
     expect(wrapper.get("[aria-label='Session 关系链']").findAll(".dag-node")).toHaveLength(2);
     expect(fetchMock.mock.calls.some(([input]) => String(input) === "/api/lineage?id=session-100&refresh=0")).toBe(true);
+    wrapper.unmount();
+  });
+
+  test("loads chain badges from one cached request, filters them, previews on hover, and refreshes after analysis", async () => {
+    vi.useFakeTimers();
+    const allRows = Array.from({ length: 101 }, (_, index) => makeRow(index));
+    let lineageLoads = 0;
+    fetchMock.mockImplementation(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.startsWith("/api/sessions")) return response({ generatedAt: new Date(0).toISOString(), home: "/home/fixture", sessions: allRows });
+      if (url === "/api/lineage/index") return response({ sessions: 101, scanned: 101, unchanged: 0, removed: 0, writes: 3, references: 3, edges: 2, elapsed_ms: 12 });
+      if (url === "/api/lineages") {
+        lineageLoads++;
+        const sessions = lineageLoads === 1 ? [makeRow(99), makeRow(100)] : [makeRow(98), makeRow(99), makeRow(100)];
+        const edges = lineageLoads === 1 ? [lineageEdge("session-99", "session-100")] : [lineageEdge("session-98", "session-99"), lineageEdge("session-99", "session-100")];
+        return response({ sessions, edges });
+      }
+      if (url.startsWith("/api/session")) {
+        const id = new URL(url, "http://local").searchParams.get("id")!;
+        return response({ ...allRows.find((row) => row.id === id)!, messages: [{ role: "user", text: "preview", timestamp: "" }] } satisfies TranscriptView);
+      }
+      return response({ ok: true });
+    });
+    const wrapper = mount(App, { attachTo: document.body });
+    await flushPromises();
+    expect(fetchMock.mock.calls.filter(([input]) => String(input) === "/api/lineages")).toHaveLength(1);
+    expect(wrapper.findAll(".chain-chip")).toHaveLength(2);
+    expect(wrapper.get(".chain-chip").text()).toBe("2");
+    const noChainRow = wrapper.findAll("tbody tr.row").find((row) => row.find(".name-text").text() === "Session 98")!;
+    expect(noChainRow.find(".chain-chip").exists()).toBe(false);
+
+    const message = wrapper.get("td.msg");
+    await message.trigger("mouseenter");
+    await vi.advanceTimersByTimeAsync(181); await flushPromises();
+    expect(wrapper.find("#tip").exists()).toBe(true);
+    const chip = wrapper.get(".chain-chip");
+    await chip.trigger("mouseenter");
+    expect(wrapper.find("#tip").exists()).toBe(false);
+    await vi.advanceTimersByTimeAsync(181);
+    expect(wrapper.get("#lineage-preview").attributes("role")).toBe("dialog");
+    expect(wrapper.findAll("#lineage-preview .lineage-mini-node")).toHaveLength(2);
+    expect(wrapper.findAll("#lineage-preview .mini-edge")).toHaveLength(1);
+    expect(wrapper.find("#lineage-preview .lineage-mini-node.current").exists()).toBe(true);
+    expect(wrapper.get("#lineage-preview .mini-edge").attributes("marker-end")).toContain("mini-arrow-");
+    expect(wrapper.get("#lineage-preview .mini-label").text()).toBe("handoff.md");
+    await wrapper.get("#lineage-preview .mini-scroll").trigger("scroll");
+    expect(wrapper.find("#lineage-preview").exists()).toBe(true);
+    expect(fetchMock.mock.calls.filter(([input]) => String(input) === "/api/lineages")).toHaveLength(1);
+    await chip.trigger("mouseleave");
+    await vi.advanceTimersByTimeAsync(101);
+    expect(wrapper.find("#lineage-preview").exists()).toBe(false);
+
+    const chainTab = wrapper.findAll(".tabs button").find((button) => button.text().startsWith("⛓ 有链"))!;
+    expect(chainTab.attributes("data-count")).toBe("2");
+    await chainTab.trigger("click");
+    expect(wrapper.findAll("tbody tr.row")).toHaveLength(2);
+    await wrapper.get("#showLineages").trigger("click");
+    await wrapper.get("#lineageIndex").trigger("click");
+    await flushPromises();
+    expect(fetchMock.mock.calls.filter(([input]) => String(input) === "/api/lineages")).toHaveLength(2);
+    await wrapper.get("#showSessions").trigger("click");
+    const refreshedTab = wrapper.findAll(".tabs button").find((button) => button.text().startsWith("⛓ 有链"))!;
+    expect(refreshedTab.attributes("data-count")).toBe("3");
+    expect(wrapper.get(".chain-chip").text()).toBe("3");
+    wrapper.unmount();
+  });
+
+  test("pins the chain preview with keyboard focus, traps Tab, restores focus on Escape, and opens a node", async () => {
+    vi.useFakeTimers();
+    const wrapper = mount(App, { attachTo: document.body });
+    await flushPromises();
+    const chip = wrapper.get<HTMLButtonElement>(".chain-chip");
+    chip.element.focus();
+    await flushPromises();
+    expect(chip.attributes("aria-expanded")).toBe("true");
+    expect(chip.attributes("aria-controls")).toBe("lineage-preview");
+    await chip.trigger("keydown", { key: "Enter" });
+    expect(navigator.clipboard.writeText).not.toHaveBeenCalled();
+
+    await chip.trigger("click", { detail: 0 });
+    await flushPromises();
+    expect(wrapper.get("#lineage-preview").text()).toContain("已固定 · Esc 关闭");
+    expect(document.activeElement?.classList.contains("current")).toBe(true);
+    await chip.trigger("mouseleave");
+    await vi.advanceTimersByTimeAsync(101);
+    expect(wrapper.find("#lineage-preview").exists()).toBe(true);
+    const controls = wrapper.get("#lineage-preview").findAll<HTMLButtonElement>("button");
+    controls.at(-1)!.element.focus();
+    await controls.at(-1)!.trigger("keydown", { key: "Tab" });
+    expect(document.activeElement).toBe(controls[0]!.element);
+    await controls[0]!.trigger("keydown", { key: "Tab", shiftKey: true });
+    expect(document.activeElement).toBe(controls.at(-1)!.element);
+    await controls.at(-1)!.trigger("keydown", { key: "Escape" });
+    await flushPromises();
+    expect(wrapper.find("#lineage-preview").exists()).toBe(false);
+    expect(document.activeElement).toBe(chip.element);
+    expect(chip.attributes("aria-expanded")).toBe("false");
+
+    await chip.trigger("click", { detail: 1 });
+    expect(document.activeElement).toBe(chip.element);
+    await chip.trigger("keydown", { key: "Escape" });
+    await flushPromises();
+    expect(wrapper.find("#lineage-preview").exists()).toBe(false);
+    await chip.trigger("click", { detail: 1 });
+    await wrapper.get("#lineage-preview .lineage-mini-node.current").trigger("click");
+    await flushPromises();
+    expect(location.search).toBe("?session=session-100");
+    wrapper.unmount();
+  });
+
+  test("hides chain controls when the cached graph has no edges", async () => {
+    fetchMock.mockImplementation(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.startsWith("/api/sessions")) return response({ generatedAt: new Date(0).toISOString(), home: "/home/fixture", sessions: [makeRow(1), makeRow(2)] });
+      if (url === "/api/lineages") return response({ sessions: [], edges: [] });
+      return response({ ok: true });
+    });
+    const wrapper = mount(App, { attachTo: document.body });
+    await flushPromises();
+    expect(wrapper.find(".chain-chip").exists()).toBe(false);
+    expect(wrapper.findAll(".tabs button").some((button) => button.text().startsWith("⛓ 有链"))).toBe(false);
+    wrapper.unmount();
+  });
+
+  test("clips large chains to direct neighbors with disjoint upstream, downstream, and branch counts", async () => {
+    vi.useFakeTimers();
+    const ids = ["a", "u1", "u2", "u3", "u4", "u5", "current", "d1", "d2", "d3", "d4", "d5", "z", "b1", "b2"];
+    const sessions = ids.map((id, index) => ({ ...makeRow(index), id, name: id, birth: index + 1, mtime: index + 1 }));
+    const edges = [
+      lineageEdge("a", "u1"), ...[1, 2, 3, 4, 5].map((index) => lineageEdge(`u${index}`, "current")),
+      ...[1, 2, 3, 4, 5].map((index) => lineageEdge("current", `d${index}`)), lineageEdge("d1", "z"),
+      lineageEdge("u1", "b1"), lineageEdge("b1", "b2"),
+    ];
+    fetchMock.mockImplementation(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.startsWith("/api/sessions")) return response({ generatedAt: new Date(0).toISOString(), home: "/home/fixture", sessions });
+      if (url === "/api/lineages") return response({ sessions, edges });
+      return response({ ok: true });
+    });
+    const wrapper = mount(App, { attachTo: document.body });
+    await flushPromises();
+    const row = wrapper.findAll("tbody tr.row").find((item) => item.get(".name-text").text() === "current")!;
+    expect(row.get(".chain-chip").text()).toBe("15");
+    await row.get(".chain-chip").trigger("mouseenter");
+    await vi.advanceTimersByTimeAsync(181);
+    const dialog = wrapper.get("#lineage-preview");
+    expect(dialog.text()).toContain("仅显示相邻一层");
+    expect(dialog.findAll(".lineage-mini-node")).toHaveLength(9);
+    expect(dialog.get(".mini-fold.upstream").attributes("data-count")).toBe("2");
+    expect(dialog.get(".mini-fold.downstream").attributes("data-count")).toBe("2");
+    expect(dialog.get(".mini-fold.branch").attributes("data-count")).toBe("2");
+    const hidden = dialog.findAll(".mini-fold").reduce((total, fold) => total + Number(fold.attributes("data-count")), 0);
+    expect(dialog.findAll(".lineage-mini-node").length + hidden).toBe(15);
+    await dialog.get(".mini-fold.branch").trigger("click");
+    await flushPromises();
+    expect(wrapper.find("#lineageOverview .dag-node.focus").exists()).toBe(true);
+    expect(fetchMock.mock.calls.filter(([input]) => String(input) === "/api/lineages")).toHaveLength(1);
     wrapper.unmount();
   });
 
@@ -235,7 +419,7 @@ describe("dashboard", () => {
     expect(name.element.value).toBe("Session 100");
     await name.setValue("Rejected"); await name.trigger("blur"); await flushPromises();
     expect(wrapper.get("[role='alert']").text()).toBe("改名失败");
-    expect(row.get(".namecell").text()).toBe("Session 100");
+    expect(row.get(".name-text").text()).toBe("Session 100");
 
     await row.get(".statusbtn").trigger("click");
     await wrapper.findAll(".menu-option").find((option) => option.text().startsWith("done"))!.trigger("click");
@@ -246,7 +430,7 @@ describe("dashboard", () => {
     await flushPromises();
     expect(fetchMock).toHaveBeenCalledWith("/star", expect.objectContaining({ body: expect.stringContaining('"archive":true') }));
     await wrapper.findAll(".tabs button").find((button) => button.text().startsWith("归档"))!.trigger("click");
-    expect(wrapper.get("tbody .namecell").text()).toBe("Session 100");
+    expect(wrapper.get("tbody .name-text").text()).toBe("Session 100");
     wrapper.unmount();
   });
 
@@ -306,20 +490,26 @@ describe("dashboard", () => {
 
   test("keeps the current list visible while a refresh is pending", async () => {
     let finishRefresh!: (value: Response) => void;
-    fetchMock
-      .mockResolvedValueOnce(response({ generatedAt: new Date(0).toISOString(), home: "/home/fixture", sessions: [makeRow(1)] }))
-      .mockImplementationOnce(() => new Promise<Response>((resolve) => { finishRefresh = resolve; }));
+    let sessionLoads = 0;
+    fetchMock.mockImplementation(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.startsWith("/api/sessions") && sessionLoads++ === 0)
+        return response({ generatedAt: new Date(0).toISOString(), home: "/home/fixture", sessions: [makeRow(1)] });
+      if (url.startsWith("/api/sessions")) return new Promise<Response>((resolve) => { finishRefresh = resolve; });
+      if (url === "/api/lineages") return response({ sessions: [], edges: [] });
+      return response({ ok: true });
+    });
     const wrapper = mount(App, { attachTo: document.body });
     await flushPromises();
 
     await wrapper.get("#reload").trigger("click");
-    expect(wrapper.get("tbody .namecell").text()).toBe("Session 1");
+    expect(wrapper.get("tbody .name-text").text()).toBe("Session 1");
     expect(wrapper.get<HTMLButtonElement>("#reload").element.disabled).toBe(true);
     expect(wrapper.get("#reload").text()).toBe("刷新中…");
 
     finishRefresh(response({ generatedAt: new Date(1).toISOString(), home: "/home/fixture", sessions: [makeRow(2)] }));
     await flushPromises();
-    expect(wrapper.get("tbody .namecell").text()).toBe("Session 2");
+    expect(wrapper.get("tbody .name-text").text()).toBe("Session 2");
     wrapper.unmount();
   });
 
@@ -383,12 +573,12 @@ describe("dashboard", () => {
     const name = row.get<HTMLInputElement>("input[aria-label='名称']");
     await name.setValue("cancelled");
     await name.trigger("keydown", { key: "Escape" });
-    expect(row.get(".namecell").text()).toBe("Session 100");
+    expect(row.get(".name-text").text()).toBe("Session 100");
 
-    const nameCell = row.get(".namecell");
-    Object.defineProperty(nameCell.element, "scrollWidth", { configurable: true, value: 200 });
-    Object.defineProperty(nameCell.element, "clientWidth", { configurable: true, value: 50 });
-    await nameCell.trigger("mouseenter");
+    const nameText = row.get(".name-text");
+    Object.defineProperty(nameText.element, "scrollWidth", { configurable: true, value: 200 });
+    Object.defineProperty(nameText.element, "clientWidth", { configurable: true, value: 50 });
+    await nameText.trigger("mouseenter");
     await vi.advanceTimersByTimeAsync(181);
     expect(wrapper.get("#tip").text()).toBe("Session 100");
     wrapper.unmount();

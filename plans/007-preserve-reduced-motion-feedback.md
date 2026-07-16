@@ -1,6 +1,6 @@
 # 007 — 保留 reduced-motion 状态反馈
 
-- **Status**: TODO
+- **Status**: DONE
 - **Commit**: d17ef79
 - **Severity**: MEDIUM
 - **Category**: Accessibility

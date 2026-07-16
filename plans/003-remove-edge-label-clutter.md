@@ -1,10 +1,12 @@
 # 003 — 移除常驻边标签
 
-- **Status**: TODO
+- **Status**: SUPERSEDED by `2026-07-16-lineage-entry-ui.md`
 - **Commit**: d17ef79
 - **Severity**: HIGH
 - **Category**: Purpose & frequency
 - **Estimated scope**: 2 files, about 15 lines deleted
+
+The entry UI plan has higher priority: visible artifact filenames must remain on lineage edges.
 
 ## Problem
 

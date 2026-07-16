@@ -2,6 +2,8 @@
 import MarkdownIt from "markdown-it";
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import LineageGraph from "./LineageGraph.vue";
+import LineagePreview from "./LineagePreview.vue";
+import { lineageComponents } from "./lineageLayout.ts";
 import {
   parseLineageRefresh,
   parseLineageView,
@@ -16,7 +18,7 @@ import {
   type TranscriptView,
 } from "./contracts.ts";
 
-type Tab = "" | Tool | "__star__" | "__arch__";
+type Tab = "" | Tool | "__star__" | "__chain__" | "__arch__";
 type SearchMode = "normal" | "deep";
 type ViewMode = "sessions" | "lineage";
 type SortKey = keyof Pick<SessionView, "starred" | "mtime" | "birth" | "tool" | "model" | "name" | "star_note" | "status" | "first_msg" | "cwd" | "size_kb">;
@@ -33,6 +35,8 @@ type Editing = { id: string; field: "name" | "star_note" };
 type PreviewState =
   | { key: string; kind: "text"; text: string; anchor: HTMLElement; style: Record<string, string> }
   | { key: string; kind: "transcript"; detail?: TranscriptView; loading: boolean; anchor: HTMLElement; style: Record<string, string> };
+type ChainInfo = { chainKey: string; size: number; view: LineageView };
+type LineagePreviewState = { row: SessionView; info: ChainInfo; anchor: HTMLElement; pinned: boolean; style: Record<string, string> };
 
 const PAGE_SIZE = 100;
 const markdown = new MarkdownIt({ breaks: true, html: false, linkify: true });
@@ -86,12 +90,15 @@ const lineageLoading = ref(false);
 const indexingLineage = ref(false);
 const globalLineage = ref<LineageView>();
 const globalLineageLoading = ref(false);
+const globalLineageFocus = ref("");
 const editing = ref<Editing>();
 const editValue = ref("");
 const menu = ref<MenuState>();
 const menuElement = ref<HTMLElement>();
 const preview = ref<PreviewState>();
 const previewElement = ref<HTMLElement>();
+const lineagePreview = ref<LineagePreviewState>();
+const lineagePreviewElement = ref<HTMLElement>();
 const previewCache = new Map<string, TranscriptView>();
 const previewRequests = new Map<string, Promise<TranscriptView>>();
 let searchTimer: ReturnType<typeof setTimeout> | undefined;
@@ -100,6 +107,10 @@ let toastTimer: ReturnType<typeof setTimeout> | undefined;
 let copiedPathTimer: ReturnType<typeof setTimeout> | undefined;
 let previewShowTimer: ReturnType<typeof setTimeout> | undefined;
 let previewHideTimer: ReturnType<typeof setTimeout> | undefined;
+let lineagePreviewShowTimer: ReturnType<typeof setTimeout> | undefined;
+let lineagePreviewHideTimer: ReturnType<typeof setTimeout> | undefined;
+let globalLineageRequest: Promise<void> | undefined;
+let suppressLineageFocusOpen = false;
 
 function savedWidths(): number[] {
   for (const key of ["colw5", "column-widths"]) {
@@ -119,14 +130,26 @@ function initialTheme(): "dark" | "light" {
 }
 const theme = ref<"dark" | "light">(initialTheme());
 
-const tabs: { value: Tab; label: string }[] = [
+const chainInfo = computed(() => {
+  const result = new Map<string, ChainInfo>();
+  if (!globalLineage.value?.edges.length) return result;
+  for (const view of lineageComponents(globalLineage.value)) {
+    if (!view.edges.length) continue;
+    const chainKey = view.sessions.map(({ id }) => id).sort().join(":");
+    const info = { chainKey, size: view.sessions.length, view };
+    for (const session of view.sessions) result.set(session.id, info);
+  }
+  return result;
+});
+const tabs = computed<{ value: Tab; label: string }[]>(() => [
   { value: "", label: "全部" },
   { value: "claude", label: "claude" },
   { value: "codex", label: "codex" },
   { value: "pi", label: "pi" },
   { value: "__star__", label: "★ 标记" },
+  ...(chainInfo.value.size ? [{ value: "__chain__" as const, label: "⛓ 有链" }] : []),
   { value: "__arch__", label: "归档" },
-];
+]);
 
 const tabCounts = computed<Record<Tab, number>>(() => ({
   "": rows.value.filter((row) => !row.archived).length,
@@ -134,6 +157,7 @@ const tabCounts = computed<Record<Tab, number>>(() => ({
   codex: rows.value.filter((row) => !row.archived && row.tool === "codex").length,
   pi: rows.value.filter((row) => !row.archived && row.tool === "pi").length,
   __star__: rows.value.filter((row) => !row.archived && row.starred).length,
+  __chain__: rows.value.filter((row) => !row.archived && chainInfo.value.has(row.id)).length,
   __arch__: rows.value.filter((row) => row.archived).length,
 }));
 
@@ -163,6 +187,7 @@ const filtered = computed(() => {
   const result = rows.value.filter((row) => {
     if (tab.value === "__arch__" ? !row.archived : row.archived) return false;
     if (tab.value === "__star__" && !row.starred) return false;
+    if (tab.value === "__chain__" && !chainInfo.value.has(row.id)) return false;
     if (["claude", "codex", "pi"].includes(tab.value) && row.tool !== tab.value) return false;
     if (path.value && row.cwd !== path.value) return false;
     if (status.value && row.status !== status.value) return false;
@@ -260,7 +285,7 @@ async function indexLineage(): Promise<void> {
     if (!response.ok) throw new Error();
     const result = parseLineageRefresh(await response.json());
     showToast(`已分析 ${result.sessions} 个 Session，发现 ${result.edges} 条关系`);
-    if (viewMode.value === "lineage") await loadGlobalLineage();
+    await loadGlobalLineage(viewMode.value !== "lineage", true);
   } catch {
     showToast("关系分析失败", true);
   } finally {
@@ -268,17 +293,26 @@ async function indexLineage(): Promise<void> {
   }
 }
 
-async function loadGlobalLineage(): Promise<void> {
-  globalLineageLoading.value = true;
-  try {
-    const response = await fetch("/api/lineages");
-    if (!response.ok) throw new Error();
-    globalLineage.value = parseLineageView(await response.json());
-  } catch {
-    showToast("关系图加载失败", true);
-  } finally {
-    globalLineageLoading.value = false;
+async function loadGlobalLineage(silent = false, force = false): Promise<void> {
+  if (!force && globalLineage.value) return;
+  if (globalLineageRequest) {
+    await globalLineageRequest;
+    if (!force) return;
   }
+  globalLineageLoading.value = true;
+  globalLineageRequest = (async () => {
+    try {
+      const response = await fetch("/api/lineages");
+      if (!response.ok) throw new Error();
+      globalLineage.value = parseLineageView(await response.json());
+    } catch {
+      if (!silent) showToast("关系图加载失败", true);
+    } finally {
+      globalLineageLoading.value = false;
+      globalLineageRequest = undefined;
+    }
+  })();
+  return globalLineageRequest;
 }
 
 function resetDeepSearch(): void {
@@ -450,6 +484,7 @@ async function placeMenu(): Promise<void> {
 function openMenu(key: string, anchor: HTMLElement, items: MenuItem[], value: string, select: MenuState["select"]): void {
   if (menu.value?.key === key) { closeMenu(true); return; }
   closeMenu();
+  closeLineagePreview();
   menu.value = { key, anchor, items, value, select, style: {} };
   void placeMenu();
 }
@@ -523,6 +558,7 @@ async function openDetail(id: string, push = true): Promise<void> {
   detailError.value = "";
   detailLoading.value = true;
   hidePreview();
+  closeLineagePreview();
   closeMenu();
   if (push) history.pushState(null, "", `/?session=${encodeURIComponent(id)}`);
   void loadLineage(id);
@@ -546,6 +582,7 @@ async function loadLineage(id: string): Promise<void> {
 }
 
 function showSessions(push = true): void {
+  closeLineagePreview();
   viewMode.value = "sessions";
   detail.value = undefined;
   detailError.value = "";
@@ -553,13 +590,22 @@ function showSessions(push = true): void {
   if (push) history.pushState(null, "", "/");
 }
 
-function showLineages(push = true): void {
+function showLineages(push = true, focusId = ""): void {
+  closeLineagePreview();
   viewMode.value = "lineage";
+  globalLineageFocus.value = focusId;
   detail.value = undefined;
   detailError.value = "";
   detailLoading.value = false;
   if (push) history.pushState(null, "", "/?view=lineage");
   void loadGlobalLineage();
+}
+
+async function locateLineage(id: string): Promise<void> {
+  showLineages(true, id);
+  await loadGlobalLineage();
+  await nextTick();
+  try { document.querySelector<HTMLElement>("#lineageOverview .dag-node.focus")?.closest<HTMLElement>(".dag-card")?.scrollIntoView({ block: "start" }); } catch {}
 }
 
 function showList(push = true): void {
@@ -599,6 +645,7 @@ function revealPreview(value: PreviewState): void {
 }
 
 function showTextPreview(event: MouseEvent, key: string, text: string): void {
+  closeLineagePreview();
   const cell = event.currentTarget as HTMLElement;
   if (cell.scrollWidth <= cell.clientWidth + 1) { hidePreview(); return; }
   clearTimeout(previewHideTimer);
@@ -609,6 +656,7 @@ function showTextPreview(event: MouseEvent, key: string, text: string): void {
 }
 
 function showTranscriptPreview(row: SessionView, event: MouseEvent): void {
+  closeLineagePreview();
   const anchor = event.currentTarget as HTMLElement;
   const key = `transcript:${row.id}`;
   clearTimeout(previewHideTimer);
@@ -649,6 +697,98 @@ function hidePreview(): void {
   preview.value = undefined;
 }
 
+async function placeLineagePreview(): Promise<void> {
+  await nextTick();
+  if (!lineagePreview.value || !lineagePreviewElement.value) return;
+  const box = lineagePreview.value.anchor.getBoundingClientRect();
+  const width = Math.min(700, innerWidth - 24);
+  let top = box.bottom + 6;
+  let origin = "top left";
+  if (top + lineagePreviewElement.value.offsetHeight > innerHeight - 8) {
+    top = Math.max(8, box.top - lineagePreviewElement.value.offsetHeight - 6);
+    origin = "bottom left";
+  }
+  lineagePreview.value.style = {
+    width: `${width}px`, left: `${Math.max(12, Math.min(box.left, innerWidth - width - 12))}px`,
+    top: `${top}px`, transformOrigin: origin,
+  };
+}
+
+function revealLineagePreview(row: SessionView, anchor: HTMLElement, pinned = false): void {
+  const info = chainInfo.value.get(row.id);
+  if (!info) return;
+  hidePreview();
+  closeMenu();
+  lineagePreview.value = { row, info, anchor, pinned, style: {} };
+  void placeLineagePreview();
+}
+
+function scheduleLineagePreview(row: SessionView, event: MouseEvent): void {
+  if (lineagePreview.value?.pinned) return;
+  hidePreview();
+  const anchor = event.currentTarget as HTMLElement;
+  clearTimeout(lineagePreviewHideTimer);
+  clearTimeout(lineagePreviewShowTimer);
+  if (lineagePreview.value) revealLineagePreview(row, anchor);
+  else lineagePreviewShowTimer = setTimeout(() => revealLineagePreview(row, anchor), 180);
+}
+
+function scheduleLineagePreviewHide(): void {
+  clearTimeout(lineagePreviewShowTimer);
+  clearTimeout(lineagePreviewHideTimer);
+  if (!lineagePreview.value?.pinned) lineagePreviewHideTimer = setTimeout(closeLineagePreview, 100);
+}
+
+function keepLineagePreview(): void {
+  clearTimeout(lineagePreviewHideTimer);
+}
+
+function closeLineagePreview(refocus = false): void {
+  clearTimeout(lineagePreviewShowTimer);
+  clearTimeout(lineagePreviewHideTimer);
+  lineagePreviewShowTimer = undefined;
+  const anchor = lineagePreview.value?.anchor;
+  lineagePreview.value = undefined;
+  if (refocus && anchor && document.activeElement !== anchor) {
+    suppressLineageFocusOpen = true;
+    void nextTick(() => anchor.focus());
+  }
+}
+
+function focusCurrentLineageNode(): void {
+  void nextTick(() => lineagePreviewElement.value?.querySelector<HTMLElement>(".lineage-mini-node.current")?.focus());
+}
+
+function focusLineagePreview(row: SessionView, event: FocusEvent): void {
+  if (suppressLineageFocusOpen) { suppressLineageFocusOpen = false; return; }
+  revealLineagePreview(row, event.currentTarget as HTMLElement);
+}
+
+function toggleLineagePreview(row: SessionView, event: MouseEvent): void {
+  const anchor = event.currentTarget as HTMLElement;
+  if (lineagePreview.value?.row.id === row.id && lineagePreview.value.pinned) { closeLineagePreview(); return; }
+  revealLineagePreview(row, anchor, true);
+  if (event.detail === 0) focusCurrentLineageNode();
+}
+
+function enterPinnedLineagePreview(event: KeyboardEvent): void {
+  if (!lineagePreview.value?.pinned) return;
+  event.preventDefault();
+  focusCurrentLineageNode();
+}
+
+function lineagePreviewKeydown(event: KeyboardEvent): void {
+  if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); closeLineagePreview(true); return; }
+  if (event.key !== "Tab" || !lineagePreview.value?.pinned || !lineagePreviewElement.value) return;
+  const controls = [...lineagePreviewElement.value.querySelectorAll<HTMLElement>("button:not(:disabled)")];
+  if (!controls.length) return;
+  const index = controls.indexOf(document.activeElement as HTMLElement);
+  if (index < 0 || (!event.shiftKey && index === controls.length - 1) || (event.shiftKey && index === 0)) {
+    event.preventDefault();
+    controls[event.shiftKey ? controls.length - 1 : 0]?.focus();
+  }
+}
+
 function resize(index: number, event: PointerEvent): void {
   event.preventDefault();
   event.stopPropagation();
@@ -684,7 +824,10 @@ function toggleTheme(): void {
 
 function keydown(event: KeyboardEvent): void {
   const editingControl = ["INPUT", "TEXTAREA", "SELECT"].includes((event.target as HTMLElement).tagName);
-  if (event.key === "/" && !editingControl) {
+  if (event.key === "Escape" && lineagePreview.value) {
+    event.preventDefault();
+    closeLineagePreview(true);
+  } else if (event.key === "/" && !editingControl) {
     event.preventDefault();
     document.querySelector<HTMLInputElement>("#q")?.focus();
   } else if (event.key === "Escape" && document.activeElement?.id === "q") {
@@ -699,10 +842,12 @@ function keydown(event: KeyboardEvent): void {
 function documentClick(event: MouseEvent): void {
   const target = event.target as Node;
   if (menu.value && !menuElement.value?.contains(target) && !menu.value.anchor.contains(target)) closeMenu();
+  if (lineagePreview.value && !lineagePreviewElement.value?.contains(target) && !lineagePreview.value.anchor.contains(target)) closeLineagePreview();
 }
 
 function closeFloatingOnScroll(event: Event): void {
   if (event.target !== previewElement.value) hidePreview();
+  if (!(event.target instanceof Node) || !lineagePreviewElement.value?.contains(event.target)) closeLineagePreview();
   if (event.target !== menuElement.value) closeMenu();
 }
 
@@ -713,6 +858,7 @@ onMounted(async () => {
   window.addEventListener("scroll", closeFloatingOnScroll, true);
   document.addEventListener("click", documentClick);
   await load(new URLSearchParams(location.search).get("fresh") === "1");
+  void loadGlobalLineage(true);
   syncHistory();
 });
 
@@ -722,6 +868,8 @@ onBeforeUnmount(() => {
   clearTimeout(copiedPathTimer);
   clearTimeout(previewShowTimer);
   clearTimeout(previewHideTimer);
+  clearTimeout(lineagePreviewShowTimer);
+  clearTimeout(lineagePreviewHideTimer);
   window.removeEventListener("popstate", syncHistory);
   window.removeEventListener("keydown", keydown);
   window.removeEventListener("scroll", closeFloatingOnScroll, true);
@@ -789,7 +937,7 @@ onBeforeUnmount(() => {
         <strong>缓存中还没有关系链</strong><span>先分析一次，之后打开关系图和 Session 详情都会直接读取持久缓存。</span>
         <button type="button" class="f act" :disabled="indexingLineage" @click="indexLineage">开始分析</button>
       </div>
-      <LineageGraph v-else :view="globalLineage" @select="openDetail" />
+      <LineageGraph v-else :view="globalLineage" :focus-id="globalLineageFocus" @select="openDetail" />
     </section>
 
     <section v-else-if="!detail && !detailError && !detailLoading" id="list" aria-label="Session 列表">
@@ -818,9 +966,18 @@ onBeforeUnmount(() => {
             <td class="dt" @mouseenter="showTextPreview($event, `${row.id}:birth`, formatDate(row.birth))" @mouseleave="schedulePreviewHide">{{ formatDate(row.birth) }}</td>
             <td class="tool"><span class="tool-pill" :class="row.tool">{{ row.tool }}</span></td>
             <td class="tool" @mouseenter="showTextPreview($event, `${row.id}:model`, row.model)" @mouseleave="schedulePreviewHide">{{ row.model }}</td>
-            <td class="namecell nm" @click.stop="startEdit(row, 'name')" @mouseenter="showTextPreview($event, `${row.id}:name`, row.name)" @mouseleave="schedulePreviewHide">
+            <td class="namecell nm" @click.stop="startEdit(row, 'name')">
               <input v-if="editing?.id === row.id && editing.field === 'name'" v-model="editValue" class="cell-input" :data-edit="`${row.id}:name`" aria-label="名称" @click.stop @keydown="editKeydown(row, 'name', $event)" @blur="finishEdit(row, 'name', true)" />
-              <template v-else>{{ row.name }}</template>
+              <div v-else class="name-wrap">
+                <span class="name-text" @mouseenter="showTextPreview($event, `${row.id}:name`, row.name)" @mouseleave="schedulePreviewHide">{{ row.name }}</span>
+                <button v-if="chainInfo.get(row.id)" type="button" class="chain-chip" :aria-label="`所在关系链，共 ${chainInfo.get(row.id)!.size} 个 Session，查看整条链`"
+                  :title="`所在关系链，共 ${chainInfo.get(row.id)!.size} 个 Session，查看整条链`" aria-haspopup="dialog" aria-controls="lineage-preview"
+                  :aria-expanded="lineagePreview?.row.id === row.id" @mouseenter="scheduleLineagePreview(row, $event)" @mouseleave="scheduleLineagePreviewHide"
+                  @focus="focusLineagePreview(row, $event)" @blur="scheduleLineagePreviewHide" @click.stop="toggleLineagePreview(row, $event)" @keydown.stop @keydown.tab="enterPinnedLineagePreview" @keydown.esc.prevent="closeLineagePreview(true)">
+                  <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><path d="M6.4 5.1 5.2 3.9a2.4 2.4 0 0 0-3.4 3.4l1.7 1.7a2.4 2.4 0 0 0 3.4 0l1.2-1.2M9.6 10.9l1.2 1.2a2.4 2.4 0 0 0 3.4-3.4L12.5 7a2.4 2.4 0 0 0-3.4 0L7.9 8.2" /></svg>
+                  {{ chainInfo.get(row.id)!.size }}
+                </button>
+              </div>
             </td>
             <td class="notecell" @click.stop="startEdit(row, 'star_note')" @mouseenter="showTextPreview($event, `${row.id}:note`, row.star_note)" @mouseleave="schedulePreviewHide">
               <input v-if="editing?.id === row.id && editing.field === 'star_note'" v-model="editValue" class="cell-input" :data-edit="`${row.id}:star_note`" aria-label="备注" @click.stop @keydown="editKeydown(row, 'star_note', $event)" @blur="finishEdit(row, 'star_note', true)" />
@@ -884,6 +1041,11 @@ onBeforeUnmount(() => {
       </div>
     </template>
     <template v-else>{{ preview.loading ? "加载对话预览..." : "加载失败" }}</template>
+  </aside>
+
+  <aside v-if="lineagePreview" id="lineage-preview" ref="lineagePreviewElement" class="show" :style="lineagePreview.style" role="dialog" aria-label="Session 关系链预览"
+    @click.stop @mouseenter="keepLineagePreview" @mouseleave="scheduleLineagePreviewHide" @keydown="lineagePreviewKeydown">
+    <LineagePreview :view="lineagePreview.info.view" :current-id="lineagePreview.row.id" :pinned="lineagePreview.pinned" @select="openDetail" @locate="locateLineage(lineagePreview.row.id)" />
   </aside>
 </template>
 
@@ -1012,6 +1174,7 @@ td.notecell{color:var(--mist);font-size:12px;cursor:text}
 td.notecell:empty:hover::after{content:"点击添加备注";color:var(--smoke)}
 td.namecell{cursor:text}
 td.namecell:empty:hover::after{content:"点击命名";color:var(--smoke);font-weight:400}
+.name-wrap{display:flex;align-items:center;gap:6px;min-width:0}.name-text{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.chain-chip{display:inline-flex;flex:none;align-items:center;gap:3px;height:20px;padding:0 7px;border:1px solid color-mix(in srgb,var(--lime) 26%,transparent);border-radius:999px;background:color-mix(in srgb,var(--lime) 9%,transparent);color:var(--lime);font:600 10.5px/1 ui-monospace,monospace;cursor:pointer;transition:transform 120ms var(--ease-out),background-color 120ms ease,border-color 120ms ease}.chain-chip svg{width:11px;height:11px}.chain-chip:active{transform:scale(.95)}.chain-chip:focus-visible{outline:2px solid var(--lime);outline-offset:2px}
 .cell-input{display:block;width:100%;height:30px;margin:-3px -5px;padding:4px 6px;border:1px solid var(--lime);
   border-radius:6px;background:var(--input-bg);color:var(--paper);font:inherit;outline:none;
   box-shadow:0 0 0 3px color-mix(in srgb,var(--lime) 12%,transparent)}
@@ -1065,6 +1228,8 @@ col.c-stat{width:116px}col.c-model{width:120px}
   white-space:pre-wrap;word-break:break-all;box-shadow:0 18px 55px rgba(0,0,0,.36);
   transition:opacity 110ms var(--ease-out),transform 110ms var(--ease-out)}
 #tip.show{visibility:visible;opacity:1;transform:scale(1);pointer-events:auto}
+#lineage-preview{position:fixed;z-index:10;display:flex;flex-direction:column;max-width:min(700px,calc(100vw - 24px));max-height:min(78vh,720px);overflow:hidden;border:1px solid var(--graphite);border-radius:12px;background:var(--material);backdrop-filter:blur(24px) saturate(150%);box-shadow:0 20px 64px rgba(0,0,0,.4),inset 0 1px rgba(255,255,255,.055);opacity:1;transform:scale(1);transition:opacity 140ms var(--ease-out),transform 140ms var(--ease-out)}
+@starting-style{#lineage-preview{opacity:0;transform:scale(.97)}}
 .tiptitle{font-weight:600;color:var(--paper);margin-bottom:8px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .tipmsg{padding:9px 11px;margin-top:8px;border:1px solid var(--obsidian);border-radius:10px 10px 10px 3px;
   background:var(--carbon);white-space:normal;word-break:break-word}
@@ -1094,12 +1259,22 @@ col.c-stat{width:116px}col.c-model{width:120px}
   tr.row:hover td{background:var(--hover)}
   .rowbtn:hover{background:var(--chip);color:var(--paper)}
   .menu-option:hover{background:var(--chip);color:var(--paper)}
+  .chain-chip:hover{border-color:color-mix(in srgb,var(--lime) 45%,transparent);background:color-mix(in srgb,var(--lime) 15%,transparent)}
 }
 @media (max-width:760px){
   header{padding:24px 16px 18px}.view-switch{order:3}.meta{width:100%}.chrome{top:8px;margin:0 12px 14px}
   main{padding:0 12px 36px}.searchbox{min-width:100%}.tabs{order:3;width:100%;overflow-x:auto}
 }
-@media (prefers-reduced-motion:reduce){html,body,.f,.rowbtn,.select-button svg,.menu,#tip,#toast{transition-duration:0ms}}
-@media (prefers-reduced-transparency:reduce){.chrome,.menu,#tip{background:var(--carbon);backdrop-filter:none}}
-@media (prefers-contrast:more){.chrome,.menu,#tip,#list,.detail-top,.bubble{border-color:var(--fog)}}
+@media (prefers-reduced-motion:reduce){
+  html,body{transition:background-color 120ms ease,color 120ms ease}
+  .view-switch button,.f,.rowbtn{transition:background-color 120ms ease,color 120ms ease}
+  .view-switch button:active,.f:active:not(:disabled),.rowbtn:active{transform:none}
+  .select-button svg{transition:none}
+  .menu,#tip{transform:none;transition:opacity 120ms ease}
+  #lineage-preview{transform:none;transition:opacity 120ms ease}
+  .chain-chip:active{transform:none}
+  #toast,#toast.show{transform:translateX(-50%);transition:opacity 120ms ease}
+}
+@media (prefers-reduced-transparency:reduce){.chrome,.menu,#tip,#lineage-preview{background:var(--carbon);backdrop-filter:none}}
+@media (prefers-contrast:more){.chrome,.menu,#tip,#lineage-preview,#list,.detail-top,.bubble{border-color:var(--fog)}}
 </style>

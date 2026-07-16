@@ -1,6 +1,6 @@
 # 002 — 展示关系链起止 Session
 
-- **Status**: TODO
+- **Status**: DONE
 - **Commit**: d17ef79
 - **Severity**: HIGH
 - **Category**: Missed opportunities

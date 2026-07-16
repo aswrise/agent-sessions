@@ -1,6 +1,6 @@
 # 006 — 删除逐节点入场动画
 
-- **Status**: TODO
+- **Status**: DONE
 - **Commit**: d17ef79
 - **Severity**: MEDIUM
 - **Category**: Purpose & frequency

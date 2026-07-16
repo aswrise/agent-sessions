@@ -1,6 +1,6 @@
 import { Database } from "bun:sqlite";
 import { mkdirSync, readFileSync, statSync } from "node:fs";
-import { dirname, normalize } from "node:path";
+import { basename, dirname, normalize } from "node:path";
 import type { LineageEdge, LineageRefresh, Session } from "./contracts.ts";
 
 type Json = Record<string, unknown>;
@@ -10,7 +10,8 @@ type Write = { path: string; at: number; turn: number; kind: WriteKind };
 type Turn = { texts: TextInput[]; writes: Omit<Write, "turn">[] };
 type Facts = { references: Reference[]; writes: Write[] };
 type Reference = { session_id: string; path: string; at: number; turn: number; source: "user" };
-const INDEX_VERSION = 2;
+const INDEX_VERSION = 3;
+const AMBIENT_ARTIFACTS = new Set(["agents.md", "claude.md", "memory.md", "skill.md"]);
 
 interface LineageGraph {
   session_ids: string[];
@@ -24,7 +25,8 @@ const epoch = (value: unknown, fallback: number): number => {
   const parsed = typeof value === "string" ? Date.parse(value) : NaN;
   return Number.isNaN(parsed) ? fallback : parsed / 1000;
 };
-const isArtifact = (path: string): boolean => /\.(?:md|html)$/i.test(path);
+const isArtifact = (path: string): boolean =>
+  /\.(?:md|html)$/i.test(path) && !AMBIENT_ARTIFACTS.has(basename(path).toLowerCase());
 
 function parseLine(line: string): Json | undefined {
   try {
@@ -64,7 +66,7 @@ function injected(text: string): boolean {
 
 function artifactPaths(text: string): string[] {
   const found = text.match(/(?:\/[^\s"'<>|]+?|[a-z]:\\[^\s"'<>|]+?)\.(?:md|html)(?::\d+(?::\d+)?)?/giu) ?? [];
-  return [...new Set(found.map((value) => normalize(value.replace(/:\d+(?::\d+)?$/, ""))))];
+  return [...new Set(found.map((value) => normalize(value.replace(/:\d+(?::\d+)?$/, ""))).filter(isArtifact))];
 }
 
 function facts(session: Session): Facts {
@@ -89,6 +91,7 @@ function facts(session: Session): Facts {
 function codexTurns(input: Json[], birth: number): Turn[] {
   const turns: Turn[] = [];
   const byId = new Map<string, Turn>();
+  const goalObjectives = new Set<string>();
   const hasUserEvents = input.some((record) => record.type === "event_msg"
     && isRecord(record.payload) && record.payload.type === "user_message");
   let current: Turn | undefined;
@@ -106,6 +109,14 @@ function codexTurns(input: Json[], birth: number): Turn[] {
     const at = epoch(record.timestamp, birth + line / 1_000_000);
     if (record.type === "event_msg" && payload?.type === "task_started") {
       create(stringValue(payload.turn_id));
+      return;
+    }
+    if (record.type === "event_msg" && payload?.type === "thread_goal_updated" && isRecord(payload.goal)) {
+      const text = stringValue(payload.goal.objective).trim();
+      if (text && !goalObjectives.has(text)) {
+        goalObjectives.add(text);
+        create().texts.push({ text, at });
+      }
       return;
     }
     if (record.type === "event_msg" && payload?.type === "user_message") {

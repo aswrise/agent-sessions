@@ -1,6 +1,6 @@
 # 001 — 统一 DAG 坐标空间
 
-- **Status**: TODO
+- **Status**: DONE
 - **Commit**: d17ef79
 - **Severity**: HIGH
 - **Category**: Physicality & origin

@@ -79,26 +79,48 @@ describe("LineageIndex", () => {
     });
   });
 
-  test("ignores goal and assistant references, third user turn, and user-only producer mentions", () => {
+  test("uses a unique Goal objective as user input but ignores its echo, assistant references, and third user turn", () => {
     const { root, write, session, index } = setup();
-    const written = join(root, "written.md"), mentioned = join(root, "mentioned.md");
+    const upstreamId = "019f6903-cdfe-7801-9a02-fa22bcd8b209";
+    const downstreamId = "019f6a53-24ad-7fa0-b96d-6e457d8df307";
+    const written = "/home/aquas/project1/.claude/scratch/ops-instance-failure-context/PRD.md";
+    const mentioned = join(root, "mentioned.md"), late = join(root, "late.md");
     const producerPath = write("producer", codexTurn("p1", "2026-07-15T01:00:00Z", `I mentioned ${mentioned}`, [{ path: written }]));
     const assistantConsumerPath = write("assistant-consumer", [
       { timestamp: "2026-07-15T02:00:00Z", type: "response_item", payload: { type: "message", role: "assistant", content: [{ type: "output_text", text: `read ${written}` }] } },
     ]);
     const lateConsumerPath = write("late-consumer", [
       { timestamp: "2026-07-15T03:00:00Z", type: "event_msg", payload: { type: "thread_goal_updated", goal: { objective: `use ${written}` } } },
-      ...codexTurn("c1", "2026-07-15T03:01:00Z", "first"),
+      { timestamp: "2026-07-15T03:00:01Z", type: "event_msg", payload: { type: "thread_goal_updated", goal: { objective: `use ${written}` } } },
+      ...codexTurn("c1", "2026-07-15T03:01:00Z", `<codex_internal_context source="goal">use ${written}</codex_internal_context>`),
       ...codexTurn("c2", "2026-07-15T03:02:00Z", "second"),
-      ...codexTurn("c3", "2026-07-15T03:03:00Z", `third ${written} ${mentioned}`),
+      ...codexTurn("c3", "2026-07-15T03:03:00Z", `third ${late} ${mentioned}`),
     ]);
     const sessions = [
-      session("producer", "codex", producerPath, 1),
+      session(upstreamId, "codex", producerPath, 1),
       session("assistant-consumer", "codex", assistantConsumerPath, 2),
-      session("late-consumer", "codex", lateConsumerPath, 3),
+      session(downstreamId, "codex", lateConsumerPath, 3),
     ];
 
-    expect(index.refresh(sessions, true)).toMatchObject({ writes: 1, references: 1, edges: 0 });
+    expect(index.refresh(sessions, true)).toMatchObject({ writes: 1, references: 2, edges: 1 });
+    expect(index.lineage(downstreamId).edges).toEqual([
+      expect.objectContaining({ upstream_id: upstreamId, downstream_id: downstreamId, path: written, reference_source: "user", reference_turn: 0 }),
+    ]);
+  });
+
+  test("ignores exact ambient artifact basenames on writes and references", () => {
+    const { root, write, session, index } = setup();
+    const ambient = ["AGENTS.md", "CLAUDE.md", "MEMORY.md", "SKILL.md", "AgEnTs.Md"].map((name) => join(root, name));
+    const handoff = join(root, "handoff.md");
+    const producerPath = write("producer", codexTurn("p1", "2026-07-15T01:00:00Z", "write", [...ambient, handoff].map((path) => ({ path }))));
+    const consumerPath = write("consumer", codexTurn("c1", "2026-07-15T02:00:00Z", [...ambient, handoff].join(" ")));
+
+    expect(index.refresh([
+      session("producer", "codex", producerPath, 1), session("consumer", "codex", consumerPath, 2),
+    ], true)).toMatchObject({ writes: 1, references: 1, edges: 1 });
+    expect(index.lineage("consumer").edges).toEqual([
+      expect.objectContaining({ upstream_id: "producer", downstream_id: "consumer", path: handoff }),
+    ]);
   });
 
   test("uses the most recent prior writer and refreshes only changed sessions", () => {
@@ -125,7 +147,7 @@ describe("LineageIndex", () => {
 
   test("extracts successful Claude and pi writes but ignores injected and tool-result paths", () => {
     const { root, write, session, index } = setup();
-    const claudeDoc = join(root, "claude.md"), piDoc = join(root, "pi.html");
+    const claudeDoc = join(root, "claude-handoff.md"), piDoc = join(root, "pi.html");
     const claudePath = write("claude", [
       { type: "user", timestamp: "2026-07-15T01:00:00Z", message: { role: "user", content: "make a handoff" } },
       { type: "assistant", timestamp: "2026-07-15T01:01:00Z", message: { role: "assistant", content: [{ type: "tool_use", id: "w1", name: "Write", input: { file_path: claudeDoc } }] } },

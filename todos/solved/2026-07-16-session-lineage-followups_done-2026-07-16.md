@@ -3,20 +3,20 @@
 - **日期**：2026-07-16
 - **类型**：bug / 调研 / 需求
 - **模块**：agent-sessions / lineage
-- **状态**：未解决
+- **状态**：已完成（2026-07-16）
 - **环境**：本地 Dashboard，`http://127.0.0.1:7867/`
 
 ## 描述
 
-Session 关系链功能还有三项未实施事项，统一在本文件跟踪：
+Session 关系链功能原有三项事项，现已全部实施并在本文件归档：
 
 1. 修正 Codex Goal 作为 user consumer 时的漏链。
-2. 讨论并设计首页 Session 列表中的“有关系链”状态表示。
-3. 讨论并设计从单个 Session 悬浮预览整条关系链的入口与展现形式。
+2. 实施已确认的首页 Session 列表“有关系链”状态。
+3. 实施已确认的单 Session 整链悬浮预览。
 
-后两项先完成设计讨论，不预设具体 UI，不在设计确认前实施。
+后两项设计已经确认，统一按 `plans/2026-07-16-lineage-entry-ui.md` 实施。
 
-## TODO 1：Codex Goal 漏链
+## TODO 1：Codex Goal 漏链（已完成）
 
 ### 现象
 
@@ -43,7 +43,7 @@ $implement /home/aquas/project1/.claude/scratch/ops-instance-failure-context/PRD
 - 同一个 objective 的重复 Goal 状态更新不能重复计轮。
 - `<codex_internal_context source="goal">` 是 objective 的内部回显，不能再计一个 user 轮次。
 - assistant、developer、system、tool result 和第 3 个及后续 user 轮次仍不得作为 consumer。
-- 提取规则变化后将 `INDEX_VERSION` 从 2 升到 3，触发派生缓存重建。
+- 与 `plans/004-filter-ambient-artifacts.md` 在同一个 extraction batch 中实施；两项规则变更共享一次缓存失效，将 `INDEX_VERSION` 从 2 升到 3，禁止分别递增或触发两次全量重建。
 - 用最小测试固定“Goal objective 能连边、Goal 回显不重复、assistant 引用不连边、第三轮 user 引用不连边”。
 
 ### 验证方式
@@ -54,23 +54,22 @@ $implement /home/aquas/project1/.claude/scratch/ops-instance-failure-context/PRD
 - `./sessions lineage 019f6903 --json` 必须包含下游 `019f6a53-24ad-7fa0-b96d-6e457d8df307`。
 - 目标边必须使用上述 PRD 路径，且 `reference_source=user`、`reference_turn=0`。
 
-## TODO 2：首页列表显示关系链状态（待讨论设计）
+## TODO 2：首页列表显示关系链状态（已完成）
 
 ### 需求
 
 首页 Session 列表中，如果某个 Session 属于任意关系链，应在该 Session 行内直接看出“有链”。没有关系链的 Session 不显示该状态。
 
-### 待讨论问题
+### 设计结论（2026-07-16 已确认）
 
-- 状态是只表达“有链”，还是同时表达起点/中游/下游、直接上下游数量或整链 Session 数量。
-- 使用独立列、名称旁图标、徽标还是其他形式，如何避免进一步增加当前表格的信息密度。
-- 是否支持按“有链”筛选或排序；如果支持，入口放在哪里。
-- 深色/浅色主题下如何保持辨识度，同时不能只依赖颜色表达状态。
-- 点击状态后是打开 Session 详情、定位全局 DAG，还是直接展开链预览。
+- 采用名称旁链徽标：链形 glyph + 整链 Session 数，不加独立列；无链行不渲染任何元素。
+- 补充「⛓ 有链」筛选 tab（位于「★ 标记」与「归档」之间），承担批量发现职责；关系缓存为空时不显示。
+- 点击徽标 = 固定链预览浮层（见 TODO 3），不直接跳转。
+- 完整交互规格与视觉基准见 `plans/2026-07-16-lineage-entry-ui.md` 及其引用的设计稿。
 
 ### 实施方案
 
-先产出一个最小交互方案并确认，再修改代码。优先复用已有 `/api/lineages` 缓存结果和当前列表数据，不为每一行单独请求关系链，也不在列表加载时重新分析索引。
+按 `plans/2026-07-16-lineage-entry-ui.md` 实施。复用已有 `/api/lineages` 缓存结果和当前列表数据，不为每一行单独请求关系链，也不在列表加载时重新分析索引。
 
 ### 验证方式
 
@@ -79,23 +78,24 @@ $implement /home/aquas/project1/.claude/scratch/ops-instance-failure-context/PRD
 - 1900+ Session 数据量下不产生逐行网络请求或明显列表性能回退。
 - 与现有星标、状态、名称、备注、详情入口不冲突。
 
-## TODO 3：悬浮预览 Session 所在整条链（待讨论设计）
+## TODO 3：悬浮预览 Session 所在整条链（已完成）
 
 ### 需求
 
 每个有链 Session 都应提供一个可悬浮的入口，快速预览该 Session 所在的完整连通关系链，而不是只看直接上游或下游一层。预览中需要明确当前 Session 的位置。
 
-### 待讨论问题
+### 设计结论（2026-07-16 已确认）
 
-- 悬浮入口复用 TODO 2 的链状态，还是整行/名称区域；避免和现有首条消息 Transcript 悬浮预览抢占同一个浮层。
-- 小链可否直接显示紧凑 DAG；大链如何处理缩放、滚动、摘要或分层，不能把 58 个节点压成不可读缩略图。
-- 预览是 hover card、popover、侧边浮层还是其他形式；鼠标离开时如何保持可进入和可操作。
-- 键盘 focus、触屏和 reduced-motion 下使用什么等价入口。
-- 点击节点后是打开 Session 详情、定位全局 DAG，还是固定预览状态。
+- 悬浮入口复用 TODO 2 的链徽标，浮层为新的独立浮层，与首条消息 Transcript 预览互斥（同一时刻只显示其一）。
+- 浮层内容为迷你 DAG：复用 LineageGraph 分层布局（抽共享模块参数化尺寸），节点 150×46，有向边（箭头指向下游），文件名标签放在列间 80px 空隙内不遮节点，当前 Session 高亮 +「当前」badge。
+- 大链降级：连通分量 >12 节点只画当前 ±1 层，每侧邻居最多 4 个；隐藏节点按全部 ancestors、全部 descendants 和兄弟旁支三类互斥计数，按需显示折叠节点并可点击跳关系图定位。
+- 交互：hover 180ms 显示 / 100ms 延迟隐藏；点击徽标固定，Esc/点外部关闭；键盘 focus 即预览，键盘固定后焦点进入浮层并在固定态内循环，Esc 归还焦点且不得重新触发预览；触屏 tap 即固定；reduced-motion 仅保留 opacity。
+- 点击节点打开 Session 详情；footer「在关系图中定位」切换关系图视图并聚焦当前链。
+- 完整规格见 `plans/2026-07-16-lineage-entry-ui.md`。
 
 ### 实施方案
 
-设计确认前不实施。方案应复用持久缓存和完整连通分量查询，不触发重新分析；优先复用 `src/LineageGraph.vue` 的稳定布局数据，但预览尺寸和大链降级策略需要单独定义。动效只服务于浮层来源和状态变化，不使用持续力导向运动。
+按 `plans/2026-07-16-lineage-entry-ui.md` 实施。复用持久缓存和完整连通分量查询，不触发重新分析；动效只服务于浮层来源和状态变化，不使用持续力导向运动。
 
 ### 验证方式
 

@@ -1,16 +1,54 @@
 # Implementation Notes: Python Dashboard Parity in Vue
 
+## 2026-07-16: Session lineage plans 001–007 and entry UI
+
+### Objective
+
+- Execute `plans/README.md` in order, combining Plan 004 with the Codex Goal consumer fix under one `INDEX_VERSION` change from 2 to 3, then implement the confirmed list badge, chain filter, and mini-DAG preview last.
+- Preserve the existing Lineage API and persistent-cache boundary; list load and preview interactions must never rebuild the index or issue per-row/hover requests.
+
+### Implemented
+
+- [x] 001: removed `.dag-canvas` minimum-width scaling and fixed the SVG/node coordinate contract in UI tests.
+- [x] 004 + TODO 1: filtered exact case-insensitive `AGENTS.md`, `CLAUDE.md`, `MEMORY.md`, and `SKILL.md` basenames on writes and references; admitted unique `thread_goal_updated.goal.objective` values as user inputs; bumped `INDEX_VERSION` from 2 to 3 once.
+- [x] 002–007: added chronological chain endpoints and duration, replaced node dimming with one-hop borders, removed node stagger/keyframes, and retained 120ms opacity/color feedback under reduced motion. Plan 003 was later superseded by the higher-priority entry UI plan, so artifact filenames remain visible on edges.
+- [x] Entry UI: extracted connected-component and layered layout logic to `src/lineageLayout.ts`; added one lazy `/api/lineages` cache read, list badges, the `⛓ 有链` tab, `src/LineagePreview.vue`, keyboard/pointer pinning, focus trapping and restoration, current-node detail navigation, one-shot global-graph location, and >12-node ancestor/descendant/branch clipping.
+- [x] Updated all plan statuses and archived the completed TODO under `todos/solved/`.
+
+### Confirmed Test Seams
+
+- Extraction: the Goal fixture uses the TODO's exact `019f6903…` → `019f6a53…` IDs and PRD path; duplicate Goal updates count once, the internal Goal echo and assistant text do not count, the third effective user turn stays outside the consumer window, and ambient basenames are filtered without excluding `handoff.md`.
+- DAG plans: canvas/SVG/node coordinates, chronological headers, visible artifact basenames plus native full-path titles, connected-node highlighting, cleared interaction state, and absence of node delay are asserted in the cached-DAG test.
+- Entry UI: one cached request for 101 rows, second request only after reanalysis, badge/tab refresh, hover timing and Transcript-preview exclusion, directed mini edges and gap labels, keyboard pin/focus loop/Esc suppression, no row-keyboard leakage, detail navigation, empty-cache degradation, and the 15-node three-way clipping invariant.
+
+### Deviations and Environment Notes
+
+- Plan 001 specified `viewBox="0 0 596 150"`, but its protected existing height formula is `72 + maxRows * 96`, which yields `168` for one row. The test asserts `596 × 168`; changing it to 150 would have violated the plan boundary forbidding layout-algorithm changes.
+- The in-app browser runtime reported no available browser backends, so the requested visual playback/theme/reduced-motion feel check could not be automated. Static CSS contracts and DOM interactions are covered, but this environment did not provide a visual inspection surface.
+- The real version-3 rebuild contained 223 source Sessions; the TODO's Linux Session `019f6903…` is absent, so `./sessions lineage 019f6903 --json` reports no matching Session. The exact Goal edge fields are covered by the fixture test, but that historical pair could not be rechecked on this machine.
+- The host proxy returns HTTP 502 for unused `127.0.0.1` ports, making the lifecycle test misread them as occupied. Full verification passed with command-scoped `NO_PROXY=127.0.0.1,localhost`; no lifecycle code or test was changed.
+
+### Verification Log
+
+- `bun test tests/lineage.test.ts`: 5 passed.
+- `bun run test:ui`: 17 passed.
+- `NO_PROXY=127.0.0.1,localhost bun run test`: 32 backend and 17 UI tests passed.
+- `bun run typecheck`: passed.
+- `bun run build`: passed; Vite output embedded successfully.
+- `./sessions index --rebuild --json`: 223 Sessions scanned, 0 unchanged, 5 removed, 136 writes, 135 references, 1 edge, 614ms.
+- `git diff --check`: passed.
+
 ## 2026-07-16: Session 文件传递关系索引
 
 ### Objective
 
 - 自动识别跨 Session 的 Markdown/HTML 文件传递关系：生产者必须是上游最后 3 个有效用户轮次中由 assistant 成功写入的文件，消费者必须在下游最前 2 个有效 user 轮次中按绝对路径引用。
-- Codex Goal、assistant 消息、tool result 和第 3 个及后续 user 轮次都不能作为消费引用；继续排除 AGENTS、skills、memory、compact history 等注入内容。
+- Codex Goal objective 作为显式 user task input 可以消费 Artifact；其内部回显、assistant 消息、tool result 和第 3 个及后续 user 轮次不能作为消费引用；继续排除 AGENTS、skills、memory、compact history 等注入内容。
 - 全局刷新与单 Session 完整上下游查询共用一份持久索引；页面第一版只提供最小可验证入口，最终交互后续再定。
 
 ### Confirmed Test Seams
 
-- 事件提取：Claude、Codex、pi 的真实 user 轮次、assistant 发起且成功的 Write/Edit、Codex patch 结果与路径标准化；Goal 和 assistant 文本不进入消费事实。
+- 事件提取：Claude、Codex、pi 的真实 user 轮次、唯一 Goal objective、assistant 发起且成功的 Write/Edit、Codex patch 结果与路径标准化；Goal 内部回显和 assistant 文本不进入消费事实。
 - 关系判定：消费者窗口为前 2 个有效 user 轮次，生产者窗口为后 3 个有效 user 轮次中的 assistant 成功写入；同 Session 不连边，引用只连接到此前最近一次写入。
 - 持久索引：未变化 Session 不重解析，变化/删除 Session 只更新受影响事实和边。
 - 查询：从指定 Session 双向遍历到完整连通关系，而非只返回一层。
@@ -28,6 +66,7 @@
 - Session 事实按变化文件增量提取，但关系边当前只有约 170 条，因此每次刷新统一重建全部边；只有全量重建变成可测瓶颈时再按受影响路径局部更新。
 - 裸 `bun run typecheck` 原先缺少 Vue 模块声明，新增最小 `vue-shim.d.ts`，不改变运行时行为。
 - 初版把 Codex Goal 视为 consumer，并检查前 3 个有效输入；2026-07-16 收紧为仅前 2 个直接 user 轮次，同时将索引版本升到 2，确保旧缓存被全量重算。
+- 后续真实漏链证明 Goal objective 本身是 user-provided task input；版本 3 重新接纳唯一 objective，但继续排除 `<codex_internal_context source="goal">` 回显，并维持前 2 轮上限。
 
 ### Verification Log
 

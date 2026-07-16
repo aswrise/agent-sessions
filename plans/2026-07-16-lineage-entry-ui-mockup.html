@@ -1,0 +1,821 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>Session 关系链入口 · 设计方案探讨</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+</head>
+<body>
+<style>
+:root{
+  --void:#0c0d12;--carbon:#12141b;--material:rgba(18,20,27,.88);--obsidian:#1b1e27;--graphite:#292d39;--smoke:#3d4251;
+  --ash:#73798a;--fog:#9da4b6;--mist:#d2d6e0;--bone:#f2f3f7;--paper:#ffffff;--lime:#8b9cff;
+  --hover:rgba(139,156,255,.055);--chip:rgba(255,255,255,.055);
+  --input-bg:rgba(255,255,255,.035);--input-line:rgba(255,255,255,.09);
+  --good:#6fd49b;--warn:#e8b45a;
+  --ease-out:cubic-bezier(.23,1,.32,1);
+  color-scheme:dark;
+}
+@media (prefers-color-scheme: light){
+  :root{
+    --void:#f5f6f8;--carbon:#ffffff;--material:rgba(255,255,255,.92);--obsidian:#eceef3;--graphite:#dde0e7;
+    --smoke:#bcc1cd;--ash:#73798a;--fog:#555c6d;--mist:#303442;--bone:#191b22;--paper:#101218;
+    --lime:#596de8;--hover:rgba(69,85,190,.045);--chip:rgba(30,35,50,.055);
+    --input-bg:#fafbfc;--input-line:rgba(25,30,45,.12);
+    --good:#2f9e63;--warn:#b07c22;
+    color-scheme:light;
+  }
+}
+:root[data-theme=dark]{
+  --void:#0c0d12;--carbon:#12141b;--material:rgba(18,20,27,.88);--obsidian:#1b1e27;--graphite:#292d39;--smoke:#3d4251;
+  --ash:#73798a;--fog:#9da4b6;--mist:#d2d6e0;--bone:#f2f3f7;--paper:#ffffff;--lime:#8b9cff;
+  --hover:rgba(139,156,255,.055);--chip:rgba(255,255,255,.055);
+  --input-bg:rgba(255,255,255,.035);--input-line:rgba(255,255,255,.09);
+  --good:#6fd49b;--warn:#e8b45a;color-scheme:dark;
+}
+:root[data-theme=light]{
+  --void:#f5f6f8;--carbon:#ffffff;--material:rgba(255,255,255,.92);--obsidian:#eceef3;--graphite:#dde0e7;
+  --smoke:#bcc1cd;--ash:#73798a;--fog:#555c6d;--mist:#303442;--bone:#191b22;--paper:#101218;
+  --lime:#596de8;--hover:rgba(69,85,190,.045);--chip:rgba(30,35,50,.055);
+  --input-bg:#fafbfc;--input-line:rgba(25,30,45,.12);
+  --good:#2f9e63;--warn:#b07c22;color-scheme:light;
+}
+*{box-sizing:border-box}
+body{
+  margin:0;background:radial-gradient(900px 460px at 16% -10%,color-mix(in srgb,var(--lime) 9%,transparent),transparent 65%),var(--void);
+  color:var(--mist);
+  font:400 13.5px/1.65 Inter,"Inter Variable",-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",system-ui,sans-serif;
+  font-feature-settings:"cv01" on,"ss03" on,"zero" on;
+}
+.mono{font-family:"Berkeley Mono",ui-monospace,"Cascadia Code",Consolas,monospace;font-variant-numeric:tabular-nums;letter-spacing:-.013em}
+.page{max-width:960px;margin:0 auto;padding:48px 28px 80px}
+a{color:var(--lime)}
+
+/* ---------- 文档结构 ---------- */
+.eyebrow{display:inline-flex;align-items:center;gap:8px;color:var(--ash);font:600 11px/1 ui-monospace,monospace;text-transform:uppercase;letter-spacing:.09em}
+.eyebrow::before{content:"";width:18px;height:1px;background:var(--lime)}
+h1{margin:14px 0 10px;color:var(--paper);font-size:26px;font-weight:680;letter-spacing:-.03em;line-height:1.25;text-wrap:balance}
+.lede{max-width:64ch;color:var(--fog);font-size:14px}
+.constraints{display:flex;flex-wrap:wrap;gap:6px;margin-top:18px}
+.constraints span{padding:4px 10px;border:1px solid var(--obsidian);border-radius:999px;background:var(--carbon);color:var(--ash);font-size:11px}
+section{margin-top:64px}
+h2{display:flex;align-items:baseline;gap:10px;margin:0 0 6px;color:var(--paper);font-size:19px;font-weight:660;letter-spacing:-.02em}
+h2 .no{color:var(--lime);font:650 12px/1 ui-monospace,monospace}
+.sec-note{max-width:66ch;margin:0 0 26px;color:var(--fog);font-size:13px}
+h3{margin:0;color:var(--paper);font-size:14.5px;font-weight:640;letter-spacing:-.01em}
+
+/* ---------- 方案卡 ---------- */
+.option{margin-bottom:34px;border:1px solid var(--obsidian);border-radius:16px;background:var(--carbon);overflow:hidden}
+.option-head{display:flex;gap:12px;align-items:flex-start;padding:16px 18px 14px}
+.opt-tag{flex:none;display:grid;place-items:center;min-width:52px;height:24px;padding:0 9px;border-radius:7px;margin-top:-1px;
+  background:color-mix(in srgb,var(--lime) 12%,transparent);border:1px solid color-mix(in srgb,var(--lime) 30%,transparent);
+  color:var(--lime);font:650 11px/1 ui-monospace,monospace;letter-spacing:.03em}
+.opt-tag.alt{background:var(--chip);border-color:var(--graphite);color:var(--fog)}
+.option-head p{margin:5px 0 0;color:var(--fog);font-size:12.5px;max-width:64ch}
+.demo{position:relative;padding:22px 18px 26px;border-top:1px dashed var(--graphite);background:
+  linear-gradient(color-mix(in srgb,var(--void) 42%,transparent),color-mix(in srgb,var(--void) 42%,transparent)),var(--carbon)}
+.demo-label{position:absolute;top:-9px;left:16px;padding:2px 8px;border-radius:999px;border:1px solid var(--graphite);
+  background:var(--carbon);color:var(--ash);font:600 10px/14px ui-monospace,monospace;letter-spacing:.06em;text-transform:uppercase}
+.verdict{display:grid;grid-template-columns:1fr 1fr;gap:0;border-top:1px solid var(--obsidian)}
+.verdict>div{padding:12px 18px 14px;font-size:12px}
+.verdict>div+div{border-left:1px solid var(--obsidian)}
+.verdict h4{margin:0 0 6px;font-size:10.5px;font-weight:650;text-transform:uppercase;letter-spacing:.07em}
+.verdict .up h4{color:var(--good)}.verdict .down h4{color:var(--warn)}
+.verdict ul{margin:0;padding-left:16px;color:var(--fog)}
+.verdict li{margin:3px 0}
+@media (max-width:640px){.verdict{grid-template-columns:1fr}.verdict>div+div{border-left:0;border-top:1px solid var(--obsidian)}}
+
+/* ---------- 表格 mockup（对齐现有 dashboard） ---------- */
+.tbl-wrap{overflow-x:auto;border:1px solid var(--obsidian);border-radius:12px;background:var(--carbon)}
+table.mock{width:100%;min-width:720px;border-collapse:collapse;table-layout:fixed}
+.mock th{height:38px;padding:0 10px;text-align:left;font-size:10px;font-weight:600;color:var(--ash);
+  text-transform:uppercase;letter-spacing:.055em;border-bottom:1px solid var(--graphite);white-space:nowrap}
+.mock td{height:44px;padding:8px 10px;border-bottom:1px solid var(--obsidian);vertical-align:middle;
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12.5px}
+.mock tr:last-child td{border-bottom:0}
+@media (hover:hover){.mock tbody tr:hover td{background:var(--hover)}}
+.mock .dt{color:var(--ash);font-family:ui-monospace,monospace;font-size:11.5px}
+.mock .nm{font-weight:560;color:var(--paper)}
+.mock .msg{color:var(--fog)}
+.tool-pill{display:inline-flex;padding:2px 6px;border-radius:5px;background:var(--chip);color:var(--fog);
+  font:600 10px/16px ui-monospace,monospace}
+.tool-pill.codex{color:#aab5ff;background:rgba(139,156,255,.12)}
+.tool-pill.claude{color:#e9a884;background:rgba(222,137,91,.12)}
+.tool-pill.pi{color:#76d5b0;background:rgba(77,190,147,.12)}
+:root[data-theme=light] .tool-pill.codex,:root:not([data-theme=dark]) .tool-pill.codex{}
+.star{color:var(--smoke);font-size:14px}
+.star.on{color:var(--lime)}
+
+/* ---------- 链徽标（方案 A/B/C 变体） ---------- */
+.chain-chip{display:inline-flex;align-items:center;gap:4px;height:20px;padding:0 7px;margin-left:8px;vertical-align:-4px;
+  border:1px solid color-mix(in srgb,var(--lime) 26%,transparent);border-radius:999px;
+  background:color-mix(in srgb,var(--lime) 9%,transparent);color:var(--lime);
+  font:600 10.5px/1 ui-monospace,monospace;cursor:pointer;
+  transition:transform 140ms var(--ease-out),background-color 140ms ease,border-color 140ms ease}
+.chain-chip svg{width:11px;height:11px;flex:none}
+.chain-chip:active{transform:scale(.95)}
+.chain-chip:focus-visible{outline:2px solid var(--lime);outline-offset:2px}
+@media (hover:hover){.chain-chip:hover{background:color-mix(in srgb,var(--lime) 15%,transparent);border-color:color-mix(in srgb,var(--lime) 45%,transparent)}}
+.chain-chip.col{margin-left:0}
+.chain-chip.role{color:var(--fog);border-color:var(--graphite);background:var(--chip)}
+.chain-chip.role b{color:var(--lime);font-weight:650}
+.chain-chip.minimal{padding:0;width:22px;height:22px;justify-content:center;border-radius:7px;margin-left:6px}
+.mock td.chaincell{text-align:center;padding-left:4px;padding-right:4px}
+
+/* tabs mock（方案 C 筛选入口） */
+.tabs-mock{display:inline-flex;align-items:center;gap:2px;padding:3px;border:1px solid var(--obsidian);border-radius:9px;
+  background:color-mix(in srgb,var(--void) 76%,transparent);margin-bottom:14px}
+.tabs-mock button{padding:5px 10px;border:0;border-radius:7px;background:none;color:var(--fog);font:inherit;font-size:12px;cursor:pointer}
+.tabs-mock button.on{background:var(--chip);color:var(--paper);font-weight:560;box-shadow:0 1px 2px rgba(0,0,0,.16)}
+.tabs-mock button::after{content:attr(data-count);margin-left:5px;color:var(--ash);font-size:10px;font-variant-numeric:tabular-nums}
+
+/* ---------- 浮层（TODO 3 demos） ---------- */
+.pop{position:absolute;z-index:8;min-width:300px;max-width:min(700px,calc(100% - 20px));
+  visibility:hidden;opacity:0;transform:scale(.97);pointer-events:none;transform-origin:top left;
+  border:1px solid var(--graphite);border-radius:13px;background:var(--material);
+  backdrop-filter:blur(22px) saturate(150%);box-shadow:0 18px 55px rgba(0,0,0,.36);
+  transition:opacity 140ms var(--ease-out),transform 140ms var(--ease-out)}
+.pop.show{visibility:visible;opacity:1;transform:scale(1);pointer-events:auto}
+.pop-head{display:flex;align-items:center;justify-content:space-between;gap:14px;padding:10px 13px;
+  border-bottom:1px solid var(--obsidian);font-size:11px;color:var(--ash)}
+.pop-head strong{color:var(--mist);font-size:11px;font-weight:650;text-transform:uppercase;letter-spacing:.05em}
+.pop-head .pin-hint{display:none;color:var(--lime)}
+.pop.pinned .pin-hint{display:inline}
+.pop-foot{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:9px 13px;
+  border-top:1px solid var(--obsidian);color:var(--ash);font-size:11px}
+.pop-foot a{font-size:11px;text-decoration:none}
+.pop-foot a:hover{text-decoration:underline}
+
+/* 迷你 DAG */
+.mini-scroll{overflow-x:auto}
+.mini-canvas{position:relative;margin:14px;height:130px}
+.mini-canvas svg{position:absolute;inset:0;width:100%;height:100%;overflow:visible}
+.mini-canvas path{fill:none;stroke:var(--smoke);stroke-width:1.3}
+.mini-canvas text{fill:var(--fog);font:9.5px ui-monospace,monospace;paint-order:stroke;stroke:var(--carbon);stroke-width:4px;stroke-linejoin:round}
+.mini-node{position:absolute;width:150px;height:46px;padding:6px 9px;border:1px solid var(--graphite);border-radius:9px;
+  background:var(--carbon);text-align:left;cursor:pointer;font:inherit;color:var(--mist)}
+.mini-node .t{display:flex;justify-content:space-between;margin-bottom:2px}
+.mini-node .t i{font:650 8.5px/13px ui-monospace,monospace;font-style:normal;text-transform:uppercase}
+.mini-node .t i.codex{color:#aab5ff}.mini-node .t i.claude{color:#e9a884}.mini-node .t i.pi{color:#76d5b0}
+.mini-node .t em{font:9px/13px ui-monospace,monospace;font-style:normal;color:var(--ash)}
+.mini-node b{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:11px;font-weight:600;color:var(--paper)}
+.mini-node.cur{border-color:var(--lime);background:color-mix(in srgb,var(--lime) 9%,var(--carbon));
+  box-shadow:0 0 0 3px color-mix(in srgb,var(--lime) 12%,transparent)}
+.mini-node.cur::after{content:"当前";position:absolute;top:-8px;right:8px;padding:1px 6px;border-radius:999px;
+  background:var(--lime);color:var(--void);font:700 8.5px/13px ui-monospace,monospace}
+.mini-node.fold{display:grid;place-items:center;width:150px;border-style:dashed;color:var(--ash);font-size:11px;background:transparent}
+
+/* 轴线摘要（方案 2） */
+.axis{display:grid;grid-template-columns:1fr auto 1fr;gap:10px;align-items:start;padding:14px}
+.axis h5{margin:0 0 7px;color:var(--ash);font:600 9.5px/1 ui-monospace,monospace;text-transform:uppercase;letter-spacing:.07em;text-align:center}
+.axis-col{display:grid;gap:6px;min-width:150px}
+.axis-item{display:flex;align-items:center;gap:7px;padding:7px 9px;border:1px solid var(--graphite);border-radius:8px;
+  background:var(--carbon);font-size:11.5px;color:var(--mist);cursor:pointer;overflow:hidden}
+.axis-item i{flex:none;font:650 8.5px/13px ui-monospace,monospace;font-style:normal;text-transform:uppercase}
+.axis-item i.codex{color:#aab5ff}.axis-item i.claude{color:#e9a884}.axis-item i.pi{color:#76d5b0}
+.axis-item b{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:560}
+.axis-item .via{margin-left:auto;flex:none;color:var(--ash);font:9px ui-monospace,monospace}
+.axis-cur{position:relative;padding:9px 12px;border:1px solid var(--lime);border-radius:9px;align-self:center;
+  background:color-mix(in srgb,var(--lime) 9%,var(--carbon));color:var(--paper);font-size:12px;font-weight:620;
+  box-shadow:0 0 0 3px color-mix(in srgb,var(--lime) 12%,transparent)}
+.axis-more{padding:6px;border:1px dashed var(--graphite);border-radius:8px;color:var(--ash);font-size:10.5px;text-align:center}
+
+/* 侧边面板（方案 3） */
+.frame{position:relative;height:340px;overflow:hidden;border:1px solid var(--obsidian);border-radius:12px;background:var(--carbon)}
+.frame-bg{padding:14px;filter:none;transition:filter 200ms ease}
+.frame.open .frame-bg{filter:blur(1.5px) brightness(.92)}
+.panel{position:absolute;top:0;right:0;bottom:0;width:min(400px,86%);display:flex;flex-direction:column;
+  border-left:1px solid var(--graphite);background:var(--material);backdrop-filter:blur(22px) saturate(150%);
+  box-shadow:-18px 0 50px rgba(0,0,0,.3);transform:translateX(102%);
+  transition:transform 260ms cubic-bezier(.32,.72,0,1)}
+.frame.open .panel{transform:translateX(0)}
+.panel-head{display:flex;align-items:center;justify-content:space-between;padding:12px 14px;border-bottom:1px solid var(--obsidian)}
+.panel-head strong{color:var(--paper);font-size:13px;font-weight:640}
+.panel-head button{border:1px solid var(--graphite);border-radius:7px;background:var(--input-bg);color:var(--fog);
+  font:inherit;font-size:11px;padding:4px 9px;cursor:pointer}
+.panel-body{flex:1;overflow:auto;padding:12px 14px;font-size:12px;color:var(--fog)}
+.panel-body .axis{grid-template-columns:1fr;padding:0;gap:8px}
+.panel-body .axis h5{text-align:left}
+
+/* ---------- 对比矩阵 ---------- */
+.matrix-wrap{overflow-x:auto;border:1px solid var(--obsidian);border-radius:12px;background:var(--carbon)}
+table.matrix{width:100%;min-width:640px;border-collapse:collapse;font-size:12px}
+.matrix th{padding:10px 12px;text-align:left;font-size:10px;font-weight:650;color:var(--ash);text-transform:uppercase;
+  letter-spacing:.06em;border-bottom:1px solid var(--graphite);white-space:nowrap}
+.matrix td{padding:9px 12px;border-bottom:1px solid var(--obsidian);color:var(--fog);vertical-align:top}
+.matrix td:first-child{color:var(--mist);font-weight:560;white-space:nowrap}
+.matrix tr:last-child td{border-bottom:0}
+.tag{display:inline-block;padding:1px 7px;border-radius:999px;font-size:10.5px;font-weight:600}
+.tag.rec{background:color-mix(in srgb,var(--good) 14%,transparent);color:var(--good)}
+.tag.alt{background:var(--chip);color:var(--fog)}
+
+/* 问题清单 */
+.qs{counter-reset:q;display:grid;gap:10px;margin:0;padding:0;list-style:none}
+.qs li{position:relative;padding:13px 16px 13px 46px;border:1px solid var(--obsidian);border-radius:11px;background:var(--carbon);font-size:13px}
+.qs li::before{counter-increment:q;content:"Q" counter(q);position:absolute;left:14px;top:13px;
+  color:var(--lime);font:650 11px/20px ui-monospace,monospace}
+.qs li b{color:var(--paper);font-weight:620}
+.qs li span{display:block;margin-top:3px;color:var(--fog);font-size:12px}
+
+.hint{margin-top:10px;color:var(--ash);font-size:11.5px}
+.kbd{display:inline-block;min-width:18px;padding:0 5px;border:1px solid var(--graphite);border-radius:5px;
+  background:var(--carbon);color:var(--fog);font:500 10px/17px ui-monospace,monospace;text-align:center}
+
+@media (prefers-reduced-motion:reduce){
+  .pop,.panel,.chain-chip,.frame-bg{transition-duration:0ms}
+  .pop{transform:none}.pop.show{transform:none}
+}
+</style>
+
+<div class="page">
+  <header>
+    <span class="eyebrow">agent-sessions · lineage UI 探讨稿</span>
+    <h1>首页「有链」状态 与 整链悬浮预览</h1>
+    <p class="lede">针对 TODO 2 / TODO 3 各给三个方向，全部用现有 dashboard 的色板、字体和浮层规则渲染成可交互 mockup（徽标可 hover / 点击 / 键盘 focus）。方案之间可以自由组合，最后有推荐组合和待确认问题。</p>
+    <div class="constraints">
+      <span>只读 /api/lineages 缓存，不逐行请求</span>
+      <span>1900+ 行无性能回退</span>
+      <span>不只靠颜色表达状态</span>
+      <span>不与首条消息 Transcript 预览抢浮层</span>
+      <span>大链（58 节点）不可压成缩略图</span>
+    </div>
+  </header>
+
+  <!-- ============ TODO 2 ============ -->
+  <section>
+    <h2><span class="no">TODO 2</span>首页列表：怎么表示「有链」</h2>
+    <p class="sec-note">列表已有 13 列，信息密度接近上限。三个方案按信息量从多到少排列；无链行完全不渲染任何元素，是三案共同前提。</p>
+
+    <!-- 方案 A -->
+    <div class="option">
+      <div class="option-head">
+        <span class="opt-tag">方案 A</span>
+        <div>
+          <h3>名称旁链徽标 — 不加列，表达「有链 + 整链规模」</h3>
+          <p>在名称文字后放一枚胶囊徽标：链形 glyph + 整链 Session 数。徽标是独立按钮（stopPropagation），不影响点击名称进入改名；hover / focus 徽标触发 TODO 3 的链预览。</p>
+        </div>
+      </div>
+      <div class="demo">
+        <span class="demo-label">Live mockup · 试试 hover 徽标</span>
+        <div class="tbl-wrap">
+          <table class="mock">
+            <colgroup><col style="width:36px"><col style="width:86px"><col style="width:64px"><col style="width:280px"><col><col style="width:96px"></colgroup>
+            <thead><tr><th>★</th><th>更新</th><th>工具</th><th>名称</th><th>首条消息</th><th>大小</th></tr></thead>
+            <tbody>
+              <tr>
+                <td class="star on">★</td><td class="dt">07-16 09:41</td><td><span class="tool-pill codex">codex</span></td>
+                <td class="nm">ops 实例故障上下文 PRD
+                  <button type="button" class="chain-chip" data-pop="popA" aria-label="所在关系链，共 5 个 Session，查看整条链">
+                    <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M6.5 9.5 9.5 6.5"/><path d="M7.5 4.5 9 3a2.4 2.4 0 0 1 3.4 3.4L11 7.9"/><path d="M8.5 11.5 7 13a2.4 2.4 0 0 1-3.4-3.4L5 8.1"/></svg>5
+                  </button>
+                </td>
+                <td class="msg">帮我梳理 ops 实例故障的排查上下文，输出一份 PRD…</td><td class="dt">1.2M</td>
+              </tr>
+              <tr>
+                <td class="star">☆</td><td class="dt">07-16 08:12</td><td><span class="tool-pill claude">claude</span></td>
+                <td class="nm">PRD 实施与验证
+                  <button type="button" class="chain-chip" aria-label="所在关系链，共 5 个 Session">
+                    <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M6.5 9.5 9.5 6.5"/><path d="M7.5 4.5 9 3a2.4 2.4 0 0 1 3.4 3.4L11 7.9"/><path d="M8.5 11.5 7 13a2.4 2.4 0 0 1-3.4-3.4L5 8.1"/></svg>5
+                  </button>
+                </td>
+                <td class="msg">$implement …/ops-instance-failure-context/PRD.md</td><td class="dt">3.4M</td>
+              </tr>
+              <tr>
+                <td class="star">☆</td><td class="dt">07-15 22:03</td><td><span class="tool-pill pi">pi</span></td>
+                <td class="nm">周报整理</td>
+                <td class="msg">把本周的工作记录整理成周报</td><td class="dt">210K</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <!-- 方案 A 的预览浮层（复用 TODO3 方案 1 的迷你 DAG） -->
+        <div class="pop" id="popA" role="dialog" aria-label="关系链预览">
+          <div class="pop-head"><strong>关系链 · 5 Sessions · 4 关系</strong><span class="pin-hint">已固定 · Esc 关闭</span></div>
+          <div class="mini-scroll">
+            <div class="mini-canvas" style="width:610px">
+              <svg viewBox="0 0 610 130" aria-hidden="true">
+                <defs><marker id="mini-arrow-a" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" markerHeight="6" orient="auto"><path d="M 0 0 L 8 4 L 0 8 Z" fill="context-stroke" stroke="none"/></marker></defs>
+                <path d="M150 31 C184 31 196 31 228 31" marker-end="url(#mini-arrow-a)"/>
+                <path d="M150 31 C188 31 192 99 228 99" marker-end="url(#mini-arrow-a)"/>
+                <path d="M380 31 C414 31 426 31 458 31" marker-end="url(#mini-arrow-a)"/>
+                <path d="M380 99 C418 99 422 31 458 31" marker-end="url(#mini-arrow-a)"/>
+                <text x="190" y="21" text-anchor="middle">PRD.md</text>
+                <text x="420" y="21" text-anchor="middle">notes.md</text>
+              </svg>
+              <button class="mini-node cur" style="left:0;top:8px"><span class="t"><i class="codex">codex</i><em>起点</em></span><b>ops 实例故障上下文 PRD</b></button>
+              <button class="mini-node" style="left:230px;top:8px"><span class="t"><i class="claude">claude</i><em>中游</em></span><b>PRD 实施与验证</b></button>
+              <button class="mini-node" style="left:230px;top:76px"><span class="t"><i class="codex">codex</i><em>中游</em></span><b>方案 review 记录</b></button>
+              <button class="mini-node" style="left:460px;top:8px"><span class="t"><i class="claude">claude</i><em>下游</em></span><b>回归与发布说明</b></button>
+            </div>
+          </div>
+          <div class="pop-foot"><span>点击节点打开 Session 详情</span><a href="#" onclick="return false">在关系图中定位 →</a></div>
+        </div>
+      </div>
+      <div class="verdict">
+        <div class="up"><h4>优点</h4><ul>
+          <li>零新列，密度几乎不变；无链行完全干净</li>
+          <li>徽标天然就是 TODO 3 的悬浮/点击锚点，一个元素两个职责</li>
+          <li>glyph + 数字，非颜色依赖；aria-label 完整可读</li>
+        </ul></div>
+        <div class="down"><h4>代价</h4><ul>
+          <li>名称列本已最挤，长名称会把徽标挤出可视区（需保持徽标不参与截断）</li>
+          <li>不可排序/筛选，发现「所有有链 Session」要靠别的入口</li>
+        </ul></div>
+      </div>
+    </div>
+
+    <!-- 方案 B -->
+    <div class="option">
+      <div class="option-head">
+        <span class="opt-tag alt">方案 B</span>
+        <div>
+          <h3>独立「链」列 — 信息最全：角色 + 直接上下游数</h3>
+          <p>在状态列后加一个约 88px 的列，展示角色（起点 / 中游 / 下游）和直接上下游数量。列头可排序（有链在前），信息量最大，也最占地方。</p>
+        </div>
+      </div>
+      <div class="demo">
+        <span class="demo-label">Live mockup</span>
+        <div class="tbl-wrap">
+          <table class="mock">
+            <colgroup><col style="width:36px"><col style="width:86px"><col style="width:64px"><col style="width:200px"><col style="width:104px"><col><col style="width:70px"></colgroup>
+            <thead><tr><th>★</th><th>更新</th><th>工具</th><th>名称</th><th>链 ↓</th><th>首条消息</th><th>大小</th></tr></thead>
+            <tbody>
+              <tr>
+                <td class="star on">★</td><td class="dt">07-16 09:41</td><td><span class="tool-pill codex">codex</span></td>
+                <td class="nm">ops 实例故障上下文 PRD</td>
+                <td class="chaincell"><button type="button" class="chain-chip col role" data-pop="popB" aria-label="链中角色：起点，2 个直接下游"><b>起点</b>·2↓</button></td>
+                <td class="msg">帮我梳理 ops 实例故障的排查上下文…</td><td class="dt">1.2M</td>
+              </tr>
+              <tr>
+                <td class="star">☆</td><td class="dt">07-16 08:12</td><td><span class="tool-pill claude">claude</span></td>
+                <td class="nm">PRD 实施与验证</td>
+                <td class="chaincell"><button type="button" class="chain-chip col role" aria-label="链中角色：中游，1 个上游 1 个下游"><b>中游</b>·1↑1↓</button></td>
+                <td class="msg">$implement …/PRD.md</td><td class="dt">3.4M</td>
+              </tr>
+              <tr>
+                <td class="star">☆</td><td class="dt">07-15 22:03</td><td><span class="tool-pill pi">pi</span></td>
+                <td class="nm">周报整理</td>
+                <td class="chaincell"></td>
+                <td class="msg">把本周的工作记录整理成周报</td><td class="dt">210K</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="pop" id="popB" role="dialog" aria-label="关系链预览">
+          <div class="pop-head"><strong>关系链 · 5 Sessions</strong><span class="pin-hint">已固定 · Esc 关闭</span></div>
+          <div class="axis" style="min-width:480px">
+            <div><h5>上游 0</h5><div class="axis-col"><div class="axis-more">链的起点</div></div></div>
+            <div class="axis-cur">ops 实例故障上下文 PRD</div>
+            <div><h5>下游 2</h5><div class="axis-col">
+              <div class="axis-item"><i class="claude">claude</i><b>PRD 实施与验证</b><span class="via">PRD.md</span></div>
+              <div class="axis-item"><i class="codex">codex</i><b>方案 review 记录</b><span class="via">PRD.md</span></div>
+            </div></div>
+          </div>
+          <div class="pop-foot"><span>再往下还有 2 个 Session</span><a href="#" onclick="return false">在关系图中定位 →</a></div>
+        </div>
+      </div>
+      <div class="verdict">
+        <div class="up"><h4>优点</h4><ul>
+          <li>一眼区分起点 / 中游 / 下游，答了「状态表达多少信息」的上限选项</li>
+          <li>列头可排序；空单元格本身就是「无链」的稳定表达</li>
+        </ul></div>
+        <div class="down"><h4>代价</h4><ul>
+          <li>表格从 13 列到 14 列，min-width 再 +90px，与「避免加密度」直接冲突</li>
+          <li>约 92% 的行（1958 中约 156 条边涉及的 Session）该列是空的，版面利用率低</li>
+        </ul></div>
+      </div>
+    </div>
+
+    <!-- 方案 C -->
+    <div class="option">
+      <div class="option-head">
+        <span class="opt-tag alt">方案 C</span>
+        <div>
+          <h3>最小 glyph + 「有链」筛选 tab — 行内只报有无，发现靠筛选</h3>
+          <p>行内只留一个 22px 的方形图标按钮（无数字），把「找到所有有链 Session」的职责交给来源 tabs 里新增的「⛓ 有链」视图（和「★ 标记」同级）。</p>
+        </div>
+      </div>
+      <div class="demo">
+        <span class="demo-label">Live mockup</span>
+        <div class="tabs-mock" role="group" aria-label="会话来源">
+          <button type="button" data-count="1958">全部</button>
+          <button type="button" data-count="1204">claude</button>
+          <button type="button" data-count="688">codex</button>
+          <button type="button" data-count="66">pi</button>
+          <button type="button" data-count="31">★ 标记</button>
+          <button type="button" class="on" data-count="142">⛓ 有链</button>
+          <button type="button" data-count="105">归档</button>
+        </div>
+        <div class="tbl-wrap">
+          <table class="mock">
+            <colgroup><col style="width:36px"><col style="width:86px"><col style="width:64px"><col style="width:260px"><col><col style="width:70px"></colgroup>
+            <thead><tr><th>★</th><th>更新</th><th>工具</th><th>名称</th><th>首条消息</th><th>大小</th></tr></thead>
+            <tbody>
+              <tr>
+                <td class="star on">★</td><td class="dt">07-16 09:41</td><td><span class="tool-pill codex">codex</span></td>
+                <td class="nm">ops 实例故障上下文 PRD
+                  <button type="button" class="chain-chip minimal" data-pop="popC" aria-label="属于关系链，查看整条链">
+                    <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M6.5 9.5 9.5 6.5"/><path d="M7.5 4.5 9 3a2.4 2.4 0 0 1 3.4 3.4L11 7.9"/><path d="M8.5 11.5 7 13a2.4 2.4 0 0 1-3.4-3.4L5 8.1"/></svg>
+                  </button>
+                </td>
+                <td class="msg">帮我梳理 ops 实例故障的排查上下文…</td><td class="dt">1.2M</td>
+              </tr>
+              <tr>
+                <td class="star">☆</td><td class="dt">07-16 08:12</td><td><span class="tool-pill claude">claude</span></td>
+                <td class="nm">PRD 实施与验证
+                  <button type="button" class="chain-chip minimal" aria-label="属于关系链，查看整条链">
+                    <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M6.5 9.5 9.5 6.5"/><path d="M7.5 4.5 9 3a2.4 2.4 0 0 1 3.4 3.4L11 7.9"/><path d="M8.5 11.5 7 13a2.4 2.4 0 0 1-3.4-3.4L5 8.1"/></svg>
+                  </button>
+                </td>
+                <td class="msg">$implement …/PRD.md</td><td class="dt">3.4M</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="pop" id="popC" role="dialog" aria-label="关系链预览">
+          <div class="pop-head"><strong>关系链 · 5 Sessions</strong><span class="pin-hint">已固定 · Esc 关闭</span></div>
+          <div class="axis" style="min-width:440px">
+            <div><h5>上游 0</h5><div class="axis-col"><div class="axis-more">链的起点</div></div></div>
+            <div class="axis-cur">ops 实例故障上下文 PRD</div>
+            <div><h5>下游 2</h5><div class="axis-col">
+              <div class="axis-item"><i class="claude">claude</i><b>PRD 实施与验证</b><span class="via">PRD.md</span></div>
+              <div class="axis-item"><i class="codex">codex</i><b>方案 review 记录</b><span class="via">PRD.md</span></div>
+            </div></div>
+          </div>
+          <div class="pop-foot"><span>点击节点打开详情</span><a href="#" onclick="return false">在关系图中定位 →</a></div>
+        </div>
+      </div>
+      <div class="verdict">
+        <div class="up"><h4>优点</h4><ul>
+          <li>行内视觉负担最小；tabs 是现有交互模式，零学习成本</li>
+          <li>「有链」计数直接暴露在 tab 上，回答了「筛选入口放哪」</li>
+        </ul></div>
+        <div class="down"><h4>代价</h4><ul>
+          <li>行内只报有无，链规模 / 角色都要 hover 才知道</li>
+          <li>tabs 已有 6 项，再加一项开始拥挤（移动端要横向滚动）</li>
+        </ul></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ TODO 3 ============ -->
+  <section>
+    <h2><span class="no">TODO 3</span>悬浮预览整条链：浮层形态与大链策略</h2>
+    <p class="sec-note">共同前提：预览锚定在 TODO 2 的链徽标上（不是整行），与首条消息的 Transcript 预览分属不同触发区，互不抢占；沿用现有 tip 的节奏 — 180ms 延迟出现、100ms 延迟消失、浮层自身可进入（mouseenter 取消关闭）。上面方案 A 的徽标已经演示了「迷你 DAG」形态，这里补齐另外两种形态和大链降级。</p>
+
+    <!-- 方案 1 说明（已在上方演示） -->
+    <div class="option">
+      <div class="option-head">
+        <span class="opt-tag">方案 1</span>
+        <div>
+          <h3>锚定 Hover Card · 迷你 DAG（≤12 节点原样画）</h3>
+          <p>复用 LineageGraph 的分层布局数据，节点从 220px 缩到 150px，去掉 id 行。边为有向边（箭头指向下游），列间距固定 80px，文件名标签放在列间空隙中，永不被节点遮挡。小链空间关系一目了然，和关系图页视觉同源 — 预览就是关系图的缩小版，点过去不需要重新建立心智模型。<b style="color:var(--paper)">演示见上方方案 A 的徽标。</b></p>
+        </div>
+      </div>
+      <div class="verdict">
+        <div class="up"><h4>优点</h4><ul>
+          <li>分叉 / 汇聚等拓扑信息不丢；边上还能标传递的文件名</li>
+          <li>与全局关系图视觉连续，「在关系图中定位」的跳转不突兀</li>
+        </ul></div>
+        <div class="down"><h4>代价</h4><ul>
+          <li>超过 ~12 节点必须降级（见下方大链策略），实现要维护两套渲染分支</li>
+          <li>浮层宽度随链的层数增长，需要 max-width + 内部横向滚动兜底</li>
+        </ul></div>
+      </div>
+    </div>
+
+    <!-- 方案 2 -->
+    <div class="option">
+      <div class="option-head">
+        <span class="opt-tag alt">方案 2</span>
+        <div>
+          <h3>上下游轴线摘要 — 以当前 Session 为中心的三栏清单</h3>
+          <p>不画图，按「上游 / 当前 / 下游」三栏列出直接邻居（各栏最多 4 项，多余折叠成计数）。永远不会溢出，天生适配任何链规模，代价是丢掉隔层拓扑。</p>
+        </div>
+      </div>
+      <div class="demo">
+        <span class="demo-label">Live mockup · hover 徽标</span>
+        <p style="margin:0 0 12px;font-size:12.5px">
+          <span class="nm" style="color:var(--paper);font-weight:560">PRD 实施与验证</span>
+          <button type="button" class="chain-chip" data-pop="pop2" aria-label="所在关系链，共 6 个 Session">
+            <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M6.5 9.5 9.5 6.5"/><path d="M7.5 4.5 9 3a2.4 2.4 0 0 1 3.4 3.4L11 7.9"/><path d="M8.5 11.5 7 13a2.4 2.4 0 0 1-3.4-3.4L5 8.1"/></svg>6
+          </button>
+        </p>
+        <div class="pop" id="pop2" role="dialog" aria-label="关系链预览">
+          <div class="pop-head"><strong>关系链 · 6 Sessions · 当前处于中游</strong><span class="pin-hint">已固定 · Esc 关闭</span></div>
+          <div class="axis" style="min-width:560px">
+            <div><h5>上游 2</h5><div class="axis-col">
+              <div class="axis-item"><i class="codex">codex</i><b>ops 实例故障上下文 PRD</b><span class="via">PRD.md</span></div>
+              <div class="axis-item"><i class="claude">claude</i><b>排查记录整理</b><span class="via">notes.md</span></div>
+            </div></div>
+            <div class="axis-cur">PRD 实施与验证</div>
+            <div><h5>下游 3</h5><div class="axis-col">
+              <div class="axis-item"><i class="claude">claude</i><b>回归与发布说明</b><span class="via">CHANGES.md</span></div>
+              <div class="axis-item"><i class="codex">codex</i><b>发布脚本修订</b><span class="via">CHANGES.md</span></div>
+              <div class="axis-more">还有 1 个下游 Session</div>
+            </div></div>
+          </div>
+          <div class="pop-foot"><span>只显示直接上下游，隔层请进关系图</span><a href="#" onclick="return false">在关系图中定位 →</a></div>
+        </div>
+      </div>
+      <div class="verdict">
+        <div class="up"><h4>优点</h4><ul>
+          <li>实现最简单，无布局计算；一套渲染覆盖 2 节点到 58 节点</li>
+          <li>信息按「和我直接相关」排序，符合悬浮预览的快速定位场景</li>
+        </ul></div>
+        <div class="down"><h4>代价</h4><ul>
+          <li>看不到隔层结构，「整条链」名不副实 — 严格说不满足需求原文</li>
+          <li>菱形 / 汇聚拓扑被拍平后可能产生误导（两个上游可能互不相关）</li>
+        </ul></div>
+      </div>
+    </div>
+
+    <!-- 方案 3 -->
+    <div class="option">
+      <div class="option-head">
+        <span class="opt-tag alt">方案 3</span>
+        <div>
+          <h3>点击式侧边面板 — hover 只给摘要，完整链进抽屉</h3>
+          <p>hover 徽标只弹出一行摘要（“链 · 6 Sessions · 中游”），点击徽标从右侧滑入固定面板，装下完整 LineageGraph（可滚动）。牺牲“悬浮即所得”，换取任何链规模下的完整呈现。</p>
+        </div>
+      </div>
+      <div class="demo">
+        <span class="demo-label">Live mockup · 点击按钮开关面板</span>
+        <div class="frame" id="frame3">
+          <div class="frame-bg">
+            <p style="margin:0 0 12px;font-size:12.5px">
+              <span style="color:var(--paper);font-weight:560">PRD 实施与验证</span>
+              <button type="button" class="chain-chip" id="panelToggle" aria-expanded="false" aria-controls="panel3" aria-label="打开关系链面板，共 6 个 Session">
+                <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M6.5 9.5 9.5 6.5"/><path d="M7.5 4.5 9 3a2.4 2.4 0 0 1 3.4 3.4L11 7.9"/><path d="M8.5 11.5 7 13a2.4 2.4 0 0 1-3.4-3.4L5 8.1"/></svg>6
+              </button>
+            </p>
+            <div class="tbl-wrap" style="opacity:.75">
+              <table class="mock">
+                <colgroup><col style="width:86px"><col style="width:64px"><col></colgroup>
+                <thead><tr><th>更新</th><th>工具</th><th>名称</th></tr></thead>
+                <tbody>
+                  <tr><td class="dt">07-16 08:12</td><td><span class="tool-pill claude">claude</span></td><td class="nm">PRD 实施与验证</td></tr>
+                  <tr><td class="dt">07-16 07:20</td><td><span class="tool-pill codex">codex</span></td><td class="nm">发布脚本修订</td></tr>
+                  <tr><td class="dt">07-15 23:44</td><td><span class="tool-pill pi">pi</span></td><td class="nm">周报整理</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+          <aside class="panel" id="panel3" aria-label="关系链面板">
+            <div class="panel-head"><strong>关系链 · 6 Sessions</strong><button type="button" id="panelClose">关闭 Esc</button></div>
+            <div class="panel-body">
+              <div class="axis">
+                <div><h5>上游 2</h5><div class="axis-col">
+                  <div class="axis-item"><i class="codex">codex</i><b>ops 实例故障上下文 PRD</b><span class="via">PRD.md</span></div>
+                  <div class="axis-item"><i class="claude">claude</i><b>排查记录整理</b><span class="via">notes.md</span></div>
+                </div></div>
+                <div class="axis-cur" style="justify-self:stretch;text-align:center">PRD 实施与验证</div>
+                <div><h5>下游 3</h5><div class="axis-col">
+                  <div class="axis-item"><i class="claude">claude</i><b>回归与发布说明</b><span class="via">CHANGES.md</span></div>
+                  <div class="axis-item"><i class="codex">codex</i><b>发布脚本修订</b><span class="via">CHANGES.md</span></div>
+                  <div class="axis-item"><i class="claude">claude</i><b>文档站同步</b><span class="via">CHANGES.md</span></div>
+                </div></div>
+              </div>
+              <p class="hint" style="margin-top:14px">实际实现中这里放完整 LineageGraph（与关系图页同一组件，聚焦当前节点），面板内可纵横滚动，58 节点也能完整浏览。</p>
+            </div>
+          </aside>
+        </div>
+      </div>
+      <div class="verdict">
+        <div class="up"><h4>优点</h4><ul>
+          <li>大链不再需要降级 — 面板里就是完整关系图组件，交互一致</li>
+          <li>固定面板可操作性最好：滚动、点节点、复制都不怕鼠标移出</li>
+        </ul></div>
+        <div class="down"><h4>代价</h4><ul>
+          <li>不再是「悬浮预览」，多一次点击；hover 阶段信息量最低</li>
+          <li>新增一种浮层形态（页面目前只有 menu / tip / toast），实现与规范成本最高</li>
+        </ul></div>
+      </div>
+    </div>
+
+    <!-- 大链降级 -->
+    <div class="option">
+      <div class="option-head">
+        <span class="opt-tag">大链策略</span>
+        <div>
+          <h3>邻域裁剪：超过 12 节点只画「当前 ±1 层」，其余按上游 / 下游 / 旁支折叠</h3>
+          <p>方案 1 / 2 共用的降级规则。折叠节点可点击 — 直接跳到全局关系图并定位当前 Session；本例没有兄弟旁支，所以只显示上游和下游两个计数节点。58 节点的链永远不会被塞进浮层。</p>
+        </div>
+      </div>
+      <div class="demo">
+        <span class="demo-label">Live mockup · hover 徽标（58 节点大链）</span>
+        <p style="margin:0 0 12px;font-size:12.5px">
+          <span style="color:var(--paper);font-weight:560">workspace 批量迁移 · 阶段 17</span>
+          <button type="button" class="chain-chip" data-pop="popBig" aria-label="所在关系链，共 58 个 Session">
+            <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M6.5 9.5 9.5 6.5"/><path d="M7.5 4.5 9 3a2.4 2.4 0 0 1 3.4 3.4L11 7.9"/><path d="M8.5 11.5 7 13a2.4 2.4 0 0 1-3.4-3.4L5 8.1"/></svg>58
+          </button>
+        </p>
+        <div class="pop" id="popBig" role="dialog" aria-label="关系链预览（已裁剪）">
+          <div class="pop-head"><strong>关系链 · 58 Sessions · 仅显示相邻一层</strong><span class="pin-hint">已固定 · Esc 关闭</span></div>
+          <div class="mini-scroll">
+            <div class="mini-canvas" style="width:610px;height:120px">
+              <svg viewBox="0 0 610 120" aria-hidden="true">
+                <defs><marker id="mini-arrow-big" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" markerHeight="6" orient="auto"><path d="M 0 0 L 8 4 L 0 8 Z" fill="context-stroke" stroke="none"/></marker></defs>
+                <path d="M150 55 C185 55 195 31 228 31" marker-end="url(#mini-arrow-big)"/>
+                <path d="M380 31 C414 31 426 31 458 31" marker-end="url(#mini-arrow-big)"/>
+                <path d="M380 31 C418 31 422 89 458 89" marker-end="url(#mini-arrow-big)"/>
+                <text x="190" y="34" text-anchor="middle">stage-17.md</text>
+                <text x="420" y="21" text-anchor="middle">plan.md</text>
+              </svg>
+              <button class="mini-node fold" style="left:0;top:32px">⋯ 上游还有 14 个</button>
+              <button class="mini-node cur" style="left:230px;top:8px"><span class="t"><i class="codex">codex</i><em>中游</em></span><b>workspace 批量迁移 · 阶段 17</b></button>
+              <button class="mini-node" style="left:460px;top:8px"><span class="t"><i class="claude">claude</i><em>中游</em></span><b>阶段 18 · 数据回填</b></button>
+              <button class="mini-node fold" style="left:460px;top:66px">⋯ 下游还有 42 个</button>
+            </div>
+          </div>
+          <div class="pop-foot"><span>折叠节点点击后进入关系图并定位</span><a href="#" onclick="return false">查看全部 58 个节点 →</a></div>
+        </div>
+      </div>
+      <div class="verdict">
+        <div class="up"><h4>优点</h4><ul>
+          <li>浮层尺寸有硬上限；58 节点链的预览和 5 节点链一样快、一样可读</li>
+          <li>折叠节点保留「链还很长」的事实，不假装看到了全部</li>
+        </ul></div>
+        <div class="down"><h4>代价</h4><ul>
+          <li>阈值（12）需要拍板；11 → 13 节点的两条链预览形态会突变</li>
+          <li>被裁剪的部分对预览不可达，重度用户可能总是要点进关系图</li>
+        </ul></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ 输入等价 ============ -->
+  <section>
+    <h2><span class="no">通用</span>键盘 · 触屏 · Reduced-motion 等价入口</h2>
+    <p class="sec-note">三个 TODO 3 方案共用同一套输入契约，锚点都是链徽标（真按钮，进 Tab 序）。</p>
+    <div class="matrix-wrap">
+      <table class="matrix">
+        <thead><tr><th>输入</th><th>触发</th><th>保持 / 关闭</th></tr></thead>
+        <tbody>
+          <tr><td>鼠标</td><td>hover 徽标 180ms 后出现（沿用现有 tip 节奏）；点击徽标 = 固定浮层</td><td>移入浮层取消 100ms 关闭计时；固定后点外部或 <span class="kbd">Esc</span> 关闭</td></tr>
+          <tr><td>键盘</td><td><span class="kbd">Tab</span> 聚焦徽标即显示预览；<span class="kbd">Enter</span> 固定并把焦点移入浮层</td><td>浮层内 <span class="kbd">Tab</span> 循环节点，<span class="kbd">Esc</span> 关闭并把焦点还给徽标</td></tr>
+          <tr><td>触屏</td><td>无 hover：tap 徽标直接等于「固定」，二段确认后 tap 节点才导航</td><td>tap 浮层外关闭；行点击复制的既有手势不受影响（徽标 stopPropagation）</td></tr>
+          <tr><td>Reduced-motion</td><td>去掉 scale/translate，仅保留 ≤140ms 的 opacity 显隐</td><td>迷你 DAG 的节点入场 stagger 整体停用</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p class="hint">动效基线：浮层 140ms <span class="mono">cubic-bezier(.23,1,.32,1)</span>，transform-origin 对准徽标；徽标按压 scale(.95)。悬浮预览一天要看几十次，不做入场 stagger、不超过 200ms。</p>
+  </section>
+
+  <!-- ============ 推荐与问题 ============ -->
+  <section>
+    <h2><span class="no">收束</span>推荐组合与待确认问题</h2>
+    <div class="matrix-wrap" style="margin-bottom:26px">
+      <table class="matrix">
+        <thead><tr><th>组合</th><th>构成</th><th>评价</th></tr></thead>
+        <tbody>
+          <tr>
+            <td><span class="tag rec">推荐</span></td>
+            <td>TODO 2 方案 A（名称旁徽标）+ TODO 3 方案 1（迷你 DAG）+ 大链邻域裁剪 + 方案 C 的「有链」tab 作筛选补充</td>
+            <td>零新列、一个锚点承担显示 / 预览 / 固定三职责；小链所见即拓扑，大链有明确出口；tab 解决批量发现</td>
+          </tr>
+          <tr>
+            <td><span class="tag alt">备选</span></td>
+            <td>TODO 2 方案 B（独立列）+ TODO 3 方案 2（轴线摘要）</td>
+            <td>如果你更看重「列表内直接看到角色 + 可排序」，且接受 +1 列；实现量最小的一档</td>
+          </tr>
+          <tr>
+            <td><span class="tag alt">重型</span></td>
+            <td>TODO 2 方案 A + TODO 3 方案 3（侧边面板）</td>
+            <td>如果大链是主要使用场景（58 节点链会常看），面板一步到位，但偏离「悬浮预览」的原始诉求</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+    <ol class="qs">
+      <li><b>行内状态的信息量拍板：</b>只要「有链」，还是要整链数（A）/ 角色+上下游数（B）？<span>这决定 TODO 2 选型，也决定 aria-label 和排序能力。</span></li>
+      <li><b>点击徽标的语义：</b>固定预览（推荐）还是直接跳全局关系图定位？<span>推荐固定预览 + 浮层 footer 提供「在关系图中定位」，跳转始终多一步但不易误触。</span></li>
+      <li><b>「有链」筛选要不要进 tabs：</b>tabs 已有 6 项；不进 tabs 的替代是高级筛选区加一个开关。</li>
+      <li><b>大链阈值：</b>迷你 DAG 原样渲染的上限定多少？<span>建议 12（约两屏节点宽度内），也可以按浮层可用宽度动态算。</span></li>
+      <li><b>预览内点节点的行为：</b>直接打开详情（推荐，与关系图页一致），还是先在预览内切换焦点节点？</li>
+    </ol>
+  </section>
+</div>
+
+<script>
+(function(){
+  var hideTimer = null, activePop = null, activeChip = null, suppressFocusOpen = false;
+
+  function container(pop){ return pop.closest('.demo'); }
+
+  function place(chip, pop){
+    var demo = container(pop);
+    var c = demo.getBoundingClientRect();
+    var r = chip.getBoundingClientRect();
+    var left = r.left - c.left;
+    var maxLeft = demo.clientWidth - Math.min(pop.offsetWidth || 320, demo.clientWidth - 20) - 10;
+    pop.style.left = Math.max(10, Math.min(left, maxLeft)) + 'px';
+    pop.style.top = (r.bottom - c.top + 8) + 'px';
+  }
+
+  function show(chip, pop){
+    if (activePop && activePop !== pop) hide(activePop, true);
+    activePop = pop;
+    activeChip = chip;
+    chip.setAttribute('aria-expanded','true');
+    pop.classList.add('show');
+    place(chip, pop);
+  }
+  function hide(pop, force){
+    if (!force && pop.classList.contains('pinned')) return;
+    pop.classList.remove('show','pinned');
+    if (pop._chip) pop._chip.setAttribute('aria-expanded','false');
+    if (activePop === pop) { activePop = null; activeChip = null; }
+  }
+  function scheduleHide(pop){
+    clearTimeout(hideTimer);
+    hideTimer = setTimeout(function(){ hide(pop); }, 100);
+  }
+
+  document.querySelectorAll('.chain-chip[data-pop]').forEach(function(chip){
+    var pop = document.getElementById(chip.dataset.pop);
+    if (!pop) return;
+    pop._chip = chip;
+    chip.setAttribute('aria-haspopup','dialog');
+    chip.setAttribute('aria-controls',pop.id);
+    chip.setAttribute('aria-expanded','false');
+    var showTimer = null;
+    chip.addEventListener('mouseenter', function(){
+      clearTimeout(hideTimer); clearTimeout(showTimer);
+      showTimer = setTimeout(function(){ show(chip, pop); }, 180);
+    });
+    chip.addEventListener('mouseleave', function(){
+      clearTimeout(showTimer); scheduleHide(pop);
+    });
+    chip.addEventListener('focus', function(){
+      if (suppressFocusOpen) { suppressFocusOpen = false; return; }
+      show(chip, pop);
+    });
+    chip.addEventListener('blur', function(){ scheduleHide(pop); });
+    chip.addEventListener('click', function(e){
+      e.stopPropagation();
+      clearTimeout(showTimer);
+      if (pop.classList.contains('pinned')) { hide(pop, true); return; }
+      show(chip, pop);
+      pop.classList.add('pinned');
+      if (e.detail === 0) setTimeout(function(){
+        var target = pop.querySelector('.mini-node.cur, button, a[href]');
+        if (target) target.focus();
+      });
+    });
+    pop.addEventListener('mouseenter', function(){ clearTimeout(hideTimer); });
+    pop.addEventListener('mouseleave', function(){ scheduleHide(pop); });
+  });
+
+  document.addEventListener('keydown', function(e){
+    if (e.key === 'Tab' && activePop && activePop.classList.contains('pinned')) {
+      var controls = Array.from(activePop.querySelectorAll('button,a[href]'));
+      if (controls.length && document.activeElement === activeChip) {
+        e.preventDefault();
+        (e.shiftKey ? controls[controls.length - 1] : activePop.querySelector('.mini-node.cur') || controls[0]).focus();
+        return;
+      }
+      var index = controls.indexOf(document.activeElement);
+      if (index === 0 && e.shiftKey) { e.preventDefault(); controls[controls.length - 1].focus(); return; }
+      if (index === controls.length - 1 && !e.shiftKey) { e.preventDefault(); controls[0].focus(); return; }
+    }
+    if (e.key !== 'Escape') return;
+    if (activePop) {
+      e.preventDefault();
+      var chip = activeChip;
+      hide(activePop, true);
+      if (chip && document.activeElement !== chip) {
+        suppressFocusOpen = true;
+        chip.focus();
+      } else suppressFocusOpen = false;
+    }
+    var f = document.getElementById('frame3');
+    if (f) { f.classList.remove('open'); }
+    var t = document.getElementById('panelToggle');
+    if (t) t.setAttribute('aria-expanded','false');
+  });
+  document.addEventListener('click', function(e){
+    if (e.target.closest('.pop') || e.target.closest('.chain-chip')) return;
+    document.querySelectorAll('.pop.pinned').forEach(function(p){ hide(p, true); });
+  });
+
+  // 方案 3 面板
+  var frame = document.getElementById('frame3');
+  var toggle = document.getElementById('panelToggle');
+  var close = document.getElementById('panelClose');
+  if (frame && toggle) {
+    toggle.addEventListener('click', function(e){
+      e.stopPropagation();
+      var open = frame.classList.toggle('open');
+      toggle.setAttribute('aria-expanded', open ? 'true' : 'false');
+    });
+    close.addEventListener('click', function(){
+      frame.classList.remove('open');
+      toggle.setAttribute('aria-expanded','false');
+      toggle.focus();
+    });
+  }
+})();
+</script>
+</body>
+</html>
