@@ -1,5 +1,42 @@
 # Implementation Notes: Python Dashboard Parity in Vue
 
+## 2026-07-16: Session 文件传递关系索引
+
+### Objective
+
+- 自动识别跨 Session 的 Markdown/HTML 文件传递关系：上游最后 3 个真实用户轮次内成功写入，下游最前 3 个有效任务输入内按绝对路径引用。
+- 有效任务输入包含直接用户消息和用户提供的 Codex Goal；排除 AGENTS、skills、memory、compact history 等注入内容。
+- 全局刷新与单 Session 完整上下游查询共用一份持久索引；页面第一版只提供最小可验证入口，最终交互后续再定。
+
+### Confirmed Test Seams
+
+- 事件提取：Claude、Codex、pi 的真实用户轮次、Goal、成功 Write/Edit、Codex patch 结果与路径标准化。
+- 关系判定：消费者窗口为前 3 个有效输入，生产者窗口为后 3 个用户轮次；同 Session 不连边，引用只连接到此前最近一次写入。
+- 持久索引：未变化 Session 不重解析，变化/删除 Session 只更新受影响事实和边。
+- 查询：从指定 Session 双向遍历到完整连通关系，而非只返回一层。
+
+### Progress
+
+- [x] 关系提取与判定测试
+- [x] 持久索引与增量刷新
+- [x] CLI/HTTP 最小入口
+- [x] 页面最小入口
+- [ ] 全量验证与 review
+
+### Deviations
+
+- Session 事实按变化文件增量提取，但关系边当前只需约 500 条，因此每次刷新统一重建全部边；只有全量重建变成可测瓶颈时再按受影响路径局部更新。
+- 裸 `bun run typecheck` 原先缺少 Vue 模块声明，新增最小 `vue-shim.d.ts`，不改变运行时行为。
+
+### Verification Log
+
+- `bun test tests/lineage.test.ts`：3 个测试通过；覆盖 Claude/Codex/pi、前后 3 轮窗口、Goal、注入过滤、最近写入者、增量刷新和完整连通分量。
+- `bun run typecheck`：通过。
+- `bun run test:ui`：13 个 Vue DOM/交互测试通过，包含全局索引和详情关系链入口。
+- 真实数据全量重建：1957 个 Session，解析出 1035 次写入、1666 次引用和 170 条去重关系；索引核心耗时 4.816 秒。
+- 真实数据增量刷新：只重扫当前变化的 1 个 Session，索引核心耗时 24ms。
+- 示例链验证：`019f6525` → `019f68a9` → `019f68cf` 成功识别，并继续发现下游 `019f6a3c`；`019f6466` 在当前规则下无边。
+
 ## 2026-07-15: Agent CLI and Deep Search
 
 ### Objective

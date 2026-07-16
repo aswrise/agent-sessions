@@ -31,6 +31,11 @@ beforeEach(() => {
     const url = String(input);
     if (url.startsWith("/api/sessions")) return response({ generatedAt: new Date(0).toISOString(), home: "/home/fixture", sessions: Array.from({ length: 101 }, (_, index) => makeRow(index)) });
     if (url.startsWith("/api/search")) return response({ total: 1, results: [{ ...makeRow(42), snippet: "deep transcript needle" }] });
+    if (url === "/api/lineage/index") return response({ sessions: 101, scanned: 101, unchanged: 0, removed: 0, writes: 2, references: 2, edges: 1, elapsed_ms: 12 });
+    if (url.startsWith("/api/lineage")) return response({ sessions: [makeRow(99), makeRow(100)], edges: [{
+      upstream_id: "session-99", downstream_id: "session-100", path: "/tmp/handoff.md",
+      produced_at: 1, referenced_at: 2, producer_turn: 3, reference_turn: 0, reference_source: "user", kind: "add",
+    }] });
     if (url.startsWith("/api/session")) {
       const id = new URL(url, "http://local").searchParams.get("id")!;
       if (id === "missing") return response({ error: "missing" }, 404);
@@ -185,6 +190,22 @@ describe("dashboard", () => {
     history.pushState(null, "", "/"); window.dispatchEvent(new PopStateEvent("popstate"));
     await flushPromises();
     expect(wrapper.find("[aria-label='Session 列表']").exists()).toBe(true);
+    wrapper.unmount();
+  });
+
+  test("indexes globally and shows the complete lineage from Session detail", async () => {
+    const wrapper = mount(App, { attachTo: document.body });
+    await flushPromises();
+    await wrapper.get("#lineageIndex").trigger("click");
+    await flushPromises();
+    expect(wrapper.get("#toast").text()).toContain("发现 1 条关系");
+
+    await wrapper.findAll("button").find((button) => button.text() === "查看")!.trigger("click");
+    await flushPromises();
+    await wrapper.get("#sessionLineage").trigger("click");
+    await flushPromises();
+    expect(wrapper.get("[aria-label='Session 关系链']").text()).toContain("Session 99→Session 100");
+    expect(wrapper.get("[aria-label='Session 关系链'] code").text()).toBe("/tmp/handoff.md");
     wrapper.unmount();
   });
 

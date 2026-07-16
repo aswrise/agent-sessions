@@ -58,6 +58,13 @@ describe("CLI process seam", () => {
     const readable = await command(["show", "codex-"]);
     expect(readable.stdout).toContain("[user] fixture-user-codex");
     expect(readable.stdout).toContain("[assistant] fixture-assistant-codex");
+
+    const indexed = await command(["index", "--json"]);
+    expect(indexed.exitCode).toBe(0);
+    expect(JSON.parse(indexed.stdout)).toMatchObject({ sessions: 3, scanned: 3, edges: 0 });
+    const lineage = await command(["lineage", "codex-", "--json"]);
+    expect(lineage.exitCode).toBe(0);
+    expect(JSON.parse(lineage.stdout)).toMatchObject({ sessions: [{ id: "codex-b" }], edges: [] });
   });
 
   test("preserves marks, archive hiding, help, snapshot, and failures", async () => {

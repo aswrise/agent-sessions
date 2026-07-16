@@ -15,7 +15,8 @@ import {
 import type { Stats } from "node:fs";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import packageJson from "../package.json" with { type: "json" };
-import { isStatus, type MarkPatch, type Session, type SessionStatus, type Tool, type Transcript, type TranscriptMessage } from "./contracts.ts";
+import { isStatus, type LineageEdge, type LineageRefresh, type MarkPatch, type Session, type SessionStatus, type Tool, type Transcript, type TranscriptMessage } from "./contracts.ts";
+import { LineageIndex } from "./lineage.ts";
 import { userDataDirectory } from "./paths.ts";
 
 const MIN_SIZE = 2048;
@@ -614,6 +615,7 @@ export class SessionCatalog {
   private locations = new Map<string, Located>();
   private now: () => Date;
   private rgPath: string | null | undefined;
+  private lineageIndex: LineageIndex;
 
   constructor(options: CatalogOptions = {}) {
     const home = options.home ?? process.env.HOME ?? process.env.USERPROFILE;
@@ -630,6 +632,7 @@ export class SessionCatalog {
     ];
     const dataDirectory = options.dataDirectory ?? userDataDirectory(home, options.environment, options.platform);
     this.marksFile = join(dataDirectory, "stars.json");
+    this.lineageIndex = new LineageIndex(join(dataDirectory, "lineage.sqlite"));
     this.now = options.now ?? (() => new Date());
     this.rgPath = options.rgPath;
   }
@@ -646,6 +649,25 @@ export class SessionCatalog {
     const location = this.locations.get(id);
     const adapter = location?.adapter ?? this.adapters.find(({ tool }) => tool === session.tool)!;
     return { ...session, messages: adapter.transcript(id, location?.path) };
+  }
+
+  async refreshLineage(force = false): Promise<LineageRefresh> {
+    return this.lineageIndex.refresh(await this.list({ fresh: true }), force);
+  }
+
+  async lineage(id: string, refresh = true): Promise<{ sessions: Session[]; edges: LineageEdge[] }> {
+    await this.exact(id);
+    const sessions = await this.list({ fresh: refresh });
+    if (refresh) this.lineageIndex.refresh(sessions);
+    const graph = this.lineageIndex.lineage(id);
+    const indexed = new Map(sessions.map((session) => [session.id, session]));
+    return {
+      sessions: graph.session_ids.flatMap((sessionId) => {
+        const session = indexed.get(sessionId);
+        return session ? [session] : [];
+      }),
+      edges: graph.edges,
+    };
   }
 
   async find(keyword: string, limit = 20): Promise<{ total: number; results: (Session & { snippet: string })[] }> {

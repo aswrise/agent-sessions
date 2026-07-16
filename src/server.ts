@@ -69,6 +69,17 @@ export function startServer(options: ServerOptions): Bun.Server<undefined> {
           if (!id) throw new RequestError(400, "缺少 id");
           return json(withResumeCommand(await catalog.detail(id), platform));
         }
+        if (request.method === "GET" && url.pathname === "/api/lineage") {
+          const id = url.searchParams.get("id");
+          if (!id) throw new RequestError(400, "缺少 id");
+          const lineage = await catalog.lineage(id, url.searchParams.get("refresh") !== "0");
+          return json({ ...lineage, sessions: lineage.sessions.map((session) => withResumeCommand(session, platform)) });
+        }
+        if (request.method === "POST" && url.pathname === "/api/lineage/index") {
+          const value = await body(request);
+          if (value.force !== undefined && typeof value.force !== "boolean") throw new RequestError(400, "force 必须是 boolean");
+          return json(await catalog.refreshLineage(value.force === true));
+        }
         if (request.method === "POST" && url.pathname === "/star") {
           const value = await body(request), id = value.id;
           if (typeof id !== "string" || !id) throw new RequestError(400, "缺少 id");

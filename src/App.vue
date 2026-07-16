@@ -2,12 +2,15 @@
 import MarkdownIt from "markdown-it";
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import {
+  parseLineageRefresh,
+  parseLineageView,
   parseSearchEnvelope,
   parseSessionsEnvelope,
   parseTranscriptView,
   STATUSES,
   type SessionStatus,
   type SessionView,
+  type LineageView,
   type Tool,
   type TranscriptView,
 } from "./contracts.ts";
@@ -75,6 +78,9 @@ const copiedPathId = ref("");
 const detail = ref<TranscriptView>();
 const detailLoading = ref(false);
 const detailError = ref("");
+const lineage = ref<LineageView>();
+const lineageLoading = ref(false);
+const indexingLineage = ref(false);
 const editing = ref<Editing>();
 const editValue = ref("");
 const menu = ref<MenuState>();
@@ -239,6 +245,20 @@ async function load(fresh = false): Promise<void> {
   } finally {
     if (keepRows) refreshing.value = false;
     else loading.value = false;
+  }
+}
+
+async function indexLineage(): Promise<void> {
+  indexingLineage.value = true;
+  try {
+    const response = await fetch("/api/lineage/index", { method: "POST", body: "{}" });
+    if (!response.ok) throw new Error();
+    const result = parseLineageRefresh(await response.json());
+    showToast(`已分析 ${result.sessions} 个 Session，发现 ${result.edges} 条关系`);
+  } catch {
+    showToast("关系分析失败", true);
+  } finally {
+    indexingLineage.value = false;
   }
 }
 
@@ -479,6 +499,8 @@ async function fetchDetail(id: string): Promise<TranscriptView> {
 
 async function openDetail(id: string, push = true): Promise<void> {
   detail.value = undefined;
+  lineage.value = undefined;
+  lineageLoading.value = false;
   detailError.value = "";
   detailLoading.value = true;
   hidePreview();
@@ -489,8 +511,30 @@ async function openDetail(id: string, push = true): Promise<void> {
   finally { detailLoading.value = false; }
 }
 
+async function loadLineage(): Promise<void> {
+  if (!detail.value) return;
+  lineageLoading.value = true;
+  lineage.value = undefined;
+  try {
+    const response = await fetch(`/api/lineage?id=${encodeURIComponent(detail.value.id)}`);
+    if (!response.ok) throw new Error();
+    lineage.value = parseLineageView(await response.json());
+  } catch {
+    showToast("关系链分析失败", true);
+  } finally {
+    lineageLoading.value = false;
+  }
+}
+
+function lineageName(id: string): string {
+  const session = lineage.value?.sessions.find((item) => item.id === id);
+  return session?.name || session?.first_msg || id;
+}
+
 function showList(push = true): void {
   detail.value = undefined;
+  lineage.value = undefined;
+  lineageLoading.value = false;
   detailError.value = "";
   detailLoading.value = false;
   if (push) history.pushState(null, "", "/");
@@ -686,6 +730,7 @@ onBeforeUnmount(() => {
         筛选<span v-if="activeFilterCount" class="filter-count">{{ activeFilterCount }}</span>
       </button>
       <button id="reload" type="button" class="f act" title="重新扫描 session 数据" :disabled="loading || refreshing" @click="load(true)">{{ refreshing ? "刷新中…" : "刷新" }}</button>
+      <button id="lineageIndex" type="button" class="f act" title="扫描所有 Session 的 Markdown / HTML 传递关系" :disabled="indexingLineage" @click="indexLineage">{{ indexingLineage ? "分析中…" : "分析关系" }}</button>
       <button id="theme" type="button" class="f act" :title="theme === 'dark' ? '切换到浅色主题' : '切换到深色主题'" :aria-label="theme === 'dark' ? '切换到浅色主题' : '切换到深色主题'" @click="toggleTheme">{{ theme === "dark" ? "☀︎" : "☾" }}</button>
     </div>
     <div v-show="advanced" id="advancedFilters" class="bar2">
@@ -760,9 +805,18 @@ onBeforeUnmount(() => {
         <div class="detail-top">
           <button type="button" class="f act" @click="showList()">返回</button>
           <button type="button" class="f act" @click="copy(detail)">复制恢复命令</button>
+          <button id="sessionLineage" type="button" class="f act" :disabled="lineageLoading" @click="loadLineage">{{ lineageLoading ? "分析中…" : "关系链" }}</button>
           <div class="detail-title">{{ detail.name || detail.first_msg || detail.id }}</div>
           <div class="detail-meta mono">{{ detail.tool }} · {{ detail.model || "无模型" }} · {{ shortPath(detail.cwd) }} · {{ formatSize(detail.size_kb) }}</div>
         </div>
+        <section v-if="lineage" class="lineage-panel" aria-label="Session 关系链">
+          <div class="lineage-summary">{{ lineage.sessions.length }} 个 Session · {{ lineage.edges.length }} 条关系</div>
+          <div v-if="!lineage.edges.length" class="lineage-empty">暂未发现上下游 Session</div>
+          <div v-for="edge in lineage.edges" v-else :key="`${edge.upstream_id}:${edge.downstream_id}:${edge.path}`" class="lineage-edge">
+            <span>{{ lineageName(edge.upstream_id) }}</span><strong>→</strong><span>{{ lineageName(edge.downstream_id) }}</span>
+            <code>{{ edge.path }}</code>
+          </div>
+        </section>
         <div class="msglist">
           <div v-if="!detail.messages.length" class="empty">没有可展示的 user / assistant 文本消息</div>
           <article v-for="(message, index) in detail.messages" :key="index" class="bubble" :class="message.role">
@@ -923,6 +977,12 @@ col.c-stat{width:116px}col.c-model{width:120px}
   border:1px solid var(--obsidian);border-radius:14px;background:var(--carbon)}
 .detail-title{font-size:16px;font-weight:620;color:var(--paper);min-width:0;flex:1}
 .detail-meta{color:var(--ash);font-size:12px;width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.lineage-panel{display:grid;gap:8px;margin-top:12px;padding:14px 18px;border:1px solid var(--obsidian);border-radius:12px;background:var(--carbon)}
+.lineage-summary{color:var(--fog);font-size:12px;font-weight:600}
+.lineage-empty{color:var(--ash);font-size:12px}
+.lineage-edge{display:grid;grid-template-columns:minmax(0,1fr) auto minmax(0,1fr);gap:8px;align-items:center;color:var(--mist);font-size:12px}
+.lineage-edge span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.lineage-edge strong{color:var(--lime)}
+.lineage-edge code{grid-column:1/-1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--ash);font-size:11px}
 .msglist{display:grid;gap:14px;padding:20px 0 48px;max-width:1040px;margin:0 auto}
 .bubble{max-width:88%;border:1px solid var(--obsidian);border-radius:14px 14px 14px 4px;
   padding:13px 15px;background:var(--carbon);box-shadow:0 5px 18px rgba(0,0,0,.06)}

@@ -15,6 +15,8 @@ Usage:
   sessions list [-n 20] [claude|codex|pi] [--json]
   sessions find <keyword> [-n 20] [--json]
   sessions show <id-prefix> [--json]
+  sessions index [--rebuild] [--json]
+  sessions lineage <id-prefix> [--json]
   sessions star <id-prefix> [note]
   sessions unstar <id-prefix>
   sessions stars
@@ -78,7 +80,7 @@ export async function main(argv = process.argv.slice(2), options: { html?: strin
       await serveResident({ port: Number(internal(args, "--port")), nonce: internal(args, "--nonce"), stateFile: internal(args, "--state"), ...(html === undefined ? {} : { html }) });
       return 0;
     }
-    const json = flag(args, "--json"), n = limit(args), command = args.shift(), catalog = new SessionCatalog({ home: home() });
+    const json = flag(args, "--json"), rebuild = flag(args, "--rebuild"), n = limit(args), command = args.shift(), catalog = new SessionCatalog({ home: home() });
     if (command === "list") {
       const rawTool = args[0]; if (rawTool && !isTool(rawTool)) throw new Error(`未知工具: ${rawTool}`);
       const tool: Tool | undefined = rawTool && isTool(rawTool) ? rawTool : undefined;
@@ -102,6 +104,21 @@ export async function main(argv = process.argv.slice(2), options: { html?: strin
         printEntry(transcript);
         transcript.messages.forEach((message) => console.log(`[${message.role}] ${message.text}\n`));
       }
+      return 0;
+    }
+    if (command === "index" && !args.length) {
+      const result = await catalog.refreshLineage(rebuild);
+      if (json) console.log(JSON.stringify(result, null, 2));
+      else console.log(`已分析 ${result.sessions} 个 session（本次扫描 ${result.scanned} 个），发现 ${result.edges} 条关系，耗时 ${result.elapsed_ms}ms`);
+      return 0;
+    }
+    if (command === "lineage" && args.length === 1) {
+      const row = await catalog.resolve(args[0]!);
+      const lineage = await catalog.lineage(row.id);
+      const value = { ...lineage, sessions: lineage.sessions.map((session) => withResumeCommand(session)) };
+      if (json) console.log(JSON.stringify(value, null, 2));
+      else if (!lineage.edges.length) console.log(`${row.id} 暂未发现上下游 session`);
+      else lineage.edges.forEach((edge) => console.log(`${edge.upstream_id} -> ${edge.downstream_id}\n    ${edge.path}`));
       return 0;
     }
     if (command === "star" && args.length) {

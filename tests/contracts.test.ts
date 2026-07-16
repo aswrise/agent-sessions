@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { isStatus, isTool, parseSearchEnvelope, parseSessionsEnvelope, parseTranscriptView, STATUSES, TOOLS } from "../src/contracts.ts";
+import { isStatus, isTool, parseLineageRefresh, parseLineageView, parseSearchEnvelope, parseSessionsEnvelope, parseTranscriptView, STATUSES, TOOLS } from "../src/contracts.ts";
 
 describe("shared contracts", () => {
   test("accept only supported tools and statuses", () => {
@@ -16,5 +16,7 @@ describe("shared contracts", () => {
     expect(() => parseSessionsEnvelope({ generatedAt: "now", sessions: [] })).toThrow("响应无效");
     expect(() => parseTranscriptView({ messages: [{ role: "system", text: "hidden", timestamp: "" }] })).toThrow("响应无效");
     expect(() => parseSearchEnvelope({ total: 1, results: [{}] })).toThrow("响应无效");
+    expect(() => parseLineageView({ sessions: [], edges: [{ upstream_id: "a" }] })).toThrow("响应无效");
+    expect(() => parseLineageRefresh({ sessions: 1, edges: "one" })).toThrow("响应无效");
   });
 });
