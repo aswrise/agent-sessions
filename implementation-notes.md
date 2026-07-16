@@ -21,11 +21,11 @@
 - [x] 持久索引与增量刷新
 - [x] CLI/HTTP 最小入口
 - [x] 页面最小入口
-- [ ] 全量验证与 review
+- [x] 全量验证与 review
 
 ### Deviations
 
-- Session 事实按变化文件增量提取，但关系边当前只需约 500 条，因此每次刷新统一重建全部边；只有全量重建变成可测瓶颈时再按受影响路径局部更新。
+- Session 事实按变化文件增量提取，但关系边当前只有约 170 条，因此每次刷新统一重建全部边；只有全量重建变成可测瓶颈时再按受影响路径局部更新。
 - 裸 `bun run typecheck` 原先缺少 Vue 模块声明，新增最小 `vue-shim.d.ts`，不改变运行时行为。
 
 ### Verification Log
@@ -33,8 +33,12 @@
 - `bun test tests/lineage.test.ts`：3 个测试通过；覆盖 Claude/Codex/pi、前后 3 轮窗口、Goal、注入过滤、最近写入者、增量刷新和完整连通分量。
 - `bun run typecheck`：通过。
 - `bun run test:ui`：13 个 Vue DOM/交互测试通过，包含全局索引和详情关系链入口。
-- 真实数据全量重建：1957 个 Session，解析出 1035 次写入、1666 次引用和 170 条去重关系；索引核心耗时 4.816 秒。
-- 真实数据增量刷新：只重扫当前变化的 1 个 Session，索引核心耗时 24ms。
+- `bun run test`：30 个 Bun 后端测试、13 个 Vue DOM/交互测试全部通过；当前 snap Bun 会清洗 PATH，验证时只用临时 preload 将 shell 已存在的 `rg` 绝对路径注入 `Bun.which`，未改产品代码或测试。
+- `bun run build`：通过，Vite 页面成功内嵌。
+- 双轴 review：修复空/注入 Codex task 挤占三段窗口、delete patch 误判为写入、等时写入被视为“此前”以及索引规则无版本失效四个准确性问题；新增 ADR 0002 和 Lineage 领域词汇。
+- 复审：Spec 无剩余问题；Standards 无 hard violation。保留一项 judgement call：Lineage 的注入过滤比 Transcript 展示过滤更严格，当前分别维护；若格式规则继续增长，再提取共享 JSONL 原语和结构化事件 seam。
+- 真实数据全量重建：1957 个 Session，解析出 1044 次写入、1667 次引用和 170 条去重关系；两次索引核心耗时 4.8–6.3 秒。
+- 真实数据增量刷新：只重扫当前变化的 1 个 Session，索引核心耗时 24–34ms。
 - 示例链验证：`019f6525` → `019f68a9` → `019f68cf` 成功识别，并继续发现下游 `019f6a3c`；`019f6466` 在当前规则下无边。
 
 ## 2026-07-15: Agent CLI and Deep Search

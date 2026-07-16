@@ -23,7 +23,7 @@ function setup() {
   return { root, write, session, index: new LineageIndex(join(root, "lineage.sqlite")) };
 }
 
-function codexTurn(turn: string, at: string, user: string, writes: { path: string; type?: "add" | "update" }[] = []) {
+function codexTurn(turn: string, at: string, user: string, writes: { path: string; type?: "add" | "update" | "delete" }[] = []) {
   return [
     { timestamp: at, type: "event_msg", payload: { type: "task_started", turn_id: turn } },
     { timestamp: at, type: "response_item", payload: { type: "message", role: "user", content: [{ type: "input_text", text: user }], internal_chat_message_metadata_passthrough: { turn_id: turn } } },
@@ -38,17 +38,23 @@ function codexTurn(turn: string, at: string, user: string, writes: { path: strin
 describe("LineageIndex", () => {
   test("links the last three producer turns to the first three effective consumer inputs", () => {
     const { root, write, session, index } = setup();
-    const ignored = join(root, "ignored.md"), handoff = join(root, "handoff.md"), plan = join(root, "plan.md");
+    const ignored = join(root, "ignored.md"), handoff = join(root, "handoff.md"), plan = join(root, "plan.md"), deleted = join(root, "deleted.md"), windowsDoc = String.raw`C:\handoff.html`;
     const aPath = write("a", [
       ...codexTurn("a1", "2026-07-15T01:00:00Z", "first", [{ path: ignored }]),
       ...codexTurn("a2", "2026-07-15T02:00:00Z", "second"),
       ...codexTurn("a3", "2026-07-15T03:00:00Z", "third"),
-      ...codexTurn("a4", "2026-07-15T04:00:00Z", "handoff", [{ path: handoff }]),
+      ...codexTurn("a4", "2026-07-15T04:00:00Z", "handoff", [{ path: handoff }, { path: windowsDoc }, { path: deleted, type: "delete" }]),
+      { timestamp: "2026-07-15T05:00:00Z", type: "event_msg", payload: { type: "task_started", turn_id: "a-empty-1" } },
+      { timestamp: "2026-07-15T06:00:00Z", type: "event_msg", payload: { type: "task_started", turn_id: "a-empty-2" } },
+      { timestamp: "2026-07-15T07:00:00Z", type: "event_msg", payload: { type: "task_started", turn_id: "a-empty-3" } },
     ]);
     const bPath = write("b", [
+      { timestamp: "2026-07-16T00:10:00Z", type: "event_msg", payload: { type: "task_started", turn_id: "b-empty-1" } },
+      { timestamp: "2026-07-16T00:20:00Z", type: "event_msg", payload: { type: "task_started", turn_id: "b-empty-2" } },
+      { timestamp: "2026-07-16T00:30:00Z", type: "event_msg", payload: { type: "task_started", turn_id: "b-empty-3" } },
       ...codexTurn("b1", "2026-07-16T01:00:00Z", "start"),
       ...codexTurn("b2", "2026-07-16T02:00:00Z", "continue"),
-      ...codexTurn("b3", "2026-07-16T03:00:00Z", `read ${handoff}:12`, [{ path: plan }]),
+      ...codexTurn("b3", "2026-07-16T03:00:00Z", `read ${handoff}:12, ${windowsDoc}, but not ${deleted}`, [{ path: plan }]),
       ...codexTurn("b4", "2026-07-16T04:00:00Z", `too late ${ignored}`),
     ]);
     const cPath = write("c", [
@@ -59,11 +65,12 @@ describe("LineageIndex", () => {
       session("a", "codex", aPath, 1), session("b", "codex", bPath, 2), session("c", "codex", cPath, 3),
     ];
 
-    expect(index.refresh(sessions, true)).toMatchObject({ scanned: 3, sessions: 3, edges: 2 });
+    expect(index.refresh(sessions, true)).toMatchObject({ scanned: 3, sessions: 3, edges: 3 });
     expect(index.lineage("b")).toEqual({
       session_ids: ["a", "b", "c"],
       edges: [
         expect.objectContaining({ upstream_id: "a", downstream_id: "b", path: handoff, reference_source: "user" }),
+        expect.objectContaining({ upstream_id: "a", downstream_id: "b", path: windowsDoc, reference_source: "user" }),
         expect.objectContaining({ upstream_id: "b", downstream_id: "c", path: plan, reference_source: "goal" }),
       ],
     });

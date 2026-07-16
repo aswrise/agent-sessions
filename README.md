@@ -32,6 +32,8 @@ sessions list --json             # stable machine-readable output for agents
 sessions find "keyword"          # summary + readable Transcript search through rg
 sessions find "keyword" --json
 sessions show 48e17d64 --json    # full Transcript by unique id prefix
+sessions index --json            # incrementally index cross-Session Artifact handoffs
+sessions lineage 48e17d64 --json # complete upstream/downstream component
 sessions star 48e17d64 note      # star an id prefix, with an optional note
 sessions unstar 48e17d64
 sessions stars

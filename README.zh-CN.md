@@ -31,6 +31,8 @@ sessions list --json             # 面向 agent 的稳定结构化输出
 sessions find "关键词"           # 通过 rg 搜索摘要及可读 Transcript
 sessions find "关键词" --json
 sessions show 48e17d64 --json    # 按唯一 id 前缀读取完整 Transcript
+sessions index --json            # 增量索引跨 Session 的文件传递关系
+sessions lineage 48e17d64 --json # 查询完整上下游连通链
 sessions star 48e17d64 备注       # 按 id 前缀标记
 sessions unstar 48e17d64
 sessions stars

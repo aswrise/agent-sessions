@@ -11,8 +11,9 @@ type Write = { path: string; at: number; turn: number; kind: WriteKind };
 type Turn = { texts: TextInput[]; writes: Omit<Write, "turn">[] };
 type Facts = { references: Reference[]; writes: Write[] };
 type Reference = { session_id: string; path: string; at: number; turn: number; source: ReferenceSource };
+const INDEX_VERSION = 1;
 
-export interface LineageGraph {
+interface LineageGraph {
   session_ids: string[];
   edges: LineageEdge[];
 }
@@ -63,7 +64,7 @@ function injected(text: string): boolean {
 }
 
 function artifactPaths(text: string): string[] {
-  const found = text.match(/\/[^\s"'<>|]+?\.(?:md|html)(?::\d+(?::\d+)?)?/giu) ?? [];
+  const found = text.match(/(?:\/[^\s"'<>|]+?|[a-z]:\\[^\s"'<>|]+?)\.(?:md|html)(?::\d+(?::\d+)?)?/giu) ?? [];
   return [...new Set(found.map((value) => normalize(value.replace(/:\d+(?::\d+)?$/, ""))))];
 }
 
@@ -74,12 +75,13 @@ function facts(session: Session): Facts {
     : session.tool === "claude"
       ? claudeTurns(parsed, session.birth)
       : piTurns(parsed, session.birth);
-  const references = turns.slice(0, 3).flatMap((turn, turnIndex) => turn.texts.flatMap((input) =>
+  const effective = turns.filter((turn) => turn.texts.length > 0);
+  const references = effective.slice(0, 3).flatMap((turn, turnIndex) => turn.texts.flatMap((input) =>
     artifactPaths(input.text).map((path) => ({
       session_id: session.id, path, at: input.at, turn: turnIndex, source: input.source,
     }))));
-  const offset = Math.max(0, turns.length - 3);
-  const writes = turns.slice(-3).flatMap((turn, index) => turn.writes.map((write) => ({
+  const offset = Math.max(0, effective.length - 3);
+  const writes = effective.slice(-3).flatMap((turn, index) => turn.writes.map((write) => ({
     ...write, turn: offset + index,
   })));
   return { references, writes };
@@ -118,7 +120,7 @@ function codexTurns(input: Json[], birth: number): Turn[] {
     if (record.type === "event_msg" && payload?.type === "user_message") {
       const text = stringValue(payload.message).trim();
       if (!text || injected(text)) return;
-      const turn = current && current.texts.length === 0 ? current : create();
+      const turn = current && !current.texts.some((input) => input.source === "user") ? current : create();
       turn.texts.push({ text, source: "user", at });
       return;
     }
@@ -132,7 +134,8 @@ function codexTurns(input: Json[], birth: number): Turn[] {
       if (!turn || !isRecord(payload.changes)) return;
       for (const [path, change] of Object.entries(payload.changes)) {
         if (!isArtifact(path) || !isRecord(change)) continue;
-        turn.writes.push({ path: normalize(path), at, kind: change.type === "update" ? "update" : "add" });
+        if (change.type !== "add" && change.type !== "update") continue;
+        turn.writes.push({ path: normalize(path), at, kind: change.type });
       }
     }
   });
@@ -227,7 +230,7 @@ export class LineageIndex {
       const removed = [...prior.keys()].filter((id) => !ids.has(id));
       const changed = sessions.flatMap((session) => {
         const stat = statSync(session.source_path);
-        const signature = `${session.tool}:${session.source_path}:${stat.size}:${stat.mtimeMs}`;
+        const signature = `${INDEX_VERSION}:${session.tool}:${session.source_path}:${stat.size}:${stat.mtimeMs}`;
         return force || prior.get(session.id) !== signature ? [{ session, signature, facts: facts(session) }] : [];
       });
       const transaction = db.transaction(() => {
@@ -249,7 +252,7 @@ export class LineageIndex {
         const inserted = new Set<string>();
         for (const reference of references) {
           const writer = db.query(`SELECT session_id, path, at, turn, kind FROM lineage_writes
-            WHERE path = ? AND session_id != ? AND at <= ? ORDER BY at DESC, session_id DESC LIMIT 1`)
+            WHERE path = ? AND session_id != ? AND at < ? ORDER BY at DESC, session_id DESC LIMIT 1`)
             .get(reference.path, reference.session_id, reference.at) as { session_id: string; path: string; at: number; turn: number; kind: WriteKind } | null;
           const key = writer ? `${writer.session_id}\0${reference.session_id}\0${reference.path}` : "";
           if (writer && !inserted.has(key)) {
