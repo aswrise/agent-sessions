@@ -54,9 +54,13 @@ export interface SearchEnvelope {
   results: SearchHitView[];
 }
 
-export interface LineageEdge {
+type LineageEdgeBase = {
   upstream_id: string;
   downstream_id: string;
+};
+
+export type ArtifactLineageEdge = LineageEdgeBase & {
+  relation: "artifact";
   path: string;
   produced_at: number;
   referenced_at: number;
@@ -64,7 +68,14 @@ export interface LineageEdge {
   reference_turn: number;
   reference_source: "user";
   kind: "add" | "update";
-}
+};
+
+export type ManualLineageEdge = LineageEdgeBase & {
+  relation: "manual";
+  created_at: number;
+};
+
+export type LineageEdge = ArtifactLineageEdge | ManualLineageEdge;
 
 export interface LineageView {
   sessions: SessionView[];
@@ -133,11 +144,11 @@ export function parseTranscriptView(value: unknown): TranscriptView {
 }
 
 export function parseLineageView(value: unknown): LineageView {
-  const edge = (item: unknown): boolean => isRecord(item)
-    && stringFields(item, ["upstream_id", "downstream_id", "path", "reference_source", "kind"])
-    && numberFields(item, ["produced_at", "referenced_at", "producer_turn", "reference_turn"])
-    && item.reference_source === "user"
-    && ["add", "update"].includes(item.kind as string);
+  const edge = (item: unknown): boolean => isRecord(item) && stringFields(item, ["upstream_id", "downstream_id"])
+    && (item.relation === "manual" ? numberFields(item, ["created_at"])
+      : item.relation === "artifact" && stringFields(item, ["path", "reference_source", "kind"])
+        && numberFields(item, ["produced_at", "referenced_at", "producer_turn", "reference_turn"])
+        && item.reference_source === "user" && ["add", "update"].includes(item.kind as string));
   if (!isRecord(value) || !Array.isArray(value.sessions) || !value.sessions.every(isSessionView)
       || !Array.isArray(value.edges) || !value.edges.every(edge))
     throw new Error("Session 关系链响应无效");

@@ -159,6 +159,37 @@ exec '${realRg}' "$@"
     expect((await catalog.list({ fresh: true })).find(({ id }) => id === "claude-a")?.name).toBe("Changed after index");
   });
 
+  test("keeps manual Lineage after refresh, cache deletion, and Catalog restart", async () => {
+    const { home, catalog } = setup();
+    await catalog.list({ fresh: true });
+    await catalog.addManualLineage("claude-a", "codex-b");
+    expect((await catalog.refreshLineage(true)).edges).toBe(1);
+    rmSync(join(home, ".local/share/session-snapshots/lineage.sqlite"), { force: true });
+
+    const lineage = await new SessionCatalog({ home }).lineage("codex-b", false);
+    expect(lineage.edges).toEqual([expect.objectContaining({
+      relation: "manual", upstream_id: "claude-a", downstream_id: "codex-b",
+    })]);
+    expect(readFileSync(join(home, ".local/share/session-snapshots/manual-lineages.json"), "utf8")).toContain("claude-a");
+  });
+
+  test("rebuilds the derived cache before rejecting a cyclic manual Lineage", async () => {
+    const { home, catalog } = setup();
+    const handoff = join(home, "handoff.md");
+    appendFileSync(join(home, ".claude/projects/-tmp-alpha/claude-a.jsonl"), [
+      { type: "assistant", timestamp: "2026-07-14T01:01:00Z", message: { role: "assistant", content: [{ type: "tool_use", id: "write-handoff", name: "Write", input: { file_path: handoff } }] } },
+      { type: "user", timestamp: "2026-07-14T01:02:00Z", message: { role: "user", content: [{ type: "tool_result", tool_use_id: "write-handoff", content: "ok" }] } },
+    ].map((record) => JSON.stringify(record)).join("\n") + "\n");
+    appendFileSync(join(home, ".codex/sessions/2026/07/14/rollout-codex-b.jsonl"), JSON.stringify({
+      type: "response_item", timestamp: "2026-07-14T02:03:00Z",
+      payload: { type: "message", role: "user", content: [{ type: "input_text", text: `continue ${handoff}` }] },
+    }) + "\n");
+    rmSync(join(home, ".local/share/session-snapshots/lineage.sqlite"), { force: true });
+
+    await expect(catalog.addManualLineage("codex-b", "claude-a"))
+      .rejects.toEqual(new CatalogError("invalid", "手动关系不能形成循环"));
+  });
+
   test("keeps each adapter's rename behavior behind the Catalog", async () => {
     const fixture = fixtureHome();
     cleanups.push(fixture.cleanup);

@@ -118,7 +118,7 @@ export async function main(argv = process.argv.slice(2), options: { html?: strin
       const value = { ...lineage, sessions: lineage.sessions.map((session) => withResumeCommand(session)) };
       if (json) console.log(JSON.stringify(value, null, 2));
       else if (!lineage.edges.length) console.log(`${row.id} 暂未发现上下游 session`);
-      else lineage.edges.forEach((edge) => console.log(`${edge.upstream_id} -> ${edge.downstream_id}\n    ${edge.path}`));
+      else lineage.edges.forEach((edge) => console.log(`${edge.upstream_id} -> ${edge.downstream_id}\n    ${edge.relation === "manual" ? "手动关联" : edge.path}`));
       return 0;
     }
     if (command === "star" && args.length) {

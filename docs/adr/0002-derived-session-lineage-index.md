@@ -16,6 +16,8 @@ The source Session files and Codex state database must remain read-only.
 
 The index is a disposable cache, not source data. A versioned file signature invalidates old extraction results. Global refresh and single-Session lookup use the same index; unchanged Session files are not reparsed. A single-Session lookup traverses edges in both directions to return the full connected component.
 
+User-added Manual Lineage is authoritative application data rather than a derived fact. `SessionCatalog` stores it atomically in `manual-lineages.json` beside the existing marks file, then merges it with derived edges for traversal and presentation. Rebuilding or deleting `lineage.sqlite` therefore cannot remove a manual relation.
+
 At the current data volume, changed Session facts are updated incrementally while the small edge set is rebuilt in one transaction. We will introduce affected-path edge updates only if this rebuild becomes measurably slow.
 
 ## Consequences
@@ -23,4 +25,5 @@ At the current data volume, changed Session facts are updated incrementally whil
 - Claude, Codex, and pi raw event differences remain hidden behind `SessionCatalog`; CLI, HTTP, and Vue consume normalized Lineage contracts.
 - Source Session files and upstream SQLite databases remain read-only.
 - The application data directory gains a writable, rebuildable SQLite cache and its WAL files.
+- The application data directory also contains `manual-lineages.json`; unlike the SQLite cache, this file must be preserved across index rebuilds.
 - Extraction-rule changes must increment the index version.

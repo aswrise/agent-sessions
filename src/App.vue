@@ -87,6 +87,9 @@ const detailLoading = ref(false);
 const detailError = ref("");
 const lineage = ref<LineageView>();
 const lineageLoading = ref(false);
+const manualLineageOpen = ref(false);
+const manualUpstreamId = ref("");
+const addingManualLineage = ref(false);
 const indexingLineage = ref(false);
 const globalLineage = ref<LineageView>();
 const globalLineageLoading = ref(false);
@@ -561,6 +564,8 @@ async function fetchDetail(id: string): Promise<TranscriptView> {
 }
 
 async function openDetail(id: string, push = true): Promise<void> {
+  manualLineageOpen.value = false;
+  manualUpstreamId.value = "";
   detail.value = undefined;
   lineage.value = undefined;
   lineageLoading.value = false;
@@ -587,6 +592,29 @@ async function loadLineage(id: string): Promise<void> {
     showToast("关系链分析失败", true);
   } finally {
     lineageLoading.value = false;
+  }
+}
+
+async function addManualLineage(): Promise<void> {
+  const downstreamId = detail.value?.id, upstreamId = manualUpstreamId.value.trim();
+  if (!downstreamId || !rows.value.some((row) => row.id === upstreamId && row.id !== downstreamId)) {
+    showToast("请选择有效的上游 Session", true);
+    return;
+  }
+  addingManualLineage.value = true;
+  try {
+    const response = await fetch("/api/lineage/manual", {
+      method: "POST", body: JSON.stringify({ upstream_id: upstreamId, downstream_id: downstreamId }),
+    });
+    if (!response.ok) throw new Error();
+    manualLineageOpen.value = false;
+    manualUpstreamId.value = "";
+    await Promise.all([loadLineage(downstreamId), loadGlobalLineage(true, true)]);
+    showToast("已添加手动上游");
+  } catch {
+    showToast("添加手动上游失败", true);
+  } finally {
+    addingManualLineage.value = false;
   }
 }
 
@@ -1019,8 +1047,18 @@ onBeforeUnmount(() => {
         <div class="detail-top">
           <button type="button" class="f act" @click="showList()">返回</button>
           <button type="button" class="f act" @click="copy(detail)">复制恢复命令</button>
+          <button id="addManualLineage" type="button" class="f act" :aria-expanded="manualLineageOpen" @click="manualLineageOpen = !manualLineageOpen">补充上游</button>
           <div class="detail-title">{{ detail.name || detail.first_msg || detail.id }}</div>
           <div class="detail-meta mono">{{ detail.tool }} · {{ detail.model || "无模型" }} · {{ shortPath(detail.cwd) }} · {{ formatSize(detail.size_kb) }}</div>
+          <form v-if="manualLineageOpen" id="manualLineageForm" class="manual-lineage-form" @submit.prevent="addManualLineage">
+            <label for="manualUpstream">上游 Session</label>
+            <input id="manualUpstream" v-model="manualUpstreamId" list="manualUpstreamOptions" type="text" placeholder="输入名称或 ID 后选择" autocomplete="off" />
+            <datalist id="manualUpstreamOptions">
+              <option v-for="row in rows.filter((row) => row.id !== detail!.id)" :key="row.id" :value="row.id" :label="row.name || row.first_msg || row.id" />
+            </datalist>
+            <button type="submit" class="f act" :disabled="addingManualLineage || !manualUpstreamId.trim()">{{ addingManualLineage ? "添加中…" : "添加" }}</button>
+            <button type="button" class="f" :disabled="addingManualLineage" @click="manualLineageOpen = false; manualUpstreamId = ''">取消</button>
+          </form>
         </div>
         <div v-if="lineageLoading" class="lineage-loading">正在读取关系缓存...</div>
         <section v-else-if="lineage" class="detail-lineage" aria-label="Session 关系链">
@@ -1195,6 +1233,7 @@ col.c-stat{width:116px}col.c-model{width:120px}
   border:1px solid var(--obsidian);border-radius:14px;background:var(--carbon)}
 .detail-title{font-size:16px;font-weight:620;color:var(--paper);min-width:0;flex:1}
 .detail-meta{color:var(--ash);font-size:12px;width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.manual-lineage-form{display:flex;align-items:center;gap:8px;width:100%}.manual-lineage-form label{color:var(--ash);font-size:11px;white-space:nowrap}.manual-lineage-form input{min-width:220px;flex:1;height:34px;padding:0 10px;border:1px solid var(--input-line);border-radius:8px;background:var(--input-bg);color:var(--paper);font:11px ui-monospace,monospace;outline:none}.manual-lineage-form input:focus{border-color:var(--lime)}
 .msglist{display:grid;gap:14px;padding:20px 0 48px;max-width:1040px;margin:0 auto}
 .bubble{max-width:88%;border:1px solid var(--obsidian);border-radius:14px 14px 14px 4px;
   padding:13px 15px;background:var(--carbon);box-shadow:0 5px 18px rgba(0,0,0,.06)}

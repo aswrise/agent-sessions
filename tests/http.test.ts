@@ -92,6 +92,27 @@ describe("Bun HTTP seam", () => {
     expect((await fetch(base + "/api/lineage/index", { method: "POST", body: JSON.stringify({ force: "yes" }) })).status).toBe(400);
   });
 
+  test("adds a validated manual upstream edge", async () => {
+    const { base } = await setup();
+    const added = await fetch(base + "/api/lineage/manual", { method: "POST", body: JSON.stringify({
+      upstream_id: "claude-a", downstream_id: "codex-b",
+    }) });
+    expect(added.status).toBe(200);
+    expect(await (await fetch(base + "/api/lineage?id=codex-b&refresh=0")).json()).toMatchObject({
+      sessions: [{ id: "claude-a" }, { id: "codex-b" }],
+      edges: [{ relation: "manual", upstream_id: "claude-a", downstream_id: "codex-b" }],
+    });
+    expect((await fetch(base + "/api/lineage/manual", { method: "POST", body: JSON.stringify({
+      upstream_id: "codex-b", downstream_id: "codex-b",
+    }) })).status).toBe(400);
+    expect((await fetch(base + "/api/lineage/manual", { method: "POST", body: JSON.stringify({
+      upstream_id: "codex-b", downstream_id: "claude-a",
+    }) })).status).toBe(400);
+    expect((await fetch(base + "/api/lineage/manual", { method: "POST", body: JSON.stringify({
+      upstream_id: "missing", downstream_id: "codex-b",
+    }) })).status).toBe(404);
+  });
+
   test("returns safe JSON when detail parsing fails", async () => {
     const catalog = {
       list: async () => [],

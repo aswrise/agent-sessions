@@ -84,6 +84,13 @@ export function startServer(options: ServerOptions): Bun.Server<undefined> {
           if (value.force !== undefined && typeof value.force !== "boolean") throw new RequestError(400, "force 必须是 boolean");
           return json(await catalog.refreshLineage(value.force === true));
         }
+        if (request.method === "POST" && url.pathname === "/api/lineage/manual") {
+          const value = await body(request), upstreamId = value.upstream_id, downstreamId = value.downstream_id;
+          if (typeof upstreamId !== "string" || !upstreamId || typeof downstreamId !== "string" || !downstreamId)
+            throw new RequestError(400, "缺少 upstream_id 或 downstream_id");
+          await catalog.addManualLineage(upstreamId, downstreamId);
+          return json({ ok: true });
+        }
         if (request.method === "POST" && url.pathname === "/star") {
           const value = await body(request), id = value.id;
           if (typeof id !== "string" || !id) throw new RequestError(400, "缺少 id");

@@ -1,7 +1,7 @@
 import { Database } from "bun:sqlite";
 import { mkdirSync, readFileSync, statSync } from "node:fs";
 import { basename, dirname, normalize } from "node:path";
-import type { LineageEdge, LineageRefresh, Session } from "./contracts.ts";
+import type { ArtifactLineageEdge, LineageEdge, LineageRefresh, Session } from "./contracts.ts";
 
 type Json = Record<string, unknown>;
 type WriteKind = "add" | "update";
@@ -275,10 +275,10 @@ export class LineageIndex {
     }
   }
 
-  lineage(sessionId: string): LineageGraph {
+  lineage(sessionId: string, additionalEdges: LineageEdge[] = []): LineageGraph {
     const db = this.open();
     try {
-      const all = db.query("SELECT * FROM lineage_edges ORDER BY referenced_at, upstream_id, downstream_id, path").all() as LineageEdge[];
+      const all = [...this.edges(db), ...additionalEdges].sort(byEdge);
       const visited = new Set([sessionId]);
       for (const id of visited) for (const edge of all) {
         if (edge.upstream_id === id) visited.add(edge.downstream_id);
@@ -293,10 +293,10 @@ export class LineageIndex {
     }
   }
 
-  all(): LineageGraph {
+  all(additionalEdges: LineageEdge[] = []): LineageGraph {
     const db = this.open();
     try {
-      const edges = db.query("SELECT * FROM lineage_edges ORDER BY referenced_at, upstream_id, downstream_id, path").all() as LineageEdge[];
+      const edges = [...this.edges(db), ...additionalEdges].sort(byEdge);
       return {
         session_ids: [...new Set(edges.flatMap((edge) => [edge.upstream_id, edge.downstream_id]))].sort(),
         edges,
@@ -320,4 +320,15 @@ export class LineageIndex {
         reference_source TEXT NOT NULL, kind TEXT NOT NULL);`);
     return db;
   }
+
+  private edges(db: Database): ArtifactLineageEdge[] {
+    return (db.query("SELECT * FROM lineage_edges").all() as Omit<ArtifactLineageEdge, "relation">[])
+      .map((edge): ArtifactLineageEdge => ({ ...edge, relation: "artifact" }))
+      .sort(byEdge);
+  }
 }
+
+const byEdge = (left: LineageEdge, right: LineageEdge): number =>
+  (left.relation === "manual" ? left.created_at : left.referenced_at) - (right.relation === "manual" ? right.created_at : right.referenced_at)
+  || left.upstream_id.localeCompare(right.upstream_id) || left.downstream_id.localeCompare(right.downstream_id)
+  || (left.relation === "artifact" ? left.path : "").localeCompare(right.relation === "artifact" ? right.path : "");

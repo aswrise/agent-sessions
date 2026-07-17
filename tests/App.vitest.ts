@@ -2,6 +2,7 @@ import { flushPromises, mount } from "@vue/test-utils";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import App from "../src/App.vue";
 import type { SessionView, TranscriptView } from "../src/contracts.ts";
+import { layoutLineages, LINEAGE_GRAPH_LAYOUT } from "../src/lineageLayout.ts";
 
 const makeRow = (index: number): SessionView => ({
   id: `session-${index}`,
@@ -23,7 +24,7 @@ const makeRow = (index: number): SessionView => ({
 
 const response = (value: unknown, status = 200) => new Response(JSON.stringify(value), { status, headers: { "content-type": "application/json" } });
 const lineageEdge = (upstream_id: string, downstream_id: string, path = "/tmp/handoff.md") => ({
-  upstream_id, downstream_id, path, produced_at: 1, referenced_at: 2,
+  relation: "artifact" as const, upstream_id, downstream_id, path, produced_at: 1, referenced_at: 2,
   producer_turn: 3, reference_turn: 0, reference_source: "user" as const, kind: "add" as const,
 });
 let fetchMock: ReturnType<typeof vi.fn>;
@@ -40,7 +41,7 @@ beforeEach(() => {
       { ...makeRow(99), name: "codex接管pi的submit混乱设计", birth: new Date(2026, 6, 15, 17, 40).getTime() / 1000 },
       { ...makeRow(100), name: "草，你怎么能改 submit 接口呢？", birth: new Date(2026, 6, 16, 10, 43).getTime() / 1000 },
     ], edges: [{
-      upstream_id: "session-99", downstream_id: "session-100", path: "/tmp/handoff.md",
+      relation: "artifact", upstream_id: "session-99", downstream_id: "session-100", path: "/tmp/handoff.md",
       produced_at: 1, referenced_at: 2, producer_turn: 3, reference_turn: 0, reference_source: "user", kind: "add",
     }] });
     if (url.startsWith("/api/session")) {
@@ -235,6 +236,13 @@ describe("dashboard", () => {
     await nodes[0]!.trigger("mouseleave");
     expect(nodes.some((node) => node.classes().includes("connected"))).toBe(false);
     expect(graph.get(".dag-link").classes()).not.toContain("active");
+    await graph.get(".dag-file").trigger("mouseenter");
+    expect(nodes.every((node) => node.classes().includes("connected"))).toBe(true);
+    expect(graph.get(".dag-file-source").classes()).toContain("active");
+    expect(graph.get(".dag-link").classes()).toContain("active");
+    await graph.get(".dag-file").trigger("mouseleave");
+    expect(nodes.some((node) => node.classes().includes("connected"))).toBe(false);
+    expect(graph.get(".dag-link").classes()).not.toContain("active");
     await wrapper.get("#lineageIndex").trigger("click");
     await flushPromises();
     expect(wrapper.get("#toast").text()).toContain("发现 1 条关系");
@@ -268,6 +276,69 @@ describe("dashboard", () => {
     expect(graph.get(".dag-file").text()).toContain("2 下游");
     expect(graph.findAll(".dag-link")).toHaveLength(2);
     expect(new Set(graph.findAll(".dag-link path").map((path) => path.attributes("d"))).size).toBe(2);
+    wrapper.unmount();
+  });
+
+  test("centers file nodes between their endpoint blocks without overlap", () => {
+    const sessions = [makeRow(1), makeRow(2), makeRow(3), makeRow(4)];
+    const chain = layoutLineages({ sessions, edges: [
+      lineageEdge("session-1", "session-3", "/tmp/shared.md"),
+      lineageEdge("session-1", "session-4", "/tmp/shared.md"),
+      lineageEdge("session-2", "session-3", "/tmp/other.md"),
+    ] }, LINEAGE_GRAPH_LAYOUT)[0]!;
+    const shared = chain.files.find((file) => file.path === "/tmp/shared.md")!;
+    const other = chain.files.find((file) => file.path === "/tmp/other.md")!;
+    expect(shared.y).toBe(68);
+    expect(other.y).toBe(128);
+    expect(other.y - shared.y).toBeGreaterThanOrEqual(LINEAGE_GRAPH_LAYOUT.fileHeight!);
+  });
+
+  test("expands the canvas when collision avoidance pushes file nodes down", () => {
+    const sessions = Array.from({ length: 12 }, (_, index) => makeRow(index));
+    const edges = [
+      ...sessions.slice(1, 11).map((session) => lineageEdge("session-0", session.id, "/tmp/shared.md")),
+      ...Array.from({ length: 10 }, (_, index) => lineageEdge("session-10", "session-11", `/tmp/${index}.md`)),
+    ];
+    const chain = layoutLineages({ sessions, edges }, LINEAGE_GRAPH_LAYOUT)[0]!;
+    const lowestFileBottom = Math.max(...chain.files.map((file) => file.y + LINEAGE_GRAPH_LAYOUT.fileHeight!));
+    expect(chain.height).toBeGreaterThanOrEqual(lowestFileBottom + LINEAGE_GRAPH_LAYOUT.y);
+  });
+
+  test("adds a manual upstream from Session detail and refreshes the graph", async () => {
+    const sessions = [makeRow(1), makeRow(2)];
+    let added = false;
+    fetchMock.mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.startsWith("/api/sessions")) return response({ generatedAt: new Date(0).toISOString(), home: "/home/fixture", sessions });
+      if (url.startsWith("/api/session")) {
+        const id = new URL(url, "http://local").searchParams.get("id")!;
+        return response({ ...sessions.find((row) => row.id === id)!, messages: [] } satisfies TranscriptView);
+      }
+      if (url === "/api/lineage/manual" && init?.method === "POST") {
+        expect(JSON.parse(String(init.body))).toEqual({ upstream_id: "session-1", downstream_id: "session-2" });
+        added = true;
+        return response({ ok: true });
+      }
+      const edge = { relation: "manual" as const, upstream_id: "session-1", downstream_id: "session-2", created_at: 1 };
+      if (url.startsWith("/api/lineage?id=")) return response(added ? { sessions, edges: [edge] } : { sessions: [sessions[1]], edges: [] });
+      if (url === "/api/lineages") return response(added ? { sessions, edges: [edge] } : { sessions: [], edges: [] });
+      return response({ ok: true });
+    });
+    const wrapper = mount(App);
+    await flushPromises();
+    await wrapper.findAll(".detailbtn")[0]!.trigger("click");
+    await flushPromises();
+
+    await wrapper.get("#addManualLineage").trigger("click");
+    expect(wrapper.findAll("#manualUpstreamOptions option")).toHaveLength(1);
+    await wrapper.get<HTMLInputElement>("#manualUpstream").setValue("session-1");
+    await wrapper.get("#manualLineageForm").trigger("submit");
+    await flushPromises();
+
+    expect(added).toBe(true);
+    expect(wrapper.get("[aria-label='Session 关系链'] .dag-file").text()).toContain("MANUAL");
+    expect(wrapper.get("[aria-label='Session 关系链'] .dag-file").text()).toContain("手动关联");
+    expect(wrapper.get("#toast").text()).toContain("已添加手动上游");
     wrapper.unmount();
   });
 

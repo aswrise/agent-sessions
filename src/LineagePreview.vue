@@ -60,11 +60,11 @@ const labels = computed(() => {
   return chain.value.edges.flatMap((edge) => {
     const from = nodes.get(edge.upstream_id), to = nodes.get(edge.downstream_id);
     if (!from || !to) return [];
-    const label = edge.path.split(/[\\/]/).pop() ?? edge.path;
+    const label = edge.relation === "manual" ? "手动关联" : edge.path.split(/[\\/]/).pop() ?? edge.path;
     const key = `${Math.min(from.column, to.column)}:${Math.max(from.column, to.column)}:${label}`;
     if (seen.has(key)) return [];
     seen.add(key);
-    return [{ key, label, path: edge.path,
+    return [{ key, label, path: edge.relation === "manual" ? "手动添加的 Session 关系" : edge.path,
       x: (from.x + LINEAGE_PREVIEW_LAYOUT.nodeWidth + to.x) / 2 - 105,
       y: (from.y + to.y + LINEAGE_PREVIEW_LAYOUT.nodeHeight) / 2 - 14 }];
   });
@@ -87,7 +87,7 @@ function role(id: string): string {
     <div v-if="chain" class="mini-canvas" :style="{ width: `${chain.width}px`, height: `${chain.height}px` }">
       <svg :viewBox="`0 0 ${chain.width} ${chain.height}`" aria-hidden="true">
         <defs><marker :id="markerId" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" markerHeight="6" orient="auto"><path d="M 0 0 L 8 4 L 0 8 Z" fill="context-stroke" /></marker></defs>
-        <path v-for="edge in chain.edges" :key="`${edge.upstream_id}:${edge.downstream_id}:${edge.path}`" class="mini-edge" :d="edge.d" :marker-end="`url(#${markerId})`"><title>{{ edge.path }}</title></path>
+        <path v-for="edge in chain.edges" :key="`${edge.upstream_id}:${edge.downstream_id}:${edge.relation === 'manual' ? 'manual' : edge.path}`" class="mini-edge" :d="edge.d" :marker-end="`url(#${markerId})`"><title>{{ edge.relation === "manual" ? "手动添加的 Session 关系" : edge.path }}</title></path>
       </svg>
       <span v-for="label in labels" :key="label.key" class="mini-label" :style="{ left: `${label.x}px`, top: `${label.y}px` }" :title="label.path">{{ label.label }}</span>
       <button v-for="node in chain.nodes" :key="node.session.id" type="button" class="lineage-mini-node" :class="{ current: node.session.id === currentId }"

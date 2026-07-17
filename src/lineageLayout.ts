@@ -28,6 +28,7 @@ export type LineageLayoutFile = {
   id: string;
   path: string;
   label: string;
+  manual: boolean;
   upstreamId: string;
   downstreamIds: string[];
   x: number;
@@ -59,6 +60,8 @@ export const LINEAGE_PREVIEW_LAYOUT: LineageLayoutOptions = {
 
 const byBirth = (sessions: Map<string, SessionView>) => (a: string, b: string): number =>
   sessions.get(a)!.birth - sessions.get(b)!.birth || a.localeCompare(b);
+const edgeLabel = (edge: LineageEdge): string => edge.relation === "manual" ? "手动关联" : edge.path.split(/[\\/]/).pop() ?? edge.path;
+const edgePath = (edge: LineageEdge): string => edge.relation === "manual" ? "" : edge.path;
 
 function spread(index: number, count: number, radius: number): number {
   return count < 2 ? 0 : -radius + index * radius * 2 / (count - 1);
@@ -139,11 +142,11 @@ export function layoutLineages(view: LineageView, options: LineageLayoutOptions)
       };
     });
     const files: LineageLayoutFile[] = [], fileEdges: LineageLayoutFileEdge[] = [];
-    let maxFileRows = 0;
+    let maxFileRows = 0, maxFileBottom = 0;
     if (options.fileWidth && options.fileHeight && options.fileGap !== undefined) {
       const grouped = new Map<string, LineageEdge[]>();
       for (const edge of edges) {
-        const key = `${edge.upstream_id}\0${edge.path}`;
+        const key = `${edge.upstream_id}\0${edge.relation === "manual" ? "manual" : edge.path}`;
         grouped.set(key, [...(grouped.get(key) ?? []), edge]);
       }
       const byColumn = new Map<number, [string, LineageEdge[]][]>();
@@ -154,31 +157,41 @@ export function layoutLineages(view: LineageView, options: LineageLayoutOptions)
       const targetEdges = new Map<string, LineageEdge[]>();
       for (const edge of edges) targetEdges.set(edge.downstream_id, [...(targetEdges.get(edge.downstream_id) ?? []), edge]);
       for (const groups of byColumn.values()) groups.sort(([, left], [, right]) =>
-        positioned.get(left[0]!.upstream_id)!.y - positioned.get(right[0]!.upstream_id)!.y || left[0]!.path.localeCompare(right[0]!.path));
+        positioned.get(left[0]!.upstream_id)!.y - positioned.get(right[0]!.upstream_id)!.y || edgeLabel(left[0]!).localeCompare(edgeLabel(right[0]!)));
       maxFileRows = Math.max(0, ...[...byColumn.values()].map((column) => column.length));
-      for (const groups of byColumn.values()) groups.forEach(([id, group], row) => {
-        const first = group[0]!, from = positioned.get(first.upstream_id)!;
-        const x = from.x + options.nodeWidth + options.fileGap!;
-        const y = options.y + row * options.rowStep + (options.nodeHeight - options.fileHeight!) / 2;
-        const siblings = groups.filter(([, edges]) => edges[0]!.upstream_id === first.upstream_id);
-        const sourceIndex = siblings.findIndex(([key]) => key === id);
-        const sourceY = from.y + options.nodeHeight / 2 + spread(sourceIndex, siblings.length, 16);
-        const sourceBend = Math.max(10, (x - from.x - options.nodeWidth) / 2);
-        files.push({
-          id, path: first.path, label: first.path.split(/[\\/]/).pop() ?? first.path,
-          upstreamId: first.upstream_id, downstreamIds: group.map((edge) => edge.downstream_id), x, y,
-          sourceD: `M ${from.x + options.nodeWidth} ${sourceY} C ${from.x + options.nodeWidth + sourceBend} ${sourceY}, ${x - sourceBend} ${y + options.fileHeight! / 2}, ${x} ${y + options.fileHeight! / 2}`,
+      for (const groups of byColumn.values()) {
+        const occupied: number[] = [];
+        groups.forEach(([id, group]) => {
+          const first = group[0]!, from = positioned.get(first.upstream_id)!;
+          const x = from.x + options.nodeWidth + options.fileGap!;
+          const targets = group.map((edge) => positioned.get(edge.downstream_id)!);
+          const targetCenter = (Math.min(...targets.map((target) => target.y)) + Math.max(...targets.map((target) => target.y)) + options.nodeHeight) / 2;
+          const idealY = (from.y + options.nodeHeight / 2 + targetCenter) / 2 - options.fileHeight! / 2;
+          let y = idealY;
+          for (const placedY of occupied.sort((left, right) => left - right))
+            if (y < placedY + options.fileHeight! + 12 && y + options.fileHeight! + 12 > placedY) y = placedY + options.fileHeight! + 12;
+          occupied.push(y);
+          maxFileBottom = Math.max(maxFileBottom, y + options.fileHeight!);
+          const siblings = groups.filter(([, edges]) => edges[0]!.upstream_id === first.upstream_id);
+          const sourceIndex = siblings.findIndex(([key]) => key === id);
+          const sourceY = from.y + options.nodeHeight / 2 + spread(sourceIndex, siblings.length, 16);
+          const sourceBend = Math.max(10, (x - from.x - options.nodeWidth) / 2);
+          files.push({
+            id, path: edgePath(first), label: edgeLabel(first), manual: first.relation === "manual",
+            upstreamId: first.upstream_id, downstreamIds: group.map((edge) => edge.downstream_id), x, y,
+            sourceD: `M ${from.x + options.nodeWidth} ${sourceY} C ${from.x + options.nodeWidth + sourceBend} ${sourceY}, ${x - sourceBend} ${y + options.fileHeight! / 2}, ${x} ${y + options.fileHeight! / 2}`,
+          });
+          const sorted = group.slice().sort((left, right) => positioned.get(left.downstream_id)!.y - positioned.get(right.downstream_id)!.y);
+          sorted.forEach((edge, index) => {
+            const to = positioned.get(edge.downstream_id)!, incomingEdges = targetEdges.get(edge.downstream_id)!;
+            const targetIndex = incomingEdges.findIndex((item) => item === edge);
+            const x1 = x + options.fileWidth!, y1 = y + options.fileHeight! / 2 + spread(index, sorted.length, 12);
+            const x2 = to.x - 8, y2 = to.y + options.nodeHeight / 2 + spread(targetIndex, incomingEdges.length, 18);
+            const bend = Math.max(24, (x2 - x1) / 2);
+            fileEdges.push({ ...edge, fileId: id, d: `M ${x1} ${y1} C ${x1 + bend} ${y1}, ${x2 - bend} ${y2}, ${x2} ${y2}` });
+          });
         });
-        const sorted = group.slice().sort((left, right) => positioned.get(left.downstream_id)!.y - positioned.get(right.downstream_id)!.y);
-        sorted.forEach((edge, index) => {
-          const to = positioned.get(edge.downstream_id)!, incomingEdges = targetEdges.get(edge.downstream_id)!;
-          const targetIndex = incomingEdges.findIndex((item) => item === edge);
-          const x1 = x + options.fileWidth!, y1 = y + options.fileHeight! / 2 + spread(index, sorted.length, 12);
-          const x2 = to.x - 8, y2 = to.y + options.nodeHeight / 2 + spread(targetIndex, incomingEdges.length, 18);
-          const bend = Math.max(24, (x2 - x1) / 2);
-          fileEdges.push({ ...edge, fileId: id, d: `M ${x1} ${y1} C ${x1 + bend} ${y1}, ${x2 - bend} ${y2}, ${x2} ${y2}` });
-        });
-      });
+      }
     }
     const maxLevel = Math.max(0, ...level.values());
     const maxRows = Math.max(1, maxFileRows, ...[...columns.values()].map((column) => column.length));
@@ -186,7 +199,7 @@ export function layoutLineages(view: LineageView, options: LineageLayoutOptions)
     return {
       id: ids.slice().sort().join(":"), nodes, edges: graphEdges, files, fileEdges,
       width: Math.max(options.minWidth, options.widthBase + maxLevel * options.columnStep),
-      height: Math.max(options.minHeight, options.heightBase + maxRows * options.rowStep),
+      height: Math.max(options.minHeight, options.heightBase + maxRows * options.rowStep, maxFileBottom + options.y),
       first: sessions.get(chronological[0]!)!, last: sessions.get(chronological.at(-1)!)!,
     };
   }).sort((a, b) => b.nodes.length - a.nodes.length || b.edges.length - a.edges.length);
