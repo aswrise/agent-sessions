@@ -113,10 +113,16 @@ let globalLineageRequest: Promise<void> | undefined;
 let suppressLineageFocusOpen = false;
 
 function savedWidths(): number[] {
-  for (const key of ["colw5", "column-widths"]) {
+  for (const key of ["colw6", "colw5", "column-widths"]) {
     try {
-      const value: unknown = JSON.parse(localStorage.getItem(key) || "[]");
-      if (Array.isArray(value)) return value.map((width) => typeof width === "number" && Number.isFinite(width) && width >= 36 ? width : 0);
+      const saved = localStorage.getItem(key);
+      if (!saved) continue;
+      const value: unknown = JSON.parse(saved);
+      if (Array.isArray(value)) {
+        const widths = value.map((width) => typeof width === "number" && Number.isFinite(width) && width >= 36 ? width : 0);
+        if (key !== "colw6") widths.splice(11, 0, 0);
+        return widths;
+      }
     } catch {}
   }
   return [];
@@ -805,7 +811,7 @@ function resize(index: number, event: PointerEvent): void {
     window.removeEventListener("pointermove", move);
     window.removeEventListener("pointerup", up);
     handle.classList.remove("on");
-    localStorage.setItem("colw5", JSON.stringify(widths.value.map((width) => width || null)));
+    localStorage.setItem("colw6", JSON.stringify(widths.value.map((width) => width || null)));
   };
   window.addEventListener("pointermove", move);
   window.addEventListener("pointerup", up);
@@ -943,7 +949,7 @@ onBeforeUnmount(() => {
     <section v-else-if="!detail && !detailError && !detailLoading" id="list" aria-label="Session 列表">
       <table>
         <colgroup>
-          <col v-for="(className, index) in ['c-star','c-date','c-date','c-tool','c-model','c-name','c-note','c-stat','','c-path','c-size','c-detail','c-archive','c-source']" :key="index" :class="className" :style="widths[index] ? { width: `${widths[index]}px` } : undefined" />
+          <col v-for="(className, index) in ['c-star','c-date','c-date','c-tool','c-model','c-name','c-note','c-stat','','c-path','c-size','c-lineage','c-detail','c-archive','c-source']" :key="index" :class="className" :style="widths[index] ? { width: `${widths[index]}px` } : undefined" />
         </colgroup>
         <thead><tr>
           <th v-for="(column, index) in [
@@ -953,13 +959,14 @@ onBeforeUnmount(() => {
           ]" :key="column.key" :class="['className' in column ? column.className : '', sortKey === column.key ? (sortAscending ? 's-asc' : 's-desc') : '']" @click="sort(column.key as SortKey)">
             {{ column.label }}<span class="rs" @pointerdown="resize(index, $event)" />
           </th>
-          <th title="详情" class="action-head">详情<span class="rs" @pointerdown="resize(11, $event)" /></th>
+          <th title="预览 Session 关系链" class="action-head">关系</th>
+          <th title="详情" class="action-head">详情<span class="rs" @pointerdown="resize(12, $event)" /></th>
           <th title="归档" class="action-head">归档</th>
           <th title="复制源文件路径" class="action-head">源文件</th>
         </tr></thead>
         <tbody>
-          <tr v-if="loading"><td colspan="14"><div class="empty">加载中...</div></td></tr>
-          <tr v-else-if="!filtered.length"><td colspan="14"><div class="empty">没有匹配的 session，试试更短的关键词或切换筛选</div></td></tr>
+          <tr v-if="loading"><td colspan="15"><div class="empty">加载中...</div></td></tr>
+          <tr v-else-if="!filtered.length"><td colspan="15"><div class="empty">没有匹配的 session，试试更短的关键词或切换筛选</div></td></tr>
           <tr v-for="row in visible" v-else :key="row.id" class="row" :class="{ starred: row.starred, archived: row.archived, pending: pending.has(row.id) }" tabindex="0" @click="copy(row)" @keydown.enter="copy(row)">
             <td class="starcell"><button type="button" class="rowbtn starbtn" :disabled="pending.has(row.id)" :aria-label="row.starred ? '取消标记' : '标记重要'" :title="row.starred ? '取消标记' : '标记重要'" @click.stop="toggleStar(row)">{{ row.starred ? "★" : "☆" }}</button></td>
             <td class="dt" @mouseenter="showTextPreview($event, `${row.id}:mtime`, formatDate(row.mtime))" @mouseleave="schedulePreviewHide">{{ formatDate(row.mtime) }}</td>
@@ -968,16 +975,7 @@ onBeforeUnmount(() => {
             <td class="tool" @mouseenter="showTextPreview($event, `${row.id}:model`, row.model)" @mouseleave="schedulePreviewHide">{{ row.model }}</td>
             <td class="namecell nm" @click.stop="startEdit(row, 'name')">
               <input v-if="editing?.id === row.id && editing.field === 'name'" v-model="editValue" class="cell-input" :data-edit="`${row.id}:name`" aria-label="名称" @click.stop @keydown="editKeydown(row, 'name', $event)" @blur="finishEdit(row, 'name', true)" />
-              <div v-else class="name-wrap">
-                <span class="name-text" @mouseenter="showTextPreview($event, `${row.id}:name`, row.name)" @mouseleave="schedulePreviewHide">{{ row.name }}</span>
-                <button v-if="chainInfo.get(row.id)" type="button" class="chain-chip" :aria-label="`所在关系链，共 ${chainInfo.get(row.id)!.size} 个 Session，查看整条链`"
-                  :title="`所在关系链，共 ${chainInfo.get(row.id)!.size} 个 Session，查看整条链`" aria-haspopup="dialog" aria-controls="lineage-preview"
-                  :aria-expanded="lineagePreview?.row.id === row.id" @mouseenter="scheduleLineagePreview(row, $event)" @mouseleave="scheduleLineagePreviewHide"
-                  @focus="focusLineagePreview(row, $event)" @blur="scheduleLineagePreviewHide" @click.stop="toggleLineagePreview(row, $event)" @keydown.stop @keydown.tab="enterPinnedLineagePreview" @keydown.esc.prevent="closeLineagePreview(true)">
-                  <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><path d="M6.4 5.1 5.2 3.9a2.4 2.4 0 0 0-3.4 3.4l1.7 1.7a2.4 2.4 0 0 0 3.4 0l1.2-1.2M9.6 10.9l1.2 1.2a2.4 2.4 0 0 0 3.4-3.4L12.5 7a2.4 2.4 0 0 0-3.4 0L7.9 8.2" /></svg>
-                  {{ chainInfo.get(row.id)!.size }}
-                </button>
-              </div>
+              <span v-else class="name-text" @mouseenter="showTextPreview($event, `${row.id}:name`, row.name)" @mouseleave="schedulePreviewHide">{{ row.name }}</span>
             </td>
             <td class="notecell" @click.stop="startEdit(row, 'star_note')" @mouseenter="showTextPreview($event, `${row.id}:note`, row.star_note)" @mouseleave="schedulePreviewHide">
               <input v-if="editing?.id === row.id && editing.field === 'star_note'" v-model="editValue" class="cell-input" :data-edit="`${row.id}:star_note`" aria-label="备注" @click.stop @keydown="editKeydown(row, 'star_note', $event)" @blur="finishEdit(row, 'star_note', true)" />
@@ -987,6 +985,16 @@ onBeforeUnmount(() => {
             <td class="msg" @mouseenter="showTranscriptPreview(row, $event)" @mouseleave="schedulePreviewHide">{{ messageText(row) }}</td>
             <td class="p" @mouseenter="showTextPreview($event, `${row.id}:path`, shortPath(row.cwd))" @mouseleave="schedulePreviewHide">{{ shortPath(row.cwd) }}</td>
             <td class="num sz">{{ formatSize(row.size_kb) }}</td>
+            <td class="lineagecell">
+              <button v-if="chainInfo.get(row.id)" type="button" class="chain-chip" :aria-label="`所在关系链，共 ${chainInfo.get(row.id)!.size} 个 Session，查看整条链`"
+                :title="`所在关系链，共 ${chainInfo.get(row.id)!.size} 个 Session，查看整条链`" aria-haspopup="dialog" aria-controls="lineage-preview"
+                :aria-expanded="lineagePreview?.row.id === row.id" @mouseenter="scheduleLineagePreview(row, $event)" @mouseleave="scheduleLineagePreviewHide"
+                @focus="focusLineagePreview(row, $event)" @blur="scheduleLineagePreviewHide" @click.stop="toggleLineagePreview(row, $event)" @keydown.stop @keydown.tab="enterPinnedLineagePreview" @keydown.esc.prevent="closeLineagePreview(true)">
+                <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><path d="M6.4 5.1 5.2 3.9a2.4 2.4 0 0 0-3.4 3.4l1.7 1.7a2.4 2.4 0 0 0 3.4 0l1.2-1.2M9.6 10.9l1.2 1.2a2.4 2.4 0 0 0 3.4-3.4L12.5 7a2.4 2.4 0 0 0-3.4 0L7.9 8.2" /></svg>
+                预览 {{ chainInfo.get(row.id)!.size }}
+              </button>
+              <span v-else class="lineage-empty">—</span>
+            </td>
             <td class="detailcell"><button type="button" class="rowbtn detailbtn" title="打开详情页" @click.stop="openDetail(row.id)">查看</button></td>
             <td class="archcell"><button type="button" class="rowbtn archivebtn" :disabled="pending.has(row.id)" :title="row.archived ? '解除归档' : '归档（在“已归档”视图可找回）'" @click.stop="toggleArchive(row)">{{ row.archived ? "恢复" : "归档" }}</button></td>
             <td class="sourcecell"><button type="button" class="rowbtn sourcebtn" title="复制源文件路径" aria-live="polite" @click.stop="copySourcePath(row)">{{ copiedPathId === row.id ? "已复制" : "复制路径" }}</button></td>
@@ -1115,10 +1123,10 @@ main{max-width:1600px;margin:0 auto;padding:0 32px 56px}
 #list{overflow-x:auto;border:1px solid var(--obsidian);border-radius:14px;background:var(--carbon);
   box-shadow:0 16px 40px rgba(0,0,0,.08)}
 #lineageOverview{display:grid;gap:14px}.lineage-toolbar{display:flex;align-items:center;justify-content:space-between;gap:20px;padding:16px 18px;border:1px solid var(--obsidian);border-radius:14px;background:var(--carbon)}.lineage-toolbar h2{margin:0;color:var(--paper);font-size:15px;font-weight:650}.lineage-toolbar p{margin:3px 0 0;color:var(--ash);font-size:11px}.lineage-zero{display:grid;justify-items:center;gap:8px;padding:72px 20px;border:1px dashed var(--graphite);border-radius:14px;color:var(--ash);text-align:center}.lineage-zero strong{color:var(--mist);font-size:14px}.lineage-zero span{max-width:520px;font-size:12px}.detail-lineage{margin-top:12px}.lineage-loading{margin-top:12px;padding:28px;border:1px solid var(--obsidian);border-radius:12px;background:var(--carbon);color:var(--ash);text-align:center}
-table{width:100%;min-width:1570px;border-collapse:collapse;table-layout:fixed}
+table{width:100%;min-width:1650px;border-collapse:collapse;table-layout:fixed}
 col.c-star{width:36px}col.c-date{width:92px}col.c-tool{width:70px}
 col.c-name{width:230px}col.c-note{width:120px}col.c-path{width:180px}col.c-size{width:70px}
-col.c-detail{width:58px}col.c-archive{width:66px}col.c-source{width:80px}
+col.c-lineage{width:80px}col.c-detail{width:58px}col.c-archive{width:66px}col.c-source{width:80px}
 .select-button{display:inline-flex;align-items:center;justify-content:space-between;gap:8px;max-width:240px;height:34px;
   padding:0 10px;border:1px solid var(--input-line);border-radius:9px;background:var(--input-bg);
   color:var(--fog);font:inherit;font-size:12px;cursor:pointer;white-space:nowrap}
@@ -1159,7 +1167,7 @@ tr.row.starred td{background:var(--star-wash)}
 .tool-pill.codex{color:#aab5ff;background:rgba(139,156,255,.1)}
 .tool-pill.claude{color:#e9a884;background:rgba(222,137,91,.1)}
 .tool-pill.pi{color:#76d5b0;background:rgba(77,190,147,.1)}
-td.starcell,td.detailcell,td.archcell,td.sourcecell{text-align:center}
+td.starcell,td.lineagecell,td.detailcell,td.archcell,td.sourcecell{text-align:center}
 td.starcell{padding-left:3px;padding-right:3px}
 .rowbtn{display:inline-grid;place-items:center;min-width:28px;height:28px;padding:0 7px;border:0;border-radius:7px;
   background:transparent;color:var(--ash);font:inherit;font-size:11px;cursor:pointer;
@@ -1174,7 +1182,7 @@ td.notecell{color:var(--mist);font-size:12px;cursor:text}
 td.notecell:empty:hover::after{content:"点击添加备注";color:var(--smoke)}
 td.namecell{cursor:text}
 td.namecell:empty:hover::after{content:"点击命名";color:var(--smoke);font-weight:400}
-.name-wrap{display:flex;align-items:center;gap:6px;min-width:0}.name-text{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.chain-chip{display:inline-flex;flex:none;align-items:center;gap:3px;height:20px;padding:0 7px;border:1px solid color-mix(in srgb,var(--lime) 26%,transparent);border-radius:999px;background:color-mix(in srgb,var(--lime) 9%,transparent);color:var(--lime);font:600 10.5px/1 ui-monospace,monospace;cursor:pointer;transition:transform 120ms var(--ease-out),background-color 120ms ease,border-color 120ms ease}.chain-chip svg{width:11px;height:11px}.chain-chip:active{transform:scale(.95)}.chain-chip:focus-visible{outline:2px solid var(--lime);outline-offset:2px}
+.name-text{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.chain-chip{display:inline-flex;align-items:center;gap:3px;height:20px;padding:0 6px;border:1px solid color-mix(in srgb,var(--lime) 26%,transparent);border-radius:999px;background:color-mix(in srgb,var(--lime) 9%,transparent);color:var(--lime);font:600 9.5px/1 ui-monospace,monospace;cursor:pointer;transition:transform 120ms var(--ease-out),background-color 120ms ease,border-color 120ms ease}.chain-chip svg{width:10px;height:10px}.chain-chip:active{transform:scale(.95)}.chain-chip:focus-visible{outline:2px solid var(--lime);outline-offset:2px}.lineage-empty{color:var(--smoke)}
 .cell-input{display:block;width:100%;height:30px;margin:-3px -5px;padding:4px 6px;border:1px solid var(--lime);
   border-radius:6px;background:var(--input-bg);color:var(--paper);font:inherit;outline:none;
   box-shadow:0 0 0 3px color-mix(in srgb,var(--lime) 12%,transparent)}

@@ -68,7 +68,8 @@ describe("dashboard", () => {
     expect(wrapper.findAll("tbody tr")).toHaveLength(100);
     expect(wrapper.text()).toContain("第 1 / 2 页");
     expect(wrapper.findAll(".rs")).toHaveLength(12);
-    expect(wrapper.findAll("thead th")).toHaveLength(14);
+    expect(wrapper.findAll("thead th")).toHaveLength(15);
+    expect(wrapper.findAll("tbody tr.row .lineagecell")).toHaveLength(100);
     expect(wrapper.find(".tool-pill").exists()).toBe(true);
     expect(wrapper.get("tbody .p").text()).toBe("~/project");
 
@@ -209,15 +210,22 @@ describe("dashboard", () => {
     const nodes = graph.findAll(".dag-node");
     expect(nodes).toHaveLength(2);
     expect(graph.findAll(".dag-link")).toHaveLength(1);
-    expect(graph.get<HTMLElement>(".dag-canvas").element.style.width).toBe("596px");
-    expect(graph.get(".dag-canvas svg").attributes("viewBox")).toBe("0 0 596 168");
-    expect((nodes[1]!.element as HTMLElement).style.left).toBe("312px");
+    expect(graph.findAll(".dag-file")).toHaveLength(1);
+    expect(graph.get(".dag-file").text()).toContain("handoff.md");
+    expect(graph.get<HTMLElement>(".dag-canvas").element.style.width).toBe("838px");
+    expect(graph.get(".dag-canvas svg").attributes("viewBox")).toBe("0 0 838 168");
+    expect((nodes[1]!.element as HTMLElement).style.left).toBe("554px");
+    const fileLeft = Number.parseInt(graph.get<HTMLElement>(".dag-file").element.style.left);
+    const targetLeft = Number.parseInt((nodes[1]!.element as HTMLElement).style.left);
+    expect(targetLeft - fileLeft - 220).toBe(62);
+    expect(graph.get(".dag-link path").attributes("marker-end")).toContain("dag-open-arrow-");
+    expect(graph.get("marker path").attributes("fill")).toBe("none");
     expect(graph.get(".dag-card-head").text()).toContain("2026-07-15 17:40");
     expect(graph.get(".dag-card-head").text()).toContain("codex接管pi的submit混乱设计");
     expect(graph.get(".dag-card-head").text()).toContain("17 小时 03 分钟");
     expect(graph.get(".dag-card-head").text()).toContain("2026-07-16 10:43");
     expect(graph.get(".dag-card-head").text()).toContain("草，你怎么能改 submit 接口呢？");
-    expect(graph.get(".dag-link text").text()).toBe("handoff.md");
+    expect(graph.find(".dag-link text").exists()).toBe(false);
     expect(graph.get(".dag-link path title").text()).toBe("/tmp/handoff.md");
     expect((nodes[0]!.element as HTMLElement).style.getPropertyValue("--node-delay")).toBe("");
     await nodes[0]!.trigger("mouseenter");
@@ -237,6 +245,29 @@ describe("dashboard", () => {
     expect(wrapper.find("#sessionLineage").exists()).toBe(false);
     expect(wrapper.get("[aria-label='Session 关系链']").findAll(".dag-node")).toHaveLength(2);
     expect(fetchMock.mock.calls.some(([input]) => String(input) === "/api/lineage?id=session-100&refresh=0")).toBe(true);
+    wrapper.unmount();
+  });
+
+  test("merges one produced file into a shared node with separate downstream routes", async () => {
+    const sessions = [makeRow(1), makeRow(2), makeRow(3)];
+    fetchMock.mockImplementation(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.startsWith("/api/sessions")) return response({ generatedAt: new Date(0).toISOString(), home: "/home/fixture", sessions });
+      if (url === "/api/lineages") return response({ sessions, edges: [
+        lineageEdge("session-1", "session-2", "/tmp/shared-handoff.md"),
+        lineageEdge("session-1", "session-3", "/tmp/shared-handoff.md"),
+      ] });
+      return response({ ok: true });
+    });
+    const wrapper = mount(App);
+    await flushPromises();
+    await wrapper.get("#showLineages").trigger("click");
+    await flushPromises();
+    const graph = wrapper.get("[aria-label='全部关系链']");
+    expect(graph.findAll(".dag-file")).toHaveLength(1);
+    expect(graph.get(".dag-file").text()).toContain("2 下游");
+    expect(graph.findAll(".dag-link")).toHaveLength(2);
+    expect(new Set(graph.findAll(".dag-link path").map((path) => path.attributes("d"))).size).toBe(2);
     wrapper.unmount();
   });
 
@@ -264,7 +295,7 @@ describe("dashboard", () => {
     await flushPromises();
     expect(fetchMock.mock.calls.filter(([input]) => String(input) === "/api/lineages")).toHaveLength(1);
     expect(wrapper.findAll(".chain-chip")).toHaveLength(2);
-    expect(wrapper.get(".chain-chip").text()).toBe("2");
+    expect(wrapper.get(".chain-chip").text()).toBe("预览 2");
     const noChainRow = wrapper.findAll("tbody tr.row").find((row) => row.find(".name-text").text() === "Session 98")!;
     expect(noChainRow.find(".chain-chip").exists()).toBe(false);
 
@@ -282,6 +313,8 @@ describe("dashboard", () => {
     expect(wrapper.find("#lineage-preview .lineage-mini-node.current").exists()).toBe(true);
     expect(wrapper.get("#lineage-preview .mini-edge").attributes("marker-end")).toContain("mini-arrow-");
     expect(wrapper.get("#lineage-preview .mini-label").text()).toBe("handoff.md");
+    expect(wrapper.get("#lineage-preview .mini-label").element.tagName).toBe("SPAN");
+    expect(wrapper.get("#lineage-preview .mini-label").attributes("title")).toBe("/tmp/handoff.md");
     await wrapper.get("#lineage-preview .mini-scroll").trigger("scroll");
     expect(wrapper.find("#lineage-preview").exists()).toBe(true);
     expect(fetchMock.mock.calls.filter(([input]) => String(input) === "/api/lineages")).toHaveLength(1);
@@ -300,7 +333,7 @@ describe("dashboard", () => {
     await wrapper.get("#showSessions").trigger("click");
     const refreshedTab = wrapper.findAll(".tabs button").find((button) => button.text().startsWith("⛓ 有链"))!;
     expect(refreshedTab.attributes("data-count")).toBe("3");
-    expect(wrapper.get(".chain-chip").text()).toBe("3");
+    expect(wrapper.get(".chain-chip").text()).toBe("预览 3");
     wrapper.unmount();
   });
 
@@ -379,7 +412,7 @@ describe("dashboard", () => {
     const wrapper = mount(App, { attachTo: document.body });
     await flushPromises();
     const row = wrapper.findAll("tbody tr.row").find((item) => item.get(".name-text").text() === "current")!;
-    expect(row.get(".chain-chip").text()).toBe("15");
+    expect(row.get(".chain-chip").text()).toBe("预览 15");
     await row.get(".chain-chip").trigger("mouseenter");
     await vi.advanceTimersByTimeAsync(181);
     const dialog = wrapper.get("#lineage-preview");
@@ -458,7 +491,7 @@ describe("dashboard", () => {
     await wrapper.find(".rs").trigger("pointerdown", { clientX: 100 });
     window.dispatchEvent(new PointerEvent("pointermove", { clientX: 130 }));
     window.dispatchEvent(new PointerEvent("pointerup"));
-    expect(JSON.parse(localStorage.getItem("colw5") || "[]")[0]).toBeGreaterThanOrEqual(36);
+    expect(JSON.parse(localStorage.getItem("colw6") || "[]")[0]).toBeGreaterThanOrEqual(36);
     wrapper.unmount();
   });
 
