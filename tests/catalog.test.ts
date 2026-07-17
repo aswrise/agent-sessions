@@ -173,6 +173,19 @@ exec '${realRg}' "$@"
     expect(readFileSync(join(home, ".local/share/session-snapshots/manual-lineages.json"), "utf8")).toContain("claude-a");
   });
 
+  test("removes only the selected manual Lineage persistently", async () => {
+    const { home, catalog } = setup();
+    await catalog.addManualLineage("claude-a", "codex-b");
+    await catalog.addManualLineage("pi-c", "codex-b");
+
+    await catalog.removeManualLineage("claude-a", "codex-b");
+
+    const lineage = await new SessionCatalog({ home }).lineage("codex-b", false);
+    expect(lineage.edges).toEqual([expect.objectContaining({
+      relation: "manual", upstream_id: "pi-c", downstream_id: "codex-b",
+    })]);
+  });
+
   test("rebuilds the derived cache before rejecting a cyclic manual Lineage", async () => {
     const { home, catalog } = setup();
     const handoff = join(home, "handoff.md");

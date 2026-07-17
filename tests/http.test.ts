@@ -111,6 +111,15 @@ describe("Bun HTTP seam", () => {
     expect((await fetch(base + "/api/lineage/manual", { method: "POST", body: JSON.stringify({
       upstream_id: "missing", downstream_id: "codex-b",
     }) })).status).toBe(404);
+
+    const removed = await fetch(base + "/api/lineage/manual", { method: "DELETE", body: JSON.stringify({
+      upstream_id: "claude-a", downstream_id: "codex-b",
+    }) });
+    expect(removed.status).toBe(200);
+    expect(await (await fetch(base + "/api/lineage?id=codex-b&refresh=0")).json()).toMatchObject({
+      sessions: [{ id: "codex-b" }], edges: [],
+    });
+    expect((await fetch(base + "/api/lineage/manual", { method: "DELETE", body: "{}" })).status).toBe(400);
   });
 
   test("returns safe JSON when detail parsing fails", async () => {

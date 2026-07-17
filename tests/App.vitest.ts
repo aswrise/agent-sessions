@@ -319,6 +319,11 @@ describe("dashboard", () => {
         added = true;
         return response({ ok: true });
       }
+      if (url === "/api/lineage/manual" && init?.method === "DELETE") {
+        expect(JSON.parse(String(init.body))).toEqual({ upstream_id: "session-1", downstream_id: "session-2" });
+        added = false;
+        return response({ ok: true });
+      }
       const edge = { relation: "manual" as const, upstream_id: "session-1", downstream_id: "session-2", created_at: 1 };
       if (url.startsWith("/api/lineage?id=")) return response(added ? { sessions, edges: [edge] } : { sessions: [sessions[1]], edges: [] });
       if (url === "/api/lineages") return response(added ? { sessions, edges: [edge] } : { sessions: [], edges: [] });
@@ -339,6 +344,11 @@ describe("dashboard", () => {
     expect(wrapper.get("[aria-label='Session 关系链'] .dag-file").text()).toContain("MANUAL");
     expect(wrapper.get("[aria-label='Session 关系链'] .dag-file").text()).toContain("手动关联");
     expect(wrapper.get("#toast").text()).toContain("已添加手动上游");
+
+    await wrapper.get(".remove-manual-lineage").trigger("click");
+    await flushPromises();
+    expect(wrapper.find("[aria-label='Session 关系链'] .dag-file").exists()).toBe(false);
+    expect(wrapper.get("#toast").text()).toContain("已取消手动关联");
     wrapper.unmount();
   });
 

@@ -701,6 +701,12 @@ export class SessionCatalog {
     atomicWrite(this.manualLineageFile, JSON.stringify(manual, null, 1));
   }
 
+  removeManualLineage(upstreamId: string, downstreamId: string): void {
+    const manual = this.loadManualLineages();
+    const kept = manual.filter((edge) => edge.upstream_id !== upstreamId || edge.downstream_id !== downstreamId);
+    if (kept.length !== manual.length) atomicWrite(this.manualLineageFile, JSON.stringify(kept, null, 1));
+  }
+
   async find(keyword: string, limit = 20): Promise<{ total: number; results: (Session & { snippet: string })[] }> {
     const rg = this.rgPath === undefined ? Bun.which("rg") : this.rgPath;
     if (!rg) throw new CatalogError("missing_rg", "需要 ripgrep (rg)，请安装并加入 PATH");

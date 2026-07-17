@@ -46,7 +46,7 @@ export function startServer(options: ServerOptions): Bun.Server<undefined> {
     port: options.port ?? 7867,
     async fetch(request) {
       const url = new URL(request.url);
-      if (request.method !== "GET" && request.method !== "POST") return json({ error: "Not found" }, 404);
+      if (request.method !== "GET" && request.method !== "POST" && request.method !== "DELETE") return json({ error: "Not found" }, 404);
       try {
         if (request.method === "GET" && url.pathname === "/health")
           return url.searchParams.get("nonce") === nonce ? json({ ok: true, nonce }) : json({ error: "Not found" }, 404);
@@ -84,11 +84,12 @@ export function startServer(options: ServerOptions): Bun.Server<undefined> {
           if (value.force !== undefined && typeof value.force !== "boolean") throw new RequestError(400, "force 必须是 boolean");
           return json(await catalog.refreshLineage(value.force === true));
         }
-        if (request.method === "POST" && url.pathname === "/api/lineage/manual") {
+        if ((request.method === "POST" || request.method === "DELETE") && url.pathname === "/api/lineage/manual") {
           const value = await body(request), upstreamId = value.upstream_id, downstreamId = value.downstream_id;
           if (typeof upstreamId !== "string" || !upstreamId || typeof downstreamId !== "string" || !downstreamId)
             throw new RequestError(400, "缺少 upstream_id 或 downstream_id");
-          await catalog.addManualLineage(upstreamId, downstreamId);
+          if (request.method === "POST") await catalog.addManualLineage(upstreamId, downstreamId);
+          else catalog.removeManualLineage(upstreamId, downstreamId);
           return json({ ok: true });
         }
         if (request.method === "POST" && url.pathname === "/star") {

@@ -90,6 +90,7 @@ const lineageLoading = ref(false);
 const manualLineageOpen = ref(false);
 const manualUpstreamId = ref("");
 const addingManualLineage = ref(false);
+const removingManualUpstreamId = ref("");
 const indexingLineage = ref(false);
 const globalLineage = ref<LineageView>();
 const globalLineageLoading = ref(false);
@@ -150,6 +151,15 @@ const chainInfo = computed(() => {
     for (const session of view.sessions) result.set(session.id, info);
   }
   return result;
+});
+const manualUpstreams = computed(() => {
+  const view = lineage.value, downstreamId = detail.value?.id;
+  if (!view || !downstreamId) return [];
+  return view.edges.flatMap((edge) => {
+    if (edge.relation !== "manual" || edge.downstream_id !== downstreamId) return [];
+    const session = view.sessions.find(({ id }) => id === edge.upstream_id);
+    return [{ id: edge.upstream_id, label: session?.name || session?.first_msg || edge.upstream_id }];
+  });
 });
 const tabs = computed<{ value: Tab; label: string }[]>(() => [
   { value: "", label: "全部" },
@@ -618,6 +628,24 @@ async function addManualLineage(): Promise<void> {
   }
 }
 
+async function removeManualLineage(upstreamId: string): Promise<void> {
+  const downstreamId = detail.value?.id;
+  if (!downstreamId) return;
+  removingManualUpstreamId.value = upstreamId;
+  try {
+    const response = await fetch("/api/lineage/manual", {
+      method: "DELETE", body: JSON.stringify({ upstream_id: upstreamId, downstream_id: downstreamId }),
+    });
+    if (!response.ok) throw new Error();
+    await Promise.all([loadLineage(downstreamId), loadGlobalLineage(true, true)]);
+    showToast("已取消手动关联");
+  } catch {
+    showToast("取消手动关联失败", true);
+  } finally {
+    removingManualUpstreamId.value = "";
+  }
+}
+
 function showSessions(push = true): void {
   closeLineagePreview();
   viewMode.value = "sessions";
@@ -1059,6 +1087,12 @@ onBeforeUnmount(() => {
             <button type="submit" class="f act" :disabled="addingManualLineage || !manualUpstreamId.trim()">{{ addingManualLineage ? "添加中…" : "添加" }}</button>
             <button type="button" class="f" :disabled="addingManualLineage" @click="manualLineageOpen = false; manualUpstreamId = ''">取消</button>
           </form>
+          <div v-if="manualUpstreams.length" class="manual-lineages">
+            <span v-for="upstream in manualUpstreams" :key="upstream.id" class="manual-lineage">
+              <span :title="upstream.id">手动上游：{{ upstream.label }}</span>
+              <button type="button" class="f remove-manual-lineage" :disabled="!!removingManualUpstreamId" @click="removeManualLineage(upstream.id)">{{ removingManualUpstreamId === upstream.id ? "取消中…" : "取消关联" }}</button>
+            </span>
+          </div>
         </div>
         <div v-if="lineageLoading" class="lineage-loading">正在读取关系缓存...</div>
         <section v-else-if="lineage" class="detail-lineage" aria-label="Session 关系链">
@@ -1234,6 +1268,7 @@ col.c-stat{width:116px}col.c-model{width:120px}
 .detail-title{font-size:16px;font-weight:620;color:var(--paper);min-width:0;flex:1}
 .detail-meta{color:var(--ash);font-size:12px;width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .manual-lineage-form{display:flex;align-items:center;gap:8px;width:100%}.manual-lineage-form label{color:var(--ash);font-size:11px;white-space:nowrap}.manual-lineage-form input{min-width:220px;flex:1;height:34px;padding:0 10px;border:1px solid var(--input-line);border-radius:8px;background:var(--input-bg);color:var(--paper);font:11px ui-monospace,monospace;outline:none}.manual-lineage-form input:focus{border-color:var(--lime)}
+.manual-lineages{display:flex;gap:8px;flex-wrap:wrap;width:100%}.manual-lineage{display:inline-flex;align-items:center;gap:8px;padding:4px 5px 4px 9px;border:1px dashed color-mix(in srgb,var(--lime) 28%,var(--obsidian));border-radius:9px;color:var(--mist);font-size:11px}
 .msglist{display:grid;gap:14px;padding:20px 0 48px;max-width:1040px;margin:0 auto}
 .bubble{max-width:88%;border:1px solid var(--obsidian);border-radius:14px 14px 14px 4px;
   padding:13px 15px;background:var(--carbon);box-shadow:0 5px 18px rgba(0,0,0,.06)}
