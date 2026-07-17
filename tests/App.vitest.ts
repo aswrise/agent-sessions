@@ -546,6 +546,35 @@ describe("dashboard", () => {
     wrapper.unmount();
   });
 
+  test("reloads a previously previewed live Transcript after refresh", async () => {
+    vi.useFakeTimers();
+    let detailLoads = 0;
+    fetchMock.mockImplementation(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.startsWith("/api/sessions"))
+        return response({ generatedAt: new Date().toISOString(), home: "/home/fixture", sessions: [makeRow(1)] });
+      if (url.startsWith("/api/session"))
+        return response({ ...makeRow(1), messages: [{ role: "user", text: ++detailLoads === 1 ? "before refresh" : "after refresh", timestamp: "" }] } satisfies TranscriptView);
+      if (url.startsWith("/api/lineage")) return response({ sessions: [], edges: [] });
+      return response({ ok: true });
+    });
+    const wrapper = mount(App, { attachTo: document.body });
+    await flushPromises();
+
+    await wrapper.get("td.msg").trigger("mouseenter");
+    await vi.advanceTimersByTimeAsync(181);
+    await flushPromises();
+    expect(wrapper.get("#tip").text()).toContain("before refresh");
+    await wrapper.get("#reload").trigger("click");
+    await flushPromises();
+    await wrapper.get(".detailbtn").trigger("click");
+    await flushPromises();
+
+    expect(wrapper.get("#detail").text()).toContain("after refresh");
+    expect(detailLoads).toBe(2);
+    wrapper.unmount();
+  });
+
   test("does not load a Transcript when preview hover ends before the delay", async () => {
     vi.useFakeTimers();
     const wrapper = mount(App, { attachTo: document.body });

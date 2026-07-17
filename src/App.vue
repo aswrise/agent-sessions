@@ -101,6 +101,7 @@ const lineagePreview = ref<LineagePreviewState>();
 const lineagePreviewElement = ref<HTMLElement>();
 const previewCache = new Map<string, TranscriptView>();
 const previewRequests = new Map<string, Promise<TranscriptView>>();
+let transcriptRevision = 0;
 let searchTimer: ReturnType<typeof setTimeout> | undefined;
 let deepSearchRequest = 0;
 let toastTimer: ReturnType<typeof setTimeout> | undefined;
@@ -273,6 +274,7 @@ async function load(fresh = false): Promise<void> {
     const response = await fetch(`/api/sessions${fresh ? "?fresh=1" : ""}`);
     if (!response.ok) throw new Error("加载失败");
     const envelope = parseSessionsEnvelope(await response.json());
+    if (fresh) { transcriptRevision++; previewCache.clear(); }
     rows.value = envelope.sessions;
     generatedAt.value = envelope.generatedAt;
     home.value = envelope.home;
@@ -538,22 +540,23 @@ function openRowStatus(row: SessionView, event: MouseEvent): void {
 }
 
 async function fetchDetail(id: string): Promise<TranscriptView> {
-  const cached = previewCache.get(id);
+  const revision = transcriptRevision, key = `${revision}:${id}`;
+  const cached = previewCache.get(key);
   if (cached) return cached;
-  const active = previewRequests.get(id);
+  const active = previewRequests.get(key);
   if (active) return active;
   const request = (async () => {
     try {
       const response = await fetch(`/api/session?id=${encodeURIComponent(id)}`);
       if (!response.ok) throw new Error("加载失败");
       const value = parseTranscriptView(await response.json());
-      previewCache.set(id, value);
+      if (revision === transcriptRevision) previewCache.set(key, value);
       return value;
     } finally {
-      previewRequests.delete(id);
+      previewRequests.delete(key);
     }
   })();
-  previewRequests.set(id, request);
+  previewRequests.set(key, request);
   return request;
 }
 
