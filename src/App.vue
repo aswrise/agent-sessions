@@ -1167,7 +1167,7 @@ h1{font-size:19px;line-height:1.2;font-weight:650;letter-spacing:-.025em;margin:
 .meta{color:var(--ash);font-size:12px;padding:7px 10px;border:1px solid var(--obsidian);
   border-radius:8px;background:var(--carbon)}
 .meta strong{color:var(--paper);font-weight:600;font-variant-numeric:tabular-nums}
-.chrome{position:sticky;top:12px;z-index:4;max-width:1536px;margin:0 auto 18px;
+.chrome{position:sticky;top:12px;z-index:4;max-width:1760px;margin:0 auto 18px;
   border:1px solid color-mix(in srgb,var(--graphite) 76%,transparent);border-radius:15px;
   background:var(--material);backdrop-filter:blur(24px) saturate(160%);
   box-shadow:0 16px 44px rgba(0,0,0,.14),inset 0 1px 0 rgba(255,255,255,.055)}
@@ -1194,7 +1194,7 @@ input[type=search]:focus{border-color:color-mix(in srgb,var(--lime) 65%,var(--gr
   background:color-mix(in srgb,var(--lime) 10%,var(--input-bg))}
 .filter-count{display:inline-grid;place-items:center;min-width:17px;height:17px;margin-left:5px;padding:0 5px;
   border-radius:999px;background:var(--lime);color:var(--void);font-size:10px;font-weight:700}
-main{max-width:1600px;margin:0 auto;padding:0 32px 56px}
+main{max-width:1760px;margin:0 auto;padding:0 32px 56px}
 #list{overflow-x:auto;border:1px solid var(--obsidian);border-radius:14px;background:var(--carbon);
   box-shadow:0 16px 40px rgba(0,0,0,.08)}
 #lineageOverview{display:grid;gap:14px}.lineage-toolbar{display:flex;align-items:center;justify-content:space-between;gap:20px;padding:16px 18px;border:1px solid var(--obsidian);border-radius:14px;background:var(--carbon)}.lineage-toolbar h2{margin:0;color:var(--paper);font-size:15px;font-weight:650}.lineage-toolbar p{margin:3px 0 0;color:var(--ash);font-size:11px}.lineage-zero{display:grid;justify-items:center;gap:8px;padding:72px 20px;border:1px dashed var(--graphite);border-radius:14px;color:var(--ash);text-align:center}.lineage-zero strong{color:var(--mist);font-size:14px}.lineage-zero span{max-width:520px;font-size:12px}.detail-lineage{margin-top:12px}.lineage-loading{margin-top:12px;padding:28px;border:1px solid var(--obsidian);border-radius:12px;background:var(--carbon);color:var(--ash);text-align:center}
