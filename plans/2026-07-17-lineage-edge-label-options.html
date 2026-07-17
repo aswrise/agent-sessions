@@ -1,0 +1,273 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="light">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>关系链文件名布局方案</title>
+  <style>
+    :root{
+      --bg:#f4f5f7;--surface:#fff;--surface-2:#fafbfc;--line:#e5e7ec;--line-strong:#d7dae2;
+      --text:#17191f;--muted:#777e8e;--faint:#a8adba;--accent:#6377ed;--accent-wash:#eef0ff;
+      --shadow:0 12px 36px rgba(26,30,42,.09);--node-shadow:0 8px 22px rgba(26,30,42,.09);
+      --ease-out:cubic-bezier(.23,1,.32,1);color-scheme:light;
+    }
+    html[data-theme=dark]{
+      --bg:#0d0f14;--surface:#14161d;--surface-2:#11131a;--line:#242832;--line-strong:#343946;
+      --text:#f5f6fa;--muted:#8b91a1;--faint:#5e6473;--accent:#8b9cff;--accent-wash:#20253c;
+      --shadow:0 16px 46px rgba(0,0,0,.28);--node-shadow:0 10px 28px rgba(0,0,0,.24);color-scheme:dark;
+    }
+    *{box-sizing:border-box}
+    html{background:var(--bg)}
+    body{margin:0;background:radial-gradient(900px 420px at 14% -12%,color-mix(in srgb,var(--accent) 10%,transparent),transparent 68%),var(--bg);color:var(--text);font:400 14px/1.55 Inter,-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif}
+    button{font:inherit}
+    .page{max-width:1540px;margin:auto;padding:44px 28px 80px}
+    .top{display:flex;align-items:flex-start;justify-content:space-between;gap:28px;margin-bottom:24px}
+    .eyebrow{margin-bottom:8px;color:var(--accent);font:700 11px/1 ui-monospace,monospace;letter-spacing:.09em;text-transform:uppercase}
+    h1{margin:0;font-size:28px;line-height:1.2;letter-spacing:-.035em}
+    .intro{max-width:760px;margin:10px 0 0;color:var(--muted)}
+    .theme{flex:none;width:38px;height:34px;border:1px solid var(--line);border-radius:9px;background:var(--surface);color:var(--muted);cursor:pointer;transition:transform 120ms var(--ease-out),color 120ms ease,border-color 120ms ease}
+    .theme:active,.choose:active,.sample button:active{transform:scale(.97)}
+    .controlbar{position:sticky;top:12px;z-index:5;display:flex;align-items:center;justify-content:space-between;gap:16px;margin-bottom:22px;padding:10px 12px;border:1px solid color-mix(in srgb,var(--line-strong) 80%,transparent);border-radius:14px;background:color-mix(in srgb,var(--surface) 88%,transparent);box-shadow:var(--shadow);backdrop-filter:blur(18px) saturate(150%)}
+    .sample{display:flex;align-items:center;gap:3px;padding:3px;border:1px solid var(--line);border-radius:10px;background:var(--surface-2)}
+    .sample span{padding:0 8px;color:var(--faint);font-size:11px}
+    .sample button{padding:6px 10px;border:0;border-radius:7px;background:transparent;color:var(--muted);font-size:12px;cursor:pointer;transition:transform 120ms var(--ease-out),background-color 120ms ease,color 120ms ease}
+    .sample button.active{background:var(--surface);color:var(--text);box-shadow:0 1px 4px rgba(20,24,34,.12)}
+    .selection{color:var(--muted);font-size:12px}.selection strong{color:var(--accent)}
+    .option{margin-top:20px;border:1px solid var(--line);border-radius:18px;background:var(--surface);box-shadow:0 8px 26px rgba(26,30,42,.045);overflow:hidden}
+    .option.selected{border-color:color-mix(in srgb,var(--accent) 48%,var(--line))}
+    .option-head{display:grid;grid-template-columns:auto minmax(0,1fr) auto;align-items:start;gap:16px;padding:20px 22px;border-bottom:1px solid var(--line)}
+    .letter{display:grid;place-items:center;width:34px;height:34px;border-radius:10px;background:var(--accent-wash);color:var(--accent);font:750 13px ui-monospace,monospace}
+    .option h2{margin:0;font-size:16px;letter-spacing:-.015em}.option-desc{margin:5px 0 0;color:var(--muted);font-size:12.5px}
+    .flags{display:flex;flex-wrap:wrap;gap:6px;margin-top:10px}.flag{padding:3px 7px;border:1px solid var(--line);border-radius:999px;color:var(--muted);background:var(--surface-2);font:600 10px ui-monospace,monospace}
+    .flag.rec{border-color:color-mix(in srgb,var(--accent) 25%,var(--line));background:var(--accent-wash);color:var(--accent)}
+    .choose{height:32px;padding:0 11px;border:1px solid var(--line-strong);border-radius:8px;background:var(--surface);color:var(--muted);font-size:12px;cursor:pointer;transition:transform 120ms var(--ease-out),background-color 120ms ease,color 120ms ease,border-color 120ms ease}
+    .selected .choose{border-color:var(--accent);background:var(--accent);color:#fff}
+    .demos{display:grid;grid-template-columns:minmax(500px,.88fr) minmax(0,1.5fr);gap:0}
+    .demo{min-width:0;padding:20px}.demo+.demo{border-left:1px solid var(--line)}
+    .demo-title{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:12px;color:var(--muted);font-size:11px}.demo-title b{color:var(--text);font-size:12px}.demo-title span{font:500 10px ui-monospace,monospace}
+    .preview-shell{overflow:auto;border:1px solid var(--line);border-radius:13px;background:var(--surface-2)}
+    .preview-head{display:flex;align-items:center;justify-content:space-between;padding:10px 12px;border-bottom:1px solid var(--line);font-size:12px;font-weight:650}.preview-head span{color:var(--faint);font-size:10px;font-weight:500}
+    .preview-body{min-height:136px;padding:28px 18px 22px}
+    .graph-shell{overflow:auto;border:1px solid var(--line);border-radius:13px;background:var(--surface-2)}
+    .graph-head{display:flex;align-items:center;justify-content:space-between;padding:10px 12px;border-bottom:1px solid var(--line);font-size:11px;font-weight:650}.graph-head span{color:var(--faint);font:500 10px ui-monospace,monospace}
+    .graph-body{display:grid;gap:24px;min-height:264px;padding:26px 20px}
+    .flow{display:flex;align-items:center;width:max-content;min-width:100%}
+    .node{position:relative;z-index:2;flex:none;border:1px solid var(--line-strong);border-radius:11px;background:var(--surface);box-shadow:var(--node-shadow);color:var(--text)}
+    .node.mini{width:150px;height:54px;padding:7px 9px}.node.big{width:220px;height:66px;padding:9px 11px}
+    .node.current{border-color:var(--accent);box-shadow:0 0 0 3px color-mix(in srgb,var(--accent) 11%,transparent),var(--node-shadow)}
+    .badge{position:absolute;right:-6px;top:-9px;padding:2px 7px;border-radius:999px;background:var(--accent);color:#fff;font-size:9px;font-weight:750}
+    .node-top{display:flex;align-items:center;justify-content:space-between;margin-bottom:4px;color:var(--faint);font-size:8px;text-transform:uppercase}.tool{font:750 9px ui-monospace,monospace}.tool.codex{color:#8191f5}.tool.claude{color:#dc956e}
+    .node strong{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:11px}.node.big strong{font-size:12px}.node-id{display:block;margin-top:3px;color:var(--faint);font:9px ui-monospace,monospace}
+    .edge{position:relative;z-index:1;flex:none;display:grid;grid-template-columns:minmax(16px,1fr) auto minmax(18px,1fr);align-items:center;color:#aeb4c1}
+    .segment{height:1.5px;background:currentColor}.segment.end{position:relative}.segment.end::after{content:"";position:absolute;right:-1px;top:50%;width:0;height:0;border-top:4px solid transparent;border-bottom:4px solid transparent;border-left:7px solid currentColor;transform:translateY(-50%)}
+    .edge-label{position:relative;z-index:2;color:var(--muted);font-family:ui-monospace,"Cascadia Code",monospace;text-align:center}
+    .option-a .edge{min-width:96px;width:max-content}.option-a .edge-label{max-width:none;margin:0 10px;padding:3px 7px;border:1px solid var(--line);border-radius:6px;background:var(--surface);font-size:10px;white-space:nowrap;box-shadow:0 2px 8px rgba(20,24,34,.045)}
+    .option-a .graph-body .edge-label{font-size:10.5px}.option-a .graph-body .edge{min-width:110px}
+    .option-b .edge{width:260px;grid-template-columns:minmax(16px,1fr) 220px minmax(18px,1fr)}.option-b .edge-label{display:-webkit-box;overflow:hidden;margin:0 8px;padding:4px 8px;border:1px solid var(--line);border-radius:6px;background:var(--surface);font-size:10px;line-height:1.35;overflow-wrap:anywhere;-webkit-box-orient:vertical;-webkit-line-clamp:2}.option-b .preview-body .edge{width:250px;grid-template-columns:minmax(14px,1fr) 210px minmax(16px,1fr)}
+    .option-c .edge{width:205px;display:block;height:34px}.option-c .segment.start{position:absolute;left:0;right:0;top:23px}.option-c .segment.end{position:absolute;right:0;top:23px;width:52%}.option-c .edge-label{position:absolute;left:10px;right:10px;top:0;overflow:hidden;color:var(--muted);font-size:9.5px;text-overflow:ellipsis;white-space:nowrap}.option-c .preview-body .edge{width:190px}
+    .tradeoffs{display:grid;grid-template-columns:repeat(3,1fr);border-top:1px solid var(--line)}
+    .trade{padding:13px 18px}.trade+.trade{border-left:1px solid var(--line)}.trade b{display:block;margin-bottom:3px;font-size:11px}.trade span{color:var(--muted);font-size:11px}
+    .option-a .trade:first-child b,.option-b .trade:nth-child(2) b,.option-c .trade:nth-child(3) b{color:var(--accent)}
+    .footnote{margin:22px 2px 0;color:var(--muted);font-size:12px}
+    .footnote strong{color:var(--text)}
+    @media (hover:hover) and (pointer:fine){.theme:hover,.choose:hover{border-color:var(--accent);color:var(--accent)}.sample button:hover{color:var(--text)}.edge-label:hover{color:var(--text)}}
+    @media (max-width:980px){.demos{grid-template-columns:1fr}.demo+.demo{border-left:0;border-top:1px solid var(--line)}.tradeoffs{grid-template-columns:1fr}.trade+.trade{border-left:0;border-top:1px solid var(--line)}}
+    @media (max-width:640px){.page{padding:28px 12px 56px}.top{gap:12px}h1{font-size:23px}.controlbar{align-items:flex-start;flex-direction:column}.option-head{grid-template-columns:auto 1fr}.choose{grid-column:1/-1;width:100%}.demo{padding:14px}.sample span{display:none}}
+    @media (prefers-reduced-motion:reduce){.theme,.choose,.sample button{transition:color 120ms ease,border-color 120ms ease}.theme:active,.choose:active,.sample button:active{transform:none}}
+  </style>
+</head>
+<body>
+  <main class="page">
+    <header class="top">
+      <div>
+        <div class="eyebrow">Agent Sessions · Edge label study</div>
+        <h1>关系文件名如何拥有自己的空间</h1>
+        <p class="intro">三种方案使用完全相同的节点和文件名。切换样本，观察普通、长、极长文件名在悬浮预览与全局关系图中的真实取舍。</p>
+      </div>
+      <button class="theme" type="button" aria-label="切换明暗主题" title="切换明暗主题">◐</button>
+    </header>
+
+    <div class="controlbar">
+      <div class="sample" role="group" aria-label="文件名长度">
+        <span>文件名压力测试</span>
+        <button type="button" data-sample="normal">普通</button>
+        <button type="button" data-sample="long" class="active">长</button>
+        <button type="button" data-sample="extreme">极长</button>
+      </div>
+      <div class="selection" aria-live="polite">当前选择：<strong id="selection">尚未选择</strong></div>
+    </div>
+
+    <section class="option option-a" data-option="A">
+      <header class="option-head">
+        <span class="letter">A</span>
+        <div>
+          <h2>完整单行 · 弹性关系走廊</h2>
+          <p class="option-desc">文件名永不截断，关系走廊按内容自然增宽。节点层级稳定，只改变相邻节点列之间的距离。</p>
+          <div class="flags"><span class="flag rec">可读性最高</span><span class="flag">单行</span><span class="flag">横向滚动兜底</span></div>
+        </div>
+        <button class="choose" type="button">选择 A</button>
+      </header>
+      <div class="demos">
+        <div class="demo">
+          <div class="demo-title"><b>悬浮预览</b><span>150px nodes</span></div>
+          <div class="preview-shell">
+            <div class="preview-head">关系链 · 2 Sessions · 1 关系 <span>悬浮预览</span></div>
+            <div class="preview-body">
+              <div class="flow">
+                <div class="node mini current"><span class="badge">当前</span><div class="node-top"><span class="tool codex">codex</span><span>起点</span></div><strong>实施 prechecksubmit 晚上版本</strong></div>
+                <div class="edge"><i class="segment start"></i><span class="edge-label" data-edge="plan"></span><i class="segment end"></i></div>
+                <div class="node mini"><div class="node-top"><span class="tool claude">claude</span><span>下游</span></div><strong>prechecksubmit 晚上版本 quiz</strong></div>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div class="demo">
+          <div class="demo-title"><b>全局关系图</b><span>220px nodes · full labels</span></div>
+          <div class="graph-shell">
+            <div class="graph-head">链 5 · 5 Sessions · 5 关系 <span>按文件传递方向排列</span></div>
+            <div class="graph-body">
+              <div class="flow">
+                <div class="node big"><div class="node-top"><span class="tool codex">codex</span><span>起点</span></div><strong>定稿 submit 校验 plan</strong><span class="node-id">019f68a9-079e</span></div>
+                <div class="edge"><i class="segment start"></i><span class="edge-label" data-edge="plan"></span><i class="segment end"></i></div>
+                <div class="node big current"><div class="node-top"><span class="tool codex">codex</span><span>中游</span></div><strong>超绝重新设计 submit 前端校验</strong><span class="node-id">019f68cf-0dea</span></div>
+                <div class="edge"><i class="segment start"></i><span class="edge-label" data-edge="notes"></span><i class="segment end"></i></div>
+                <div class="node big"><div class="node-top"><span class="tool codex">codex</span><span>下游</span></div><strong>实施 prechecksubmit 晚上版本</strong><span class="node-id">019f6a3c-785a</span></div>
+              </div>
+              <div class="flow">
+                <div class="node big"><div class="node-top"><span class="tool claude">claude</span><span>起点</span></div><strong>开发地图审计</strong><span class="node-id">840b690c-a4ab</span></div>
+                <div class="edge"><i class="segment start"></i><span class="edge-label" data-edge="audit"></span><i class="segment end"></i></div>
+                <div class="node big"><div class="node-top"><span class="tool claude">claude</span><span>下游</span></div><strong>开发依赖解析 tool</strong><span class="node-id">2b53a166-5f19</span></div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="tradeoffs"><div class="trade"><b>最适合</b><span>必须完整阅读每个文件名</span></div><div class="trade"><b>代价</b><span>极长名称会显著拉宽画布</span></div><div class="trade"><b>边界</b><span>用横向滚动保持信息完整</span></div></div>
+    </section>
+
+    <section class="option option-b" data-option="B">
+      <header class="option-head">
+        <span class="letter">B</span>
+        <div>
+          <h2>两行标签 · 有界自适应</h2>
+          <p class="option-desc">走廊固定在可控上限内，长文件名允许两行；超过两行才明确省略，悬停显示完整路径。</p>
+          <div class="flags"><span class="flag rec">推荐平衡</span><span class="flag">最多两行</span><span class="flag">宽度稳定</span></div>
+        </div>
+        <button class="choose" type="button">选择 B</button>
+      </header>
+      <div class="demos">
+        <div class="demo">
+          <div class="demo-title"><b>悬浮预览</b><span>250px corridor</span></div>
+          <div class="preview-shell">
+            <div class="preview-head">关系链 · 2 Sessions · 1 关系 <span>悬浮预览</span></div>
+            <div class="preview-body">
+              <div class="flow">
+                <div class="node mini current"><span class="badge">当前</span><div class="node-top"><span class="tool codex">codex</span><span>起点</span></div><strong>实施 prechecksubmit 晚上版本</strong></div>
+                <div class="edge"><i class="segment start"></i><span class="edge-label" data-edge="plan"></span><i class="segment end"></i></div>
+                <div class="node mini"><div class="node-top"><span class="tool claude">claude</span><span>下游</span></div><strong>prechecksubmit 晚上版本 quiz</strong></div>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div class="demo">
+          <div class="demo-title"><b>全局关系图</b><span>260px corridors · 2 lines max</span></div>
+          <div class="graph-shell">
+            <div class="graph-head">链 5 · 5 Sessions · 5 关系 <span>按文件传递方向排列</span></div>
+            <div class="graph-body">
+              <div class="flow">
+                <div class="node big"><div class="node-top"><span class="tool codex">codex</span><span>起点</span></div><strong>定稿 submit 校验 plan</strong><span class="node-id">019f68a9-079e</span></div>
+                <div class="edge"><i class="segment start"></i><span class="edge-label" data-edge="plan"></span><i class="segment end"></i></div>
+                <div class="node big current"><div class="node-top"><span class="tool codex">codex</span><span>中游</span></div><strong>超绝重新设计 submit 前端校验</strong><span class="node-id">019f68cf-0dea</span></div>
+                <div class="edge"><i class="segment start"></i><span class="edge-label" data-edge="notes"></span><i class="segment end"></i></div>
+                <div class="node big"><div class="node-top"><span class="tool codex">codex</span><span>下游</span></div><strong>实施 prechecksubmit 晚上版本</strong><span class="node-id">019f6a3c-785a</span></div>
+              </div>
+              <div class="flow">
+                <div class="node big"><div class="node-top"><span class="tool claude">claude</span><span>起点</span></div><strong>开发地图审计</strong><span class="node-id">840b690c-a4ab</span></div>
+                <div class="edge"><i class="segment start"></i><span class="edge-label" data-edge="audit"></span><i class="segment end"></i></div>
+                <div class="node big"><div class="node-top"><span class="tool claude">claude</span><span>下游</span></div><strong>开发依赖解析 tool</strong><span class="node-id">2b53a166-5f19</span></div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="tradeoffs"><div class="trade"><b>最适合</b><span>日常浏览与密集关系图</span></div><div class="trade"><b>优势</b><span>常见长名称完整，画布增长可控</span></div><div class="trade"><b>代价</b><span>极端名称需要悬停读取全文</span></div></div>
+    </section>
+
+    <section class="option option-c" data-option="C">
+      <header class="option-head">
+        <span class="letter">C</span>
+        <div>
+          <h2>紧凑标注 · 中间省略</h2>
+          <p class="option-desc">保持现有图的紧凑度，标签独占走廊上方，不再被节点遮挡；长名称保留开头和扩展名。</p>
+          <div class="flags"><span class="flag">密度最高</span><span class="flag">单行省略</span><span class="flag">悬停全文</span></div>
+        </div>
+        <button class="choose" type="button">选择 C</button>
+      </header>
+      <div class="demos">
+        <div class="demo">
+          <div class="demo-title"><b>悬浮预览</b><span>190px corridor</span></div>
+          <div class="preview-shell">
+            <div class="preview-head">关系链 · 2 Sessions · 1 关系 <span>悬浮预览</span></div>
+            <div class="preview-body">
+              <div class="flow">
+                <div class="node mini current"><span class="badge">当前</span><div class="node-top"><span class="tool codex">codex</span><span>起点</span></div><strong>实施 prechecksubmit 晚上版本</strong></div>
+                <div class="edge"><i class="segment start"></i><span class="edge-label" data-edge="plan"></span><i class="segment end"></i></div>
+                <div class="node mini"><div class="node-top"><span class="tool claude">claude</span><span>下游</span></div><strong>prechecksubmit 晚上版本 quiz</strong></div>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div class="demo">
+          <div class="demo-title"><b>全局关系图</b><span>205px corridors · middle ellipsis</span></div>
+          <div class="graph-shell">
+            <div class="graph-head">链 5 · 5 Sessions · 5 关系 <span>按文件传递方向排列</span></div>
+            <div class="graph-body">
+              <div class="flow">
+                <div class="node big"><div class="node-top"><span class="tool codex">codex</span><span>起点</span></div><strong>定稿 submit 校验 plan</strong><span class="node-id">019f68a9-079e</span></div>
+                <div class="edge"><i class="segment start"></i><span class="edge-label" data-edge="plan"></span><i class="segment end"></i></div>
+                <div class="node big current"><div class="node-top"><span class="tool codex">codex</span><span>中游</span></div><strong>超绝重新设计 submit 前端校验</strong><span class="node-id">019f68cf-0dea</span></div>
+                <div class="edge"><i class="segment start"></i><span class="edge-label" data-edge="notes"></span><i class="segment end"></i></div>
+                <div class="node big"><div class="node-top"><span class="tool codex">codex</span><span>下游</span></div><strong>实施 prechecksubmit 晚上版本</strong><span class="node-id">019f6a3c-785a</span></div>
+              </div>
+              <div class="flow">
+                <div class="node big"><div class="node-top"><span class="tool claude">claude</span><span>起点</span></div><strong>开发地图审计</strong><span class="node-id">840b690c-a4ab</span></div>
+                <div class="edge"><i class="segment start"></i><span class="edge-label" data-edge="audit"></span><i class="segment end"></i></div>
+                <div class="node big"><div class="node-top"><span class="tool claude">claude</span><span>下游</span></div><strong>开发依赖解析 tool</strong><span class="node-id">2b53a166-5f19</span></div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="tradeoffs"><div class="trade"><b>最适合</b><span>一次浏览大量链</span></div><div class="trade"><b>优势</b><span>图宽稳定，节点不会被文字遮挡</span></div><div class="trade"><b>代价</b><span>长名称无法直接完整阅读</span></div></div>
+    </section>
+
+    <p class="footnote"><strong>共同规则：</strong>标签始终位于节点之外；完整绝对路径保留在悬停 title；不做节点重排动画，只保留按压反馈与悬停颜色。</p>
+  </main>
+  <script>
+    const samples = {
+      normal:{plan:"handoff.md",notes:"implementation-notes.md",audit:"coverage-audit.md"},
+      long:{plan:"035-submit预检-实施计划.md",notes:"035-submit必填预检端点-implementation-notes.md",audit:"035-submit-precheck-full-hard-validation-audit-2026-07-16.md"},
+      extreme:{plan:"035-submit预检-前端后端Assist三端权威覆盖矩阵与最终冻结实施计划-2026-07-16.md",notes:"035-submit必填预检端点-跨仓实现验证双轴审查与完整implementation-notes-2026-07-16.md",audit:"agent-sessions-lineage-adaptive-edge-label-collision-and-routing-visual-acceptance-report-2026-07-17.md"}
+    };
+    const middle = value => value.length <= 28 ? value : `${value.slice(0,16)}…${value.slice(-11)}`;
+    function showSample(name){
+      document.querySelectorAll("[data-sample]").forEach(button => button.classList.toggle("active",button.dataset.sample === name));
+      document.querySelectorAll("[data-edge]").forEach(label => {
+        const full = samples[name][label.dataset.edge];
+        label.textContent = label.closest(".option-c") ? middle(full) : full;
+        label.title = `/home/aquas/project1/.claude/plan/${full}`;
+      });
+    }
+    document.querySelectorAll("[data-sample]").forEach(button => button.addEventListener("click",() => showSample(button.dataset.sample)));
+    document.querySelectorAll(".choose").forEach(button => button.addEventListener("click",() => {
+      const option = button.closest(".option");
+      document.querySelectorAll(".option").forEach(item => item.classList.toggle("selected",item === option));
+      document.getElementById("selection").textContent = `方案 ${option.dataset.option}`;
+    }));
+    document.querySelector(".theme").addEventListener("click",() => {
+      document.documentElement.dataset.theme = document.documentElement.dataset.theme === "dark" ? "light" : "dark";
+    });
+    showSample("long");
+  </script>
+</body>
+</html>
