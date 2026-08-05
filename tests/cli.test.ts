@@ -28,7 +28,7 @@ describe("CLI process seam", () => {
     expect(listed.stdout).toContain("codex-b");
     expect(listed.stdout).toContain(process.platform === "win32"
       ? "Set-Location -LiteralPath '/tmp/beta'; if ($?) { & 'codex' 'resume' 'codex-b' '-m' 'gpt-fixture' }"
-      : "cd -- /tmp/beta && codex resume codex-b -m gpt-fixture");
+      : "cd -- /tmp/beta && codex resume codex-b -m gpt-fixture -c 'model_reasoning_effort=\"high\"'");
     expect(listed.stdout).not.toContain("pi-c");
 
     const found = await command(["find", "fixture", "-n", "10"]);
@@ -42,7 +42,7 @@ describe("CLI process seam", () => {
     expect(listed.exitCode).toBe(0);
     const listValue = JSON.parse(listed.stdout);
     expect(listValue.sessions).toHaveLength(2);
-    expect(listValue.sessions[0]).toMatchObject({ id: "codex-b", resume_command: "cd -- /tmp/beta && codex resume codex-b -m gpt-fixture" });
+    expect(listValue.sessions[0]).toMatchObject({ id: "codex-b", resume_command: "cd -- /tmp/beta && codex resume codex-b -m gpt-fixture -c 'model_reasoning_effort=\"high\"'" });
 
     const found = await command(["find", "FIXTURE-ASSISTANT-CODEX", "--json"]);
     expect(found.exitCode).toBe(0);
@@ -52,7 +52,7 @@ describe("CLI process seam", () => {
     const shown = await command(["show", "claude-", "--json"]);
     expect(shown.exitCode).toBe(0);
     const showValue = JSON.parse(shown.stdout);
-    expect(showValue).toMatchObject({ id: "claude-a", resume_command: "cd -- '/tmp/alpha project' && claude -r claude-a --model claude-fixture" });
+    expect(showValue).toMatchObject({ id: "claude-a", resume_command: "cd -- '/tmp/alpha project' && claude -r claude-a --model claude-fixture --effort medium" });
     expect(showValue.messages.map(({ text }: { text: string }) => text)).toEqual(["fixture-user-claude", "fixture-assistant-claude"]);
 
     const readable = await command(["show", "codex-"]);

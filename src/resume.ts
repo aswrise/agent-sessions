@@ -1,6 +1,6 @@
 import type { Tool } from "./contracts.ts";
 
-type ResumeInput = { tool: Tool; id: string; cwd: string; model?: string };
+type ResumeInput = { tool: Tool; id: string; cwd: string; model?: string; thinking_level?: string };
 
 function rejectNul(values: string[]): void {
   if (values.some((value) => value.includes("\0"))) throw new Error("resume command values cannot contain NUL");
@@ -13,10 +13,10 @@ function posix(value: string): string {
 
 const powershell = (value: string): string => `'${value.replaceAll("'", "''")}'`;
 
-function args({ tool, id, model = "" }: ResumeInput): string[] {
-  if (tool === "codex") return ["codex", "resume", id, ...(model ? ["-m", model] : [])];
+function args({ tool, id, model = "", thinking_level = "" }: ResumeInput): string[] {
+  if (tool === "codex") return ["codex", "resume", id, ...(model ? ["-m", model] : []), ...(thinking_level ? ["-c", `model_reasoning_effort=${JSON.stringify(thinking_level)}`] : [])];
   if (tool === "pi") return ["pi", "--session", id, ...(model ? ["--model", model] : [])];
-  return ["claude", "-r", id, ...(model ? ["--model", model] : [])];
+  return ["claude", "-r", id, ...(model ? ["--model", model] : []), ...(thinking_level ? ["--effort", thinking_level] : [])];
 }
 
 export function formatResumeCommand(input: ResumeInput, platform: NodeJS.Platform = process.platform): string {

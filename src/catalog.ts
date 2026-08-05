@@ -31,8 +31,9 @@ type Metadata = {
   birth: number | undefined;
   upstream_name: string;
   model: string;
+  thinking_level: string;
 };
-type ParsedMetadata = Omit<Metadata, "model"> & { model?: string };
+type ParsedMetadata = Omit<Metadata, "model" | "thinking_level"> & { model?: string; thinking_level?: string };
 type Located = { adapter: Adapter; path: string; stat: Stats };
 type Mark = {
   starred?: boolean;
@@ -222,13 +223,14 @@ async function setCodexSessionName(executable: string | null, codexHome: string,
   }
 }
 
-function tailModel(path: string, tool: Tool): string {
+function tailMetadata(path: string, tool: Tool): Pick<Metadata, "model" | "thinking_level"> {
   let size: number;
   try {
     size = statSync(path).size;
   } catch {
-    return "";
+    return { model: "", thinking_level: "" };
   }
+  let model = "";
   const fd = openSync(path, "r");
   try {
     for (const window of [65_536, 1_048_576, 4_194_304]) {
@@ -238,21 +240,29 @@ function tailModel(path: string, tool: Tool): string {
       const text = buffer.toString("utf8");
       if (tool === "pi") {
         const pairs = [...text.matchAll(/"provider":"([^"]+)","modelId":"([^"]+)"/g)];
-        if (pairs.length) return `${pairs.at(-1)![1]}/${pairs.at(-1)![2]}`;
+        if (pairs.length) return { model: `${pairs.at(-1)![1]}/${pairs.at(-1)![2]}`, thinking_level: "" };
         const ids = [...text.matchAll(/"modelId":"([^"]+)"/g)];
-        if (ids.length) return ids.at(-1)![1]!;
+        if (ids.length) return { model: ids.at(-1)![1]!, thinking_level: "" };
       } else {
         const models = [...text.matchAll(/"model":"([^"]+)"/g)]
           .map((match) => match[1]!)
           .filter((model) => !model.startsWith("<"));
-        if (models.length) return models.at(-1)!;
+        model ||= models.at(-1) ?? "";
+        const record = text.split(/\r?\n/).reverse().map(parseRecord).find((record) =>
+          tool === "codex" ? record?.type === "turn_context" : typeof record?.effort === "string");
+        const thinking_level = tool === "codex" && isRecord(record?.payload)
+          ? stringValue(record.payload.effort) : stringValue(record?.effort);
+        if ((model || thinking_level) && (tool !== "codex" || record)) return {
+          model,
+          thinking_level,
+        };
       }
       if (length === size) break;
     }
   } finally {
     closeSync(fd);
   }
-  return "";
+  return { model, thinking_level: "" };
 }
 
 abstract class JsonlAdapter implements Adapter {
@@ -827,6 +837,7 @@ export class SessionCatalog {
         birth: metadata.birth ?? file.stat.mtimeMs / 1000,
         size_kb: Math.floor(file.stat.size / 1024),
         model: metadata.model,
+        ...(metadata.thinking_level ? { thinking_level: metadata.thinking_level } : {}),
         starred: isStarred(mark),
         star_note: mark?.note ?? "",
         archived: Boolean(mark?.archived),
@@ -844,7 +855,8 @@ export class SessionCatalog {
     const previous = this.metadata.get(key);
     if (previous?.signature === signature) return previous.value;
     const parsed = file.adapter.parse(file.path);
-    const value = parsed ? { ...parsed, model: parsed.model || tailModel(file.path, file.adapter.tool) } : null;
+    const tail = parsed ? tailMetadata(file.path, file.adapter.tool) : undefined;
+    const value = parsed ? { ...parsed, model: parsed.model || tail!.model, thinking_level: parsed.thinking_level || tail!.thinking_level } : null;
     this.metadata.set(key, { signature, value });
     return value;
   }

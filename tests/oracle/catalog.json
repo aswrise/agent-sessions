@@ -33,6 +33,7 @@
       "star_note": "",
       "starred": false,
       "status": "review",
+      "thinking_level": "high",
       "tool": "codex"
     },
     {
@@ -48,6 +49,7 @@
       "star_note": "legacy note",
       "starred": true,
       "status": "",
+      "thinking_level": "medium",
       "tool": "claude"
     }
   ],

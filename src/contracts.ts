@@ -15,6 +15,7 @@ export interface Session {
   birth: number;
   size_kb: number;
   model: string;
+  thinking_level?: string;
   starred: boolean;
   star_note: string;
   archived: boolean;

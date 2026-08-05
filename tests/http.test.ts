@@ -23,6 +23,16 @@ describe("resume commands", () => {
     expect(formatResumeCommand(session, "win32")).toBe("Set-Location -LiteralPath '/tmp/a b''s'; if ($?) { & 'pi' '--session' 'id''; touch nope' '--model' 'provider/model x' }");
     expect(() => formatResumeCommand({ ...session, id: "bad\0id" }, "linux")).toThrow("NUL");
   });
+
+  test("restores Codex thinking level", () => {
+    expect(formatResumeCommand({ tool: "codex", id: "codex-id", cwd: "/tmp", model: "gpt-fixture", thinking_level: "high" }, "linux"))
+      .toBe("cd -- /tmp && codex resume codex-id -m gpt-fixture -c 'model_reasoning_effort=\"high\"'");
+  });
+
+  test("restores Claude effort", () => {
+    expect(formatResumeCommand({ tool: "claude", id: "claude-id", cwd: "/tmp", model: "claude-fixture", thinking_level: "medium" }, "linux"))
+      .toBe("cd -- /tmp && claude -r claude-id --model claude-fixture --effort medium");
+  });
 });
 
 describe("Bun HTTP seam", () => {
@@ -41,7 +51,7 @@ describe("Bun HTTP seam", () => {
     const detail = await (await fetch(base + "/api/session?id=codex-b")).json();
     expect(detail.id).toBe("codex-b");
     expect(detail.messages).toHaveLength(2);
-    expect(detail.resume_command).toBe("cd -- /tmp/beta && codex resume codex-b -m gpt-fixture");
+    expect(detail.resume_command).toBe("cd -- /tmp/beta && codex resume codex-b -m gpt-fixture -c 'model_reasoning_effort=\"high\"'");
   });
 
   test("validates routes and applies mutations", async () => {
@@ -67,7 +77,7 @@ describe("Bun HTTP seam", () => {
     expect(response.status).toBe(200);
     expect(await response.json()).toMatchObject({
       total: 1,
-      results: [{ id: "codex-b", snippet: "fixture-assistant-codex", resume_command: "cd -- /tmp/beta && codex resume codex-b -m gpt-fixture" }],
+      results: [{ id: "codex-b", snippet: "fixture-assistant-codex", resume_command: "cd -- /tmp/beta && codex resume codex-b -m gpt-fixture -c 'model_reasoning_effort=\"high\"'" }],
     });
     expect(await (await fetch(base + "/api/lineages")).json()).toEqual({ sessions: [], edges: [] });
     expect((await fetch(base + "/api/search")).status).toBe(400);
@@ -85,7 +95,7 @@ describe("Bun HTTP seam", () => {
     const response = await fetch(base + "/api/lineage?id=codex-b&refresh=0");
     expect(response.status).toBe(200);
     expect(await response.json()).toMatchObject({
-      sessions: [{ id: "codex-b", resume_command: "cd -- /tmp/beta && codex resume codex-b -m gpt-fixture" }],
+      sessions: [{ id: "codex-b", resume_command: "cd -- /tmp/beta && codex resume codex-b -m gpt-fixture -c 'model_reasoning_effort=\"high\"'" }],
       edges: [],
     });
     expect((await fetch(base + "/api/lineage")).status).toBe(400);
