@@ -4,7 +4,9 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue"
 import LineageGraph from "./LineageGraph.vue";
 import LineagePreview from "./LineagePreview.vue";
 import { lineageComponents } from "./lineageLayout.ts";
+import { compareModels, shortModel } from "./models.ts";
 import {
+  isTool,
   parseLineageRefresh,
   parseLineageView,
   parseSearchEnvelope,
@@ -21,7 +23,7 @@ import {
 type Tab = "" | Tool | "__star__" | "__chain__" | "__arch__";
 type SearchMode = "normal" | "deep";
 type ViewMode = "sessions" | "lineage";
-type SortKey = keyof Pick<SessionView, "starred" | "mtime" | "birth" | "tool" | "model" | "name" | "star_note" | "status" | "first_msg" | "cwd" | "size_kb">;
+type SortKey = keyof Pick<SessionView, "starred" | "mtime" | "model" | "name" | "status" | "cwd">;
 type MenuItem = { value: string; label: string };
 type MenuState = {
   key: string;
@@ -39,6 +41,7 @@ type ChainInfo = { chainKey: string; size: number; view: LineageView };
 type LineagePreviewState = { row: SessionView; info: ChainInfo; anchor: HTMLElement; pinned: boolean; style: Record<string, string> };
 
 const PAGE_SIZE = 100;
+const MODEL_CHIP_LIMIT = 20;
 const markdown = new MarkdownIt({ breaks: true, html: false, linkify: true });
 const statusMeta: Record<SessionStatus, { label: string; color: string }> = {
   "": { label: "无", color: "var(--ash)" },
@@ -69,6 +72,8 @@ const deepTotal = ref(0);
 const deepIds = ref(new Set<string>());
 const deepSnippets = ref(new Map<string, string>());
 const path = ref("");
+const model = ref("");
+const modelExpanded = ref(false);
 const status = ref<SessionStatus>("");
 const updatedFrom = ref("");
 const updatedTo = ref("");
@@ -118,18 +123,10 @@ let globalLineageRequest: Promise<void> | undefined;
 let suppressLineageFocusOpen = false;
 
 function savedWidths(): number[] {
-  for (const key of ["colw6", "colw5", "column-widths"]) {
-    try {
-      const saved = localStorage.getItem(key);
-      if (!saved) continue;
-      const value: unknown = JSON.parse(saved);
-      if (Array.isArray(value)) {
-        const widths = value.map((width) => typeof width === "number" && Number.isFinite(width) && width >= 36 ? width : 0);
-        if (key !== "colw6") widths.splice(11, 0, 0);
-        return widths;
-      }
-    } catch {}
-  }
+  try {
+    const value: unknown = JSON.parse(localStorage.getItem("colw7") ?? "");
+    if (Array.isArray(value)) return value.map((width) => typeof width === "number" && Number.isFinite(width) && width >= 36 ? width : 0);
+  } catch {}
   return [];
 }
 const widths = ref(savedWidths());
@@ -181,6 +178,19 @@ const tabCounts = computed<Record<Tab, number>>(() => ({
   __arch__: rows.value.filter((row) => row.archived).length,
 }));
 
+const modelChips = computed(() => {
+  if (!isTool(tab.value)) return [];
+  const counts = new Map<string, number>();
+  for (const row of rows.value) {
+    if (row.archived || row.tool !== tab.value) continue;
+    counts.set(row.model, (counts.get(row.model) ?? 0) + 1);
+  }
+  return [...counts]
+    .sort(([left], [right]) => compareModels(left, right))
+    .map(([value, count]) => ({ value, label: shortModel(value), count }));
+});
+const visibleModelChips = computed(() => modelExpanded.value ? modelChips.value : modelChips.value.slice(0, MODEL_CHIP_LIMIT));
+
 const pathItems = computed<MenuItem[]>(() => {
   const counts = new Map<string, number>();
   for (const row of rows.value) counts.set(row.cwd, (counts.get(row.cwd) ?? 0) + 1);
@@ -208,7 +218,8 @@ const filtered = computed(() => {
     if (tab.value === "__arch__" ? !row.archived : row.archived) return false;
     if (tab.value === "__star__" && !row.starred) return false;
     if (tab.value === "__chain__" && !chainInfo.value.has(row.id)) return false;
-    if (["claude", "codex", "pi"].includes(tab.value) && row.tool !== tab.value) return false;
+    if (isTool(tab.value) && row.tool !== tab.value) return false;
+    if (model.value && row.model !== model.value) return false;
     if (path.value && row.cwd !== path.value) return false;
     if (status.value && row.status !== status.value) return false;
     if (fromUpdate && row.mtime < fromUpdate || toUpdate && row.mtime > toUpdate) return false;
@@ -232,7 +243,7 @@ const footerText = computed(() => {
   const start = (page.value - 1) * PAGE_SIZE;
   const range = pages.value > 1 ? `显示第 ${start + 1}-${start + visible.value.length} 行，共 ${total} 个匹配` : `${total} 个匹配`;
   const deep = searchMode.value === "deep" && deepSearched.value && deepTotal.value > total ? `，深度检索共 ${deepTotal.value} 个` : "";
-  return `${range}${deep}。点击行复制恢复命令，点详情打开详情页，首条消息悬停预览对话`;
+  return `${range}${deep}。点击行复制恢复命令，悬停行显示操作，首条消息悬停预览对话`;
 });
 
 watch(keyword, (value) => {
@@ -244,7 +255,7 @@ watch(keyword, (value) => {
   }
   searchTimer = setTimeout(() => { effectiveKeyword.value = value; }, 120);
 });
-watch([path, status, updatedFrom, updatedTo, createdFrom, createdTo, sizeMin, sizeMax], () => { page.value = 1; });
+watch([path, model, status, updatedFrom, updatedTo, createdFrom, createdTo, sizeMin, sizeMax], () => { page.value = 1; });
 watch(pages, (value) => { page.value = value ? Math.min(page.value, value) : 1; });
 
 function shortPath(value: string): string {
@@ -444,6 +455,8 @@ function editKeydown(row: SessionView, field: Editing["field"], event: KeyboardE
 
 function setTab(value: Tab): void {
   tab.value = value;
+  model.value = "";
+  modelExpanded.value = false;
   page.value = 1;
   closeMenu();
 }
@@ -474,6 +487,8 @@ function clearFilters(): void {
   updatedFrom.value = updatedTo.value = createdFrom.value = createdTo.value = "";
   sizeMin.value = sizeMax.value = "";
   tab.value = "";
+  model.value = "";
+  modelExpanded.value = false;
   page.value = 1;
   advanced.value = false;
   resetDeepSearch();
@@ -870,7 +885,7 @@ function resize(index: number, event: PointerEvent): void {
     window.removeEventListener("pointermove", move);
     window.removeEventListener("pointerup", up);
     handle.classList.remove("on");
-    localStorage.setItem("colw6", JSON.stringify(widths.value.map((width) => width || null)));
+    localStorage.setItem("colw7", JSON.stringify(widths.value.map((width) => width || null)));
   };
   window.addEventListener("pointermove", move);
   window.addEventListener("pointerup", up);
@@ -979,6 +994,15 @@ onBeforeUnmount(() => {
       <button id="reload" type="button" class="f act" title="重新扫描 session 数据" :disabled="loading || refreshing" @click="load(true)">{{ refreshing ? "刷新中…" : "刷新" }}</button>
       <button id="theme" type="button" class="f act" :title="theme === 'dark' ? '切换到浅色主题' : '切换到深色主题'" :aria-label="theme === 'dark' ? '切换到浅色主题' : '切换到深色主题'" @click="toggleTheme">{{ theme === "dark" ? "☀︎" : "☾" }}</button>
     </div>
+    <div v-if="modelChips.length" id="modelChips" class="bar3">
+      <span class="bar3-label">模型</span>
+      <button type="button" class="chip" :class="{ on: !model }" :aria-pressed="!model" @click="model = ''">全部<span class="n">{{ tabCounts[tab] }}</span></button>
+      <button v-for="item in visibleModelChips" :key="item.value" type="button" class="chip" :class="{ on: model === item.value }" :aria-pressed="model === item.value" :title="item.value || '无模型'" @click="model = item.value">
+        {{ item.label }}<span class="n">{{ item.count }}</span>
+      </button>
+      <button v-if="modelChips.length > visibleModelChips.length" type="button" class="chip more" @click="modelExpanded = true">更多 {{ modelChips.length - visibleModelChips.length }}</button>
+      <button v-else-if="modelExpanded" type="button" class="chip more" @click="modelExpanded = false">收起</button>
+    </div>
     <div v-show="advanced" id="advancedFilters" class="bar2">
       <label>更新</label><input v-model="updatedFrom" type="date" aria-label="更新起始" /> - <input v-model="updatedTo" type="date" aria-label="更新截止" />
       <label>创建</label><input v-model="createdFrom" type="date" aria-label="创建起始" /> - <input v-model="createdTo" type="date" aria-label="创建截止" />
@@ -1008,55 +1032,63 @@ onBeforeUnmount(() => {
     <section v-else-if="!detail && !detailError && !detailLoading" id="list" aria-label="Session 列表">
       <table>
         <colgroup>
-          <col v-for="(className, index) in ['c-star','c-date','c-date','c-tool','c-model','c-name','c-note','c-stat','','c-path','c-size','c-lineage','c-detail','c-archive','c-source']" :key="index" :class="className" :style="widths[index] ? { width: `${widths[index]}px` } : undefined" />
+          <col v-for="(className, index) in ['c-star','c-date','c-model','','c-stat','c-path','c-ops']" :key="index" :class="className" :style="widths[index] ? { width: `${widths[index]}px` } : undefined" />
         </colgroup>
         <thead><tr>
           <th v-for="(column, index) in [
-            { key: 'starred', label: '★', className: 'action-head' }, { key: 'mtime', label: '更新' }, { key: 'birth', label: '创建' },
-            { key: 'tool', label: '工具' }, { key: 'model', label: '模型' }, { key: 'name', label: '名称' }, { key: 'star_note', label: '备注' },
-            { key: 'status', label: '状态' }, { key: 'first_msg', label: '首条消息' }, { key: 'cwd', label: '路径' }, { key: 'size_kb', label: '大小', className: 'num' },
+            { key: 'starred', label: '★', className: 'action-head' }, { key: 'mtime', label: '更新' }, { key: 'model', label: '模型' },
+            { key: 'name', label: '会话' }, { key: 'status', label: '状态' }, { key: 'cwd', label: '路径' },
           ]" :key="column.key" :class="['className' in column ? column.className : '', sortKey === column.key ? (sortAscending ? 's-asc' : 's-desc') : '']" @click="sort(column.key as SortKey)">
             {{ column.label }}<span class="rs" @pointerdown="resize(index, $event)" />
           </th>
-          <th title="预览 Session 关系链" class="action-head">关系</th>
-          <th title="详情" class="action-head">详情<span class="rs" @pointerdown="resize(12, $event)" /></th>
-          <th title="归档" class="action-head">归档</th>
-          <th title="复制源文件路径" class="action-head">源文件</th>
+          <th class="action-head">操作</th>
         </tr></thead>
         <tbody>
-          <tr v-if="loading"><td colspan="15"><div class="empty">加载中...</div></td></tr>
-          <tr v-else-if="!filtered.length"><td colspan="15"><div class="empty">没有匹配的 session，试试更短的关键词或切换筛选</div></td></tr>
+          <tr v-if="loading"><td colspan="7"><div class="empty">加载中...</div></td></tr>
+          <tr v-else-if="!filtered.length"><td colspan="7"><div class="empty">没有匹配的 session，试试更短的关键词或切换筛选</div></td></tr>
           <tr v-for="row in visible" v-else :key="row.id" class="row" :class="{ starred: row.starred, archived: row.archived, pending: pending.has(row.id) }" tabindex="0" @click="copy(row)" @keydown.enter="copy(row)">
             <td class="starcell"><button type="button" class="rowbtn starbtn" :disabled="pending.has(row.id)" :aria-label="row.starred ? '取消标记' : '标记重要'" :title="row.starred ? '取消标记' : '标记重要'" @click.stop="toggleStar(row)">{{ row.starred ? "★" : "☆" }}</button></td>
-            <td class="dt" @mouseenter="showTextPreview($event, `${row.id}:mtime`, formatDate(row.mtime))" @mouseleave="schedulePreviewHide">{{ formatDate(row.mtime) }}</td>
-            <td class="dt" @mouseenter="showTextPreview($event, `${row.id}:birth`, formatDate(row.birth))" @mouseleave="schedulePreviewHide">{{ formatDate(row.birth) }}</td>
-            <td class="tool"><span class="tool-pill" :class="row.tool">{{ row.tool }}</span></td>
-            <td class="tool" @mouseenter="showTextPreview($event, `${row.id}:model`, row.model)" @mouseleave="schedulePreviewHide">{{ row.model }}</td>
-            <td class="namecell nm" @click.stop="startEdit(row, 'name')">
-              <input v-if="editing?.id === row.id && editing.field === 'name'" v-model="editValue" class="cell-input" :data-edit="`${row.id}:name`" aria-label="名称" @click.stop @keydown="editKeydown(row, 'name', $event)" @blur="finishEdit(row, 'name', true)" />
-              <span v-else class="name-text" @mouseenter="showTextPreview($event, `${row.id}:name`, row.name)" @mouseleave="schedulePreviewHide">{{ row.name }}</span>
+            <td class="dt" @mouseenter="showTextPreview($event, `${row.id}:mtime`, `更新 ${formatDate(row.mtime)}　创建 ${formatDate(row.birth)}　${formatSize(row.size_kb)}`)" @mouseleave="schedulePreviewHide">{{ formatDate(row.mtime) }}</td>
+            <td class="modelcell" @mouseenter="showTextPreview($event, `${row.id}:model`, row.model || '无模型')" @mouseleave="schedulePreviewHide">
+              <span class="tool-pill" :class="row.tool">{{ row.tool }}</span><span class="model-name">{{ shortModel(row.model) }}</span>
             </td>
-            <td class="notecell" @click.stop="startEdit(row, 'star_note')" @mouseenter="showTextPreview($event, `${row.id}:note`, row.star_note)" @mouseleave="schedulePreviewHide">
-              <input v-if="editing?.id === row.id && editing.field === 'star_note'" v-model="editValue" class="cell-input" :data-edit="`${row.id}:star_note`" aria-label="备注" @click.stop @keydown="editKeydown(row, 'star_note', $event)" @blur="finishEdit(row, 'star_note', true)" />
-              <template v-else>{{ row.star_note }}</template>
+            <td class="sessioncell">
+              <div class="line1">
+                <span class="nm" @click.stop="startEdit(row, 'name')">
+                  <input v-if="editing?.id === row.id && editing.field === 'name'" v-model="editValue" class="cell-input" :data-edit="`${row.id}:name`" aria-label="名称" @click.stop @keydown="editKeydown(row, 'name', $event)" @blur="finishEdit(row, 'name', true)" />
+                  <span v-else class="name-text" @mouseenter="showTextPreview($event, `${row.id}:name`, row.name)" @mouseleave="schedulePreviewHide">{{ row.name }}</span>
+                </span>
+                <span class="note-slot" :title="row.star_note || '添加备注'" @click.stop="startEdit(row, 'star_note')">
+                  <input v-if="editing?.id === row.id && editing.field === 'star_note'" v-model="editValue" class="cell-input" :data-edit="`${row.id}:star_note`" aria-label="备注" @click.stop @keydown="editKeydown(row, 'star_note', $event)" @blur="finishEdit(row, 'star_note', true)" />
+                  <template v-else>{{ row.star_note }}</template>
+                </span>
+              </div>
+              <div class="line2 msg" @mouseenter="showTranscriptPreview(row, $event)" @mouseleave="schedulePreviewHide">{{ messageText(row) }}</div>
             </td>
             <td><button type="button" class="status statusbtn" aria-haspopup="listbox" :aria-expanded="menu?.key === `status:${row.id}`" :style="{ '--sc': statusMeta[row.status].color }" @click.stop="openRowStatus(row, $event)"><span :class="{ none: !row.status }">{{ statusMeta[row.status].label }}</span></button></td>
-            <td class="msg" @mouseenter="showTranscriptPreview(row, $event)" @mouseleave="schedulePreviewHide">{{ messageText(row) }}</td>
             <td class="p" @mouseenter="showTextPreview($event, `${row.id}:path`, shortPath(row.cwd))" @mouseleave="schedulePreviewHide">{{ shortPath(row.cwd) }}</td>
-            <td class="num sz">{{ formatSize(row.size_kb) }}</td>
-            <td class="lineagecell">
-              <button v-if="chainInfo.get(row.id)" type="button" class="chain-chip" :aria-label="`所在关系链，共 ${chainInfo.get(row.id)!.size} 个 Session，查看整条链`"
-                :title="`所在关系链，共 ${chainInfo.get(row.id)!.size} 个 Session，查看整条链`" aria-haspopup="dialog" aria-controls="lineage-preview"
-                :aria-expanded="lineagePreview?.row.id === row.id" @mouseenter="scheduleLineagePreview(row, $event)" @mouseleave="scheduleLineagePreviewHide"
-                @focus="focusLineagePreview(row, $event)" @blur="scheduleLineagePreviewHide" @click.stop="toggleLineagePreview(row, $event)" @keydown.stop @keydown.tab="enterPinnedLineagePreview" @keydown.esc.prevent="closeLineagePreview(true)">
-                <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><path d="M6.4 5.1 5.2 3.9a2.4 2.4 0 0 0-3.4 3.4l1.7 1.7a2.4 2.4 0 0 0 3.4 0l1.2-1.2M9.6 10.9l1.2 1.2a2.4 2.4 0 0 0 3.4-3.4L12.5 7a2.4 2.4 0 0 0-3.4 0L7.9 8.2" /></svg>
-                预览 {{ chainInfo.get(row.id)!.size }}
-              </button>
-              <span v-else class="lineage-empty">—</span>
+            <td class="opscell">
+              <div class="ops">
+                <button v-if="chainInfo.get(row.id)" type="button" class="iconbtn chainbtn" :aria-label="`所在关系链，共 ${chainInfo.get(row.id)!.size} 个 Session，查看整条链`"
+                  :title="`所在关系链，共 ${chainInfo.get(row.id)!.size} 个 Session，查看整条链`" aria-haspopup="dialog" aria-controls="lineage-preview"
+                  :aria-expanded="lineagePreview?.row.id === row.id" @mouseenter="scheduleLineagePreview(row, $event)" @mouseleave="scheduleLineagePreviewHide"
+                  @focus="focusLineagePreview(row, $event)" @blur="scheduleLineagePreviewHide" @click.stop="toggleLineagePreview(row, $event)" @keydown.stop @keydown.tab="enterPinnedLineagePreview" @keydown.esc.prevent="closeLineagePreview(true)">
+                  <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><path d="M6.4 5.1 5.2 3.9a2.4 2.4 0 0 0-3.4 3.4l1.7 1.7a2.4 2.4 0 0 0 3.4 0l1.2-1.2M9.6 10.9l1.2 1.2a2.4 2.4 0 0 0 3.4-3.4L12.5 7a2.4 2.4 0 0 0-3.4 0L7.9 8.2" /></svg>
+                  <span class="n">{{ chainInfo.get(row.id)!.size }}</span>
+                </button>
+                <button type="button" class="iconbtn hoveronly" title="打开详情页" aria-label="打开详情页" @click.stop="openDetail(row.id)">
+                  <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M1.5 8S3.9 3.6 8 3.6 14.5 8 14.5 8 12.1 12.4 8 12.4 1.5 8 1.5 8Z" /><circle cx="8" cy="8" r="2" /></svg>
+                </button>
+                <button type="button" class="iconbtn hoveronly" :disabled="pending.has(row.id)" :title="row.archived ? '解除归档' : '归档（在“已归档”视图可找回）'" :aria-label="row.archived ? '解除归档' : '归档'" @click.stop="toggleArchive(row)">
+                  <svg v-if="row.archived" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M8 13.2V4.4M4.6 7.4 8 4 11.4 7.4M2.6 13.4h10.8" /></svg>
+                  <svg v-else viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M1.8 4.6h12.4v8.1H1.8zM1.2 4.6 2.6 2.4h10.8l1.4 2.2M6.4 7.6h3.2" /></svg>
+                </button>
+                <button type="button" class="iconbtn hoveronly" :class="{ copied: copiedPathId === row.id }" title="复制源文件路径" aria-label="复制源文件路径" aria-live="polite" @click.stop="copySourcePath(row)">
+                  <svg v-if="copiedPathId === row.id" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.9" aria-hidden="true"><path d="m3.4 8.4 3 3 6.2-6.6" /></svg>
+                  <svg v-else viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><rect x="5.4" y="5.4" width="8.2" height="8.2" rx="1.6" /><path d="M10.6 5.4V3.9a1.6 1.6 0 0 0-1.6-1.6H3.9a1.6 1.6 0 0 0-1.6 1.6V9a1.6 1.6 0 0 0 1.6 1.6h1.5" /></svg>
+                </button>
+              </div>
             </td>
-            <td class="detailcell"><button type="button" class="rowbtn detailbtn" title="打开详情页" @click.stop="openDetail(row.id)">查看</button></td>
-            <td class="archcell"><button type="button" class="rowbtn archivebtn" :disabled="pending.has(row.id)" :title="row.archived ? '解除归档' : '归档（在“已归档”视图可找回）'" @click.stop="toggleArchive(row)">{{ row.archived ? "恢复" : "归档" }}</button></td>
-            <td class="sourcecell"><button type="button" class="rowbtn sourcebtn" title="复制源文件路径" aria-live="polite" @click.stop="copySourcePath(row)">{{ copiedPathId === row.id ? "已复制" : "复制路径" }}</button></td>
           </tr>
         </tbody>
       </table>
@@ -1198,10 +1230,9 @@ main{max-width:1760px;margin:0 auto;padding:0 32px 56px}
 #list{overflow-x:auto;border:1px solid var(--obsidian);border-radius:14px;background:var(--carbon);
   box-shadow:0 16px 40px rgba(0,0,0,.08)}
 #lineageOverview{display:grid;gap:14px}.lineage-toolbar{display:flex;align-items:center;justify-content:space-between;gap:20px;padding:16px 18px;border:1px solid var(--obsidian);border-radius:14px;background:var(--carbon)}.lineage-toolbar h2{margin:0;color:var(--paper);font-size:15px;font-weight:650}.lineage-toolbar p{margin:3px 0 0;color:var(--ash);font-size:11px}.lineage-zero{display:grid;justify-items:center;gap:8px;padding:72px 20px;border:1px dashed var(--graphite);border-radius:14px;color:var(--ash);text-align:center}.lineage-zero strong{color:var(--mist);font-size:14px}.lineage-zero span{max-width:520px;font-size:12px}.detail-lineage{margin-top:12px}.lineage-loading{margin-top:12px;padding:28px;border:1px solid var(--obsidian);border-radius:12px;background:var(--carbon);color:var(--ash);text-align:center}
-table{width:100%;min-width:1650px;border-collapse:collapse;table-layout:fixed}
-col.c-star{width:36px}col.c-date{width:92px}col.c-tool{width:70px}
-col.c-name{width:230px}col.c-note{width:120px}col.c-path{width:180px}col.c-size{width:70px}
-col.c-lineage{width:80px}col.c-detail{width:58px}col.c-archive{width:66px}col.c-source{width:80px}
+table{width:100%;min-width:1040px;border-collapse:collapse;table-layout:fixed}
+col.c-star{width:36px}col.c-date{width:92px}col.c-model{width:158px}
+col.c-stat{width:116px}col.c-path{width:190px}col.c-ops{width:128px}
 .select-button{display:inline-flex;align-items:center;justify-content:space-between;gap:8px;max-width:240px;height:34px;
   padding:0 10px;border:1px solid var(--input-line);border-radius:9px;background:var(--input-bg);
   color:var(--fog);font:inherit;font-size:12px;cursor:pointer;white-space:nowrap}
@@ -1211,6 +1242,18 @@ col.c-lineage{width:80px}col.c-detail{width:58px}col.c-archive{width:66px}col.c-
 .select-button[aria-expanded=true] svg{transform:rotate(180deg)}
 .select-button:focus-visible,.status:focus-visible{outline:2px solid var(--lime);outline-offset:2px}
 #pathButton{width:240px}
+.bar3{display:flex;gap:6px;align-items:center;flex-wrap:wrap;padding:10px 12px 11px;
+  border-top:1px solid color-mix(in srgb,var(--graphite) 70%,transparent)}
+.bar3-label{margin-right:2px;color:var(--ash);font-size:10px;text-transform:uppercase;letter-spacing:.06em}
+.chip{display:inline-flex;align-items:center;gap:6px;height:25px;padding:0 9px;border:1px solid var(--input-line);
+  border-radius:999px;background:var(--input-bg);color:var(--fog);font:inherit;font-size:11.5px;cursor:pointer;
+  white-space:nowrap;transition:color 140ms ease,border-color 140ms ease,background-color 140ms ease}
+.chip .n{color:var(--ash);font-family:ui-monospace,monospace;font-size:10px;font-variant-numeric:tabular-nums}
+.chip.on{border-color:color-mix(in srgb,var(--lime) 46%,transparent);color:var(--paper);
+  background:color-mix(in srgb,var(--lime) 12%,transparent)}
+.chip.on .n{color:var(--lime)}
+.chip.more{border-style:dashed;color:var(--ash)}
+.chip:focus-visible{outline:2px solid var(--lime);outline-offset:2px}
 .bar2{display:flex;gap:6px;align-items:center;flex-wrap:wrap;padding:11px 12px 12px;
   color:var(--ash);font-size:11px;border-top:1px solid color-mix(in srgb,var(--graphite) 70%,transparent)}
 .bar2 label{margin-left:10px;text-transform:uppercase;letter-spacing:.04em}
@@ -1228,22 +1271,41 @@ th.s-desc::after{content:" ↓";color:var(--mist)}
 .rs:hover,.rs.on{border-right:2px solid var(--lime)}
 th.num{text-align:right}
 th.action-head{text-align:center;padding-left:0;padding-right:0}
-td{height:46px;padding:9px 10px;border-bottom:1px solid var(--obsidian);vertical-align:middle;
+td{height:56px;padding:9px 10px;border-bottom:1px solid var(--obsidian);vertical-align:middle;
   overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 td.num{text-align:right}
 tr.row{cursor:pointer}
 tr.pending{opacity:.72}
 .empty{padding:48px 8px;color:var(--ash);text-align:center}
 tr.row.starred td{background:var(--star-wash)}
-.dt,.tool,.sz{font-family:"Berkeley Mono",ui-monospace,"Cascadia Code",Consolas,monospace;
+.dt,.model-name{font-family:"Berkeley Mono",ui-monospace,"Cascadia Code",Consolas,monospace;
   font-size:12px;color:var(--ash);letter-spacing:-.013em}
+.model-name{margin-left:7px}
+.line1{display:flex;align-items:baseline;gap:9px;min-width:0}
+.line1 .nm{flex:1;min-width:0;cursor:text}
+.line2{margin-top:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px}
+.note-slot{flex:none;max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+  color:var(--ash);font-size:11px;cursor:text}
+.note-slot:empty::after{content:"+ 备注";color:var(--smoke);transition:opacity 120ms ease}
+td.opscell{padding-right:6px}
+.ops{display:flex;align-items:center;justify-content:flex-end;gap:1px}
+.iconbtn{display:inline-grid;grid-auto-flow:column;place-items:center;gap:3px;min-width:28px;height:28px;padding:0 6px;
+  border:0;border-radius:7px;background:transparent;color:var(--ash);font:inherit;cursor:pointer;
+  transition:transform 120ms var(--ease-out),background-color 120ms ease,color 120ms ease,opacity 130ms ease}
+.iconbtn svg{width:14px;height:14px}
+.iconbtn .n{font:600 10px/1 ui-monospace,monospace;font-variant-numeric:tabular-nums}
+.iconbtn:active{transform:scale(.94)}
+.iconbtn:disabled{cursor:wait}
+.iconbtn:focus-visible{outline:2px solid var(--lime);outline-offset:-1px}
+.chainbtn{color:var(--lime)}
+.iconbtn.copied{color:#6fd49b;opacity:1}
+.hoveronly{transition:opacity 130ms ease}
 .tool-pill{display:inline-flex;align-items:center;padding:2px 6px;border-radius:5px;
   background:var(--chip);color:var(--fog);font:600 10px/16px ui-monospace,monospace;letter-spacing:.01em}
 .tool-pill.codex{color:#aab5ff;background:rgba(139,156,255,.1)}
 .tool-pill.claude{color:#e9a884;background:rgba(222,137,91,.1)}
 .tool-pill.pi{color:#76d5b0;background:rgba(77,190,147,.1)}
-td.starcell,td.lineagecell,td.detailcell,td.archcell,td.sourcecell{text-align:center}
-td.starcell{padding-left:3px;padding-right:3px}
+td.starcell{padding-left:3px;padding-right:3px;text-align:center}
 .rowbtn{display:inline-grid;place-items:center;min-width:28px;height:28px;padding:0 7px;border:0;border-radius:7px;
   background:transparent;color:var(--ash);font:inherit;font-size:11px;cursor:pointer;
   transition:transform 120ms var(--ease-out),background-color 120ms ease,color 120ms ease}
@@ -1253,16 +1315,12 @@ td.starcell{padding-left:3px;padding-right:3px}
 .starbtn{padding:0;font-size:15px;color:var(--smoke)}
 tr.starred .starbtn{color:var(--lime)}
 .nm{font-weight:560;color:var(--paper)}
-td.notecell{color:var(--mist);font-size:12px;cursor:text}
-td.notecell:empty:hover::after{content:"点击添加备注";color:var(--smoke)}
-td.namecell{cursor:text}
-td.namecell:empty:hover::after{content:"点击命名";color:var(--smoke);font-weight:400}
-.name-text{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.chain-chip{display:inline-flex;align-items:center;gap:3px;height:20px;padding:0 6px;border:1px solid color-mix(in srgb,var(--lime) 26%,transparent);border-radius:999px;background:color-mix(in srgb,var(--lime) 9%,transparent);color:var(--lime);font:600 9.5px/1 ui-monospace,monospace;cursor:pointer;transition:transform 120ms var(--ease-out),background-color 120ms ease,border-color 120ms ease}.chain-chip svg{width:10px;height:10px}.chain-chip:active{transform:scale(.95)}.chain-chip:focus-visible{outline:2px solid var(--lime);outline-offset:2px}.lineage-empty{color:var(--smoke)}
+.nm:empty::after{content:"点击命名";color:var(--smoke);font-weight:400;transition:opacity 120ms ease}
+.name-text{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .cell-input{display:block;width:100%;height:30px;margin:-3px -5px;padding:4px 6px;border:1px solid var(--lime);
   border-radius:6px;background:var(--input-bg);color:var(--paper);font:inherit;outline:none;
   box-shadow:0 0 0 3px color-mix(in srgb,var(--lime) 12%,transparent)}
 tr.archived td{opacity:.6}
-col.c-stat{width:116px}col.c-model{width:120px}
 .detail-top{display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:18px;
   border:1px solid var(--obsidian);border-radius:14px;background:var(--carbon)}
 .detail-title{font-size:16px;font-weight:620;color:var(--paper);min-width:0;flex:1}
@@ -1342,9 +1400,12 @@ col.c-stat{width:116px}col.c-model{width:120px}
   .view-switch button:hover{color:var(--paper)}
   th:hover{color:var(--mist)}
   tr.row:hover td{background:var(--hover)}
-  .rowbtn:hover{background:var(--chip);color:var(--paper)}
+  .rowbtn:hover,.iconbtn:hover{background:var(--chip);color:var(--paper)}
+  .hoveronly,.nm:empty::after,.note-slot:empty::after{opacity:0}
+  tr.row:hover .hoveronly,tr.row:focus-within .hoveronly,.hoveronly:focus-visible,
+  tr.row:hover .nm:empty::after,tr.row:hover .note-slot:empty::after{opacity:1}
   .menu-option:hover{background:var(--chip);color:var(--paper)}
-  .chain-chip:hover{border-color:color-mix(in srgb,var(--lime) 45%,transparent);background:color-mix(in srgb,var(--lime) 15%,transparent)}
+  .chip:hover{border-color:var(--smoke);color:var(--paper)}
 }
 @media (max-width:760px){
   header{padding:24px 16px 18px}.view-switch{order:3}.meta{width:100%}.chrome{top:8px;margin:0 12px 14px}
@@ -1352,12 +1413,11 @@ col.c-stat{width:116px}col.c-model{width:120px}
 }
 @media (prefers-reduced-motion:reduce){
   html,body{transition:background-color 120ms ease,color 120ms ease}
-  .view-switch button,.f,.rowbtn{transition:background-color 120ms ease,color 120ms ease}
-  .view-switch button:active,.f:active:not(:disabled),.rowbtn:active{transform:none}
+  .view-switch button,.f,.rowbtn,.iconbtn{transition:background-color 120ms ease,color 120ms ease,opacity 120ms ease}
+  .view-switch button:active,.f:active:not(:disabled),.rowbtn:active,.iconbtn:active{transform:none}
   .select-button svg{transition:none}
   .menu,#tip{transform:none;transition:opacity 120ms ease}
   #lineage-preview{transform:none;transition:opacity 120ms ease}
-  .chain-chip:active{transform:none}
   #toast,#toast.show{transform:translateX(-50%);transition:opacity 120ms ease}
 }
 @media (prefers-reduced-transparency:reduce){.chrome,.menu,#tip,#lineage-preview{background:var(--carbon);backdrop-filter:none}}

@@ -21,6 +21,8 @@ import { homeDirectory, userDataDirectory } from "./paths.ts";
 
 const MIN_SIZE = 2048;
 const MAX_HEAD_LINES = 400;
+const TAIL_CHUNK = 65_536;
+const TAIL_LIMIT = 4_194_304;
 const INDEX_TTL_MS = 30_000;
 
 type Json = Record<string, unknown>;
@@ -135,25 +137,32 @@ function* readHeadLines(path: string, limit: number): Generator<string> {
   let fd: number | undefined;
   try {
     fd = openSync(path, "r");
-    let pending = Buffer.alloc(0), lines = 0;
+    let pending = Buffer.alloc(0), lines = 0, capacity = 8192;
     while (lines < limit) {
-      const chunk = Buffer.allocUnsafe(8192);
-      const length = readSync(fd, chunk, 0, chunk.length, null);
+      const chunk = Buffer.allocUnsafe(capacity);
+      const length = readSync(fd, chunk, 0, capacity, null);
       if (!length) {
         if (pending.length) yield pending.toString("utf8").replace(/\r$/, "");
         break;
       }
       const data = pending.length ? Buffer.concat([pending, chunk.subarray(0, length)]) : chunk.subarray(0, length);
-      let start = 0;
-      while (lines < limit) {
-        const newline = data.indexOf(10, start);
-        if (newline < 0) break;
-        const end = newline > start && data[newline - 1] === 13 ? newline - 1 : newline;
-        yield data.subarray(start, end).toString("utf8");
+      capacity = Math.min(capacity * 2, 262_144);
+      // 整块解码到最后一个换行；块尾那半行留成 Buffer 等下一轮补齐，避免在 UTF-8 字符中间截断。
+      const split = data.lastIndexOf(10);
+      if (split < 0) {
+        pending = Buffer.from(data);
+        continue;
+      }
+      const text = data.toString("utf8", 0, split);
+      pending = Buffer.from(data.subarray(split + 1));
+      for (let start = 0; lines < limit;) {
+        const newline = text.indexOf("\n", start);
+        const end = newline < 0 ? text.length : newline;
+        yield text.slice(start, end > start && text.charCodeAt(end - 1) === 13 ? end - 1 : end);
         lines++;
+        if (newline < 0) break;
         start = newline + 1;
       }
-      pending = Buffer.from(data.subarray(start));
     }
   } catch {
     return;
@@ -223,6 +232,38 @@ async function setCodexSessionName(executable: string | null, codexHome: string,
   }
 }
 
+// 从文件尾往前按 64KB 推进，块与块之间 yield 一次 undefined 让调用方判定够不够；
+// 找到就停，不必像按窗口重读那样为了多看 1MB 把前 64KB 再读一遍。
+function* tailLines(fd: number, size: number): Generator<string | undefined> {
+  let offset = size, carry = Buffer.alloc(0);
+  while (offset > 0 && size - offset < TAIL_LIMIT) {
+    const length = Math.min(TAIL_CHUNK, offset);
+    offset -= length;
+    const chunk = Buffer.allocUnsafe(length);
+    readSync(fd, chunk, 0, length, offset);
+    const block = carry.length ? Buffer.concat([chunk, carry]) : chunk;
+    // 块首那半行要等下一块补齐，留成 Buffer 以免在 UTF-8 字符中间截断。
+    const split = offset === 0 ? -1 : block.indexOf(10);
+    if (split < 0 && offset > 0) {
+      carry = block;
+      yield undefined;
+      continue;
+    }
+    carry = split < 0 ? Buffer.alloc(0) : block.subarray(0, split);
+    const text = block.toString("utf8", split + 1);
+    for (let end = text.length; end > 0;) {
+      const newline = text.lastIndexOf("\n", end - 1);
+      if (newline + 1 < end) yield text.slice(newline + 1, end);
+      end = newline;
+    }
+    yield undefined;
+  }
+}
+
+function lastMatch(line: string, pattern: RegExp): RegExpMatchArray | undefined {
+  return [...line.matchAll(pattern)].at(-1);
+}
+
 function tailMetadata(path: string, tool: Tool): Pick<Metadata, "model" | "thinking_level"> {
   let size: number;
   try {
@@ -230,34 +271,34 @@ function tailMetadata(path: string, tool: Tool): Pick<Metadata, "model" | "think
   } catch {
     return { model: "", thinking_level: "" };
   }
-  let model = "";
+  let model = "", modelId = "", record: Json | undefined;
   const fd = openSync(path, "r");
   try {
-    for (const window of [65_536, 1_048_576, 4_194_304]) {
-      const length = Math.min(size, window);
-      const buffer = Buffer.alloc(length);
-      readSync(fd, buffer, 0, length, size - length);
-      const text = buffer.toString("utf8");
-      if (tool === "pi") {
-        const pairs = [...text.matchAll(/"provider":"([^"]+)","modelId":"([^"]+)"/g)];
-        if (pairs.length) return { model: `${pairs.at(-1)![1]}/${pairs.at(-1)![2]}`, thinking_level: "" };
-        const ids = [...text.matchAll(/"modelId":"([^"]+)"/g)];
-        if (ids.length) return { model: ids.at(-1)![1]!, thinking_level: "" };
-      } else {
-        const models = [...text.matchAll(/"model":"([^"]+)"/g)]
-          .map((match) => match[1]!)
-          .filter((model) => !model.startsWith("<"));
-        model ||= models.at(-1) ?? "";
-        const record = text.split(/\r?\n/).reverse().map(parseRecord).find((record) =>
-          tool === "codex" ? record?.type === "turn_context" : typeof record?.effort === "string");
+    for (const line of tailLines(fd, size)) {
+      if (line === undefined) {
+        if (tool === "pi") {
+          if (modelId) return { model: modelId, thinking_level: "" };
+          continue;
+        }
         const thinking_level = tool === "codex" && isRecord(record?.payload)
           ? stringValue(record.payload.effort) : stringValue(record?.effort);
-        if ((model || thinking_level) && (tool !== "codex" || record)) return {
-          model,
-          thinking_level,
-        };
+        if ((model || thinking_level) && (tool !== "codex" || record)) return { model, thinking_level };
+        continue;
       }
-      if (length === size) break;
+      if (tool === "pi") {
+        const pair = lastMatch(line, /"provider":"([^"]+)","modelId":"([^"]+)"/g);
+        if (pair) return { model: `${pair[1]}/${pair[2]}`, thinking_level: "" };
+        modelId ||= lastMatch(line, /"modelId":"([^"]+)"/g)?.[1] ?? "";
+        continue;
+      }
+      model ||= [...line.matchAll(/"model":"([^"]+)"/g)]
+        .map((match) => match[1]!)
+        .filter((value) => !value.startsWith("<"))
+        .at(-1) ?? "";
+      if (!record && line.includes(tool === "codex" ? '"turn_context"' : '"effort"')) {
+        const parsed = parseRecord(line);
+        if (parsed && (tool === "codex" ? parsed.type === "turn_context" : typeof parsed.effort === "string")) record = parsed;
+      }
     }
   } finally {
     closeSync(fd);
@@ -321,6 +362,7 @@ class ClaudeAdapter extends JsonlAdapter {
   parse(path: string): ParsedMetadata | null {
     let cwd = "", first = "", birth: number | undefined;
     for (const line of readHeadLines(path, MAX_HEAD_LINES)) {
+      if (cwd && birth !== undefined && !line.includes('"user"')) continue;
       const record = parseRecord(line);
       if (!record) continue;
       cwd ||= stringValue(record.cwd);

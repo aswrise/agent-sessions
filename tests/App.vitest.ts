@@ -68,9 +68,9 @@ describe("dashboard", () => {
     expect(wrapper.get(".meta").text()).toMatch(/更新于 \d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}/);
     expect(wrapper.findAll("tbody tr")).toHaveLength(100);
     expect(wrapper.text()).toContain("第 1 / 2 页");
-    expect(wrapper.findAll(".rs")).toHaveLength(12);
-    expect(wrapper.findAll("thead th")).toHaveLength(15);
-    expect(wrapper.findAll("tbody tr.row .lineagecell")).toHaveLength(100);
+    expect(wrapper.findAll(".rs")).toHaveLength(6);
+    expect(wrapper.findAll("thead th")).toHaveLength(7);
+    expect(wrapper.findAll("tbody tr.row .opscell")).toHaveLength(100);
     expect(wrapper.find(".tool-pill").exists()).toBe(true);
     expect(wrapper.get("tbody .p").text()).toBe("~/project");
 
@@ -119,16 +119,16 @@ describe("dashboard", () => {
     expect(wrapper.findAll("tbody tr")).toHaveLength(10);
     await dates[3]!.setValue("");
 
-    const nameSort = wrapper.findAll("thead button").find((button) => button.text() === "名称")!;
+    const nameSort = wrapper.findAll("thead button").find((button) => button.text() === "会话")!;
     expect(nameSort).toBeUndefined();
-    const nameHeader = wrapper.findAll("thead th").find((header) => header.text().startsWith("名称"))!;
+    const nameHeader = wrapper.findAll("thead th").find((header) => header.text().startsWith("会话"))!;
     await nameHeader.trigger("click");
     expect(wrapper.get("tbody .name-text").text()).toBe("Session 99");
     await nameHeader.trigger("click");
     expect(wrapper.get("tbody .name-text").text()).toBe("Session 0");
     await wrapper.findAll(".tabs button").find((button) => button.text().startsWith("★ 标记"))!.trigger("click");
     expect(wrapper.findAll("tbody tr")).toHaveLength(1);
-    expect(wrapper.get("tbody .notecell").text()).toBe("priority");
+    expect(wrapper.get("tbody .note-slot").text()).toBe("priority");
     wrapper.unmount();
   });
 
@@ -180,13 +180,13 @@ describe("dashboard", () => {
     await wrapper.find("tbody tr").trigger("click");
     expect(navigator.clipboard.writeText).toHaveBeenCalledWith("resume 100");
     vi.useFakeTimers();
-    const copyPath = wrapper.findAll("button").find((button) => button.text() === "复制路径")!;
+    const copyPath = wrapper.get("[aria-label='复制源文件路径']");
     await copyPath.trigger("click");
     expect(navigator.clipboard.writeText).toHaveBeenLastCalledWith("/home/fixture/sessions/session-100.jsonl");
-    expect(copyPath.text()).toBe("已复制");
+    expect(copyPath.classes()).toContain("copied");
     await vi.advanceTimersByTimeAsync(1500);
-    expect(copyPath.text()).toBe("复制路径");
-    await wrapper.findAll("button").find((button) => button.text() === "查看")!.trigger("click");
+    expect(copyPath.classes()).not.toContain("copied");
+    await wrapper.get("[aria-label='打开详情页']").trigger("click");
     await flushPromises();
     expect(location.search).toBe("?session=session-100");
     expect(wrapper.get("[aria-label='Transcript 详情']").text()).toContain("Readable fixture");
@@ -248,7 +248,7 @@ describe("dashboard", () => {
     expect(wrapper.get("#toast").text()).toContain("发现 1 条关系");
 
     await wrapper.get("#showSessions").trigger("click");
-    await wrapper.findAll("button").find((button) => button.text() === "查看")!.trigger("click");
+    await wrapper.get("[aria-label='打开详情页']").trigger("click");
     await flushPromises();
     expect(wrapper.find("#sessionLineage").exists()).toBe(false);
     expect(wrapper.get("[aria-label='Session 关系链']").findAll(".dag-node")).toHaveLength(2);
@@ -331,7 +331,7 @@ describe("dashboard", () => {
     });
     const wrapper = mount(App);
     await flushPromises();
-    await wrapper.findAll(".detailbtn")[0]!.trigger("click");
+    await wrapper.findAll("[aria-label='打开详情页']")[0]!.trigger("click");
     await flushPromises();
 
     await wrapper.get("#addManualLineage").trigger("click");
@@ -375,16 +375,16 @@ describe("dashboard", () => {
     const wrapper = mount(App, { attachTo: document.body });
     await flushPromises();
     expect(fetchMock.mock.calls.filter(([input]) => String(input) === "/api/lineages")).toHaveLength(1);
-    expect(wrapper.findAll(".chain-chip")).toHaveLength(2);
-    expect(wrapper.get(".chain-chip").text()).toBe("预览 2");
+    expect(wrapper.findAll(".chainbtn")).toHaveLength(2);
+    expect(wrapper.get(".chainbtn").text()).toBe("2");
     const noChainRow = wrapper.findAll("tbody tr.row").find((row) => row.find(".name-text").text() === "Session 98")!;
-    expect(noChainRow.find(".chain-chip").exists()).toBe(false);
+    expect(noChainRow.find(".chainbtn").exists()).toBe(false);
 
-    const message = wrapper.get("td.msg");
+    const message = wrapper.get(".line2.msg");
     await message.trigger("mouseenter");
     await vi.advanceTimersByTimeAsync(181); await flushPromises();
     expect(wrapper.find("#tip").exists()).toBe(true);
-    const chip = wrapper.get(".chain-chip");
+    const chip = wrapper.get(".chainbtn");
     await chip.trigger("mouseenter");
     expect(wrapper.find("#tip").exists()).toBe(false);
     await vi.advanceTimersByTimeAsync(181);
@@ -414,7 +414,7 @@ describe("dashboard", () => {
     await wrapper.get("#showSessions").trigger("click");
     const refreshedTab = wrapper.findAll(".tabs button").find((button) => button.text().startsWith("⛓ 有链"))!;
     expect(refreshedTab.attributes("data-count")).toBe("3");
-    expect(wrapper.get(".chain-chip").text()).toBe("预览 3");
+    expect(wrapper.get(".chainbtn").text()).toBe("3");
     wrapper.unmount();
   });
 
@@ -422,7 +422,7 @@ describe("dashboard", () => {
     vi.useFakeTimers();
     const wrapper = mount(App, { attachTo: document.body });
     await flushPromises();
-    const chip = wrapper.get<HTMLButtonElement>(".chain-chip");
+    const chip = wrapper.get<HTMLButtonElement>(".chainbtn");
     chip.element.focus();
     await flushPromises();
     expect(chip.attributes("aria-expanded")).toBe("true");
@@ -470,7 +470,7 @@ describe("dashboard", () => {
     });
     const wrapper = mount(App, { attachTo: document.body });
     await flushPromises();
-    expect(wrapper.find(".chain-chip").exists()).toBe(false);
+    expect(wrapper.find(".chainbtn").exists()).toBe(false);
     expect(wrapper.findAll(".tabs button").some((button) => button.text().startsWith("⛓ 有链"))).toBe(false);
     wrapper.unmount();
   });
@@ -493,8 +493,8 @@ describe("dashboard", () => {
     const wrapper = mount(App, { attachTo: document.body });
     await flushPromises();
     const row = wrapper.findAll("tbody tr.row").find((item) => item.get(".name-text").text() === "current")!;
-    expect(row.get(".chain-chip").text()).toBe("预览 15");
-    await row.get(".chain-chip").trigger("mouseenter");
+    expect(row.get(".chainbtn").text()).toBe("15");
+    await row.get(".chainbtn").trigger("mouseenter");
     await vi.advanceTimersByTimeAsync(181);
     const dialog = wrapper.get("#lineage-preview");
     expect(dialog.text()).toContain("仅显示相邻一层");
@@ -519,16 +519,16 @@ describe("dashboard", () => {
     await star.trigger("click"); await flushPromises();
     expect(star.text()).toBe("★");
 
-    await row.get(".notecell").trigger("click");
+    await row.get(".note-slot").trigger("click");
     const note = row.get<HTMLInputElement>("input[aria-label='备注']");
     await note.setValue("kept note"); await note.trigger("blur"); await flushPromises();
-    expect(row.get(".notecell").text()).toBe("kept note");
-    await row.get(".notecell").trigger("click");
+    expect(row.get(".note-slot").text()).toBe("kept note");
+    await row.get(".note-slot").trigger("click");
     const rejectedNote = row.get<HTMLInputElement>("input[aria-label='备注']");
     await rejectedNote.setValue("Rejected note"); await rejectedNote.trigger("blur"); await flushPromises();
-    expect(row.get(".notecell").text()).toBe("kept note");
+    expect(row.get(".note-slot").text()).toBe("kept note");
 
-    await row.get(".namecell").trigger("click");
+    await row.get(".nm").trigger("click");
     const name = row.get<HTMLInputElement>("input[aria-label='名称']");
     expect(name.element.value).toBe("Session 100");
     await name.setValue("Rejected"); await name.trigger("blur"); await flushPromises();
@@ -540,7 +540,7 @@ describe("dashboard", () => {
     await flushPromises();
     expect(row.get(".statusbtn").text()).toBe("done");
     expect(fetchMock).toHaveBeenCalledWith("/star", expect.objectContaining({ method: "POST" }));
-    await row.findAll("button").find((button) => button.text() === "归档")!.trigger("click");
+    await row.get("[aria-label='归档']").trigger("click");
     await flushPromises();
     expect(fetchMock).toHaveBeenCalledWith("/star", expect.objectContaining({ body: expect.stringContaining('"archive":true') }));
     await wrapper.findAll(".tabs button").find((button) => button.text().startsWith("归档"))!.trigger("click");
@@ -564,7 +564,7 @@ describe("dashboard", () => {
     await flushPromises();
     expect(wrapper.get<HTMLInputElement>("#q").element.value).toBe("");
 
-    await wrapper.find("td.msg").trigger("mouseenter");
+    await wrapper.find(".line2.msg").trigger("mouseenter");
     await vi.advanceTimersByTimeAsync(181); await flushPromises();
     expect(wrapper.get("#tip").text()).toContain("Readable fixture");
     expect(wrapper.get("#tip .markdown h2").text()).toBe("Readable fixture");
@@ -572,7 +572,7 @@ describe("dashboard", () => {
     await wrapper.find(".rs").trigger("pointerdown", { clientX: 100 });
     window.dispatchEvent(new PointerEvent("pointermove", { clientX: 130 }));
     window.dispatchEvent(new PointerEvent("pointerup"));
-    expect(JSON.parse(localStorage.getItem("colw6") || "[]")[0]).toBeGreaterThanOrEqual(36);
+    expect(JSON.parse(localStorage.getItem("colw7") || "[]")[0]).toBeGreaterThanOrEqual(36);
     wrapper.unmount();
   });
 
@@ -587,7 +587,7 @@ describe("dashboard", () => {
     });
     const wrapper = mount(App, { attachTo: document.body });
     await flushPromises();
-    const message = wrapper.get("td.msg");
+    const message = wrapper.get(".line2.msg");
 
     await message.trigger("mouseenter");
     await vi.advanceTimersByTimeAsync(181);
@@ -642,13 +642,13 @@ describe("dashboard", () => {
     const wrapper = mount(App, { attachTo: document.body });
     await flushPromises();
 
-    await wrapper.get("td.msg").trigger("mouseenter");
+    await wrapper.get(".line2.msg").trigger("mouseenter");
     await vi.advanceTimersByTimeAsync(181);
     await flushPromises();
     expect(wrapper.get("#tip").text()).toContain("before refresh");
     await wrapper.get("#reload").trigger("click");
     await flushPromises();
-    await wrapper.get(".detailbtn").trigger("click");
+    await wrapper.get("[aria-label='打开详情页']").trigger("click");
     await flushPromises();
 
     expect(wrapper.get("#detail").text()).toContain("after refresh");
@@ -660,7 +660,7 @@ describe("dashboard", () => {
     vi.useFakeTimers();
     const wrapper = mount(App, { attachTo: document.body });
     await flushPromises();
-    const message = wrapper.get("td.msg");
+    const message = wrapper.get(".line2.msg");
 
     await message.trigger("mouseenter");
     await vi.advanceTimersByTimeAsync(100);
@@ -675,7 +675,7 @@ describe("dashboard", () => {
     vi.useFakeTimers();
     const wrapper = mount(App, { attachTo: document.body });
     await flushPromises();
-    const messages = wrapper.findAll("td.msg");
+    const messages = wrapper.findAll(".line2.msg");
 
     await messages[0]!.trigger("mouseenter");
     await vi.advanceTimersByTimeAsync(181);
@@ -712,7 +712,7 @@ describe("dashboard", () => {
     expect(document.activeElement?.id).toBe("pathButton");
 
     const row = wrapper.get("tbody tr.row");
-    await row.get(".namecell").trigger("click");
+    await row.get(".nm").trigger("click");
     const name = row.get<HTMLInputElement>("input[aria-label='名称']");
     await name.setValue("cancelled");
     await name.trigger("keydown", { key: "Escape" });
