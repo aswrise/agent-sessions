@@ -17,7 +17,7 @@ import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "nod
 import packageJson from "../package.json" with { type: "json" };
 import { isStatus, type LineageEdge, type LineageRefresh, type ManualLineageEdge, type MarkPatch, type Session, type SessionStatus, type Tool, type Transcript, type TranscriptMessage } from "./contracts.ts";
 import { LineageIndex } from "./lineage.ts";
-import { userDataDirectory } from "./paths.ts";
+import { homeDirectory, userDataDirectory } from "./paths.ts";
 
 const MIN_SIZE = 2048;
 const MAX_HEAD_LINES = 400;
@@ -629,8 +629,7 @@ export class SessionCatalog {
   private lineageIndex: LineageIndex;
 
   constructor(options: CatalogOptions = {}) {
-    const home = options.home ?? process.env.HOME ?? process.env.USERPROFILE;
-    if (!home) throw new CatalogError("invalid", "无法确定用户目录");
+    const home = options.home ?? homeDirectory();
     const claude = join(home, ".claude", "projects");
     const codex = join(home, ".codex");
     const pi = join(home, ".pi", "agent", "sessions");

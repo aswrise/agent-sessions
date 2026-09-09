@@ -1,7 +1,7 @@
 import { CatalogError, SessionCatalog } from "./catalog.ts";
 import { isStatus, type MarkPatch } from "./contracts.ts";
 import { withResumeCommand } from "./resume.ts";
-import { homedir } from "node:os";
+import { homeDirectory } from "./paths.ts";
 
 type ServerOptions = {
   catalog: SessionCatalog;
@@ -40,7 +40,7 @@ export function startServer(options: ServerOptions): Bun.Server<undefined> {
   const nonce = options.nonce ?? crypto.randomUUID();
   const html = options.html ?? "<!doctype html><html lang=\"zh-CN\"><body><div id=\"app\"></div></body></html>";
   const platform = options.platform ?? process.platform;
-  const home = options.home ?? homedir();
+  const home = options.home ?? homeDirectory();
   return Bun.serve({
     hostname: "127.0.0.1",
     port: options.port ?? 7867,

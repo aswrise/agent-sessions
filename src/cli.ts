@@ -5,7 +5,7 @@ import { CatalogError, SessionCatalog } from "./catalog.ts";
 import { isTool, type Session, type Tool } from "./contracts.ts";
 import { formatResumeCommand, withResumeCommand } from "./resume.ts";
 import { serveResident, startDashboard, stopDashboard } from "./lifecycle.ts";
-import { userDataDirectory } from "./paths.ts";
+import { homeDirectory, userDataDirectory } from "./paths.ts";
 import packageJson from "../package.json" with { type: "json" };
 
 const HELP = `Agent Sessions
@@ -25,9 +25,7 @@ Usage:
 `;
 
 function home(): string {
-  const value = process.env.HOME ?? process.env.USERPROFILE;
-  if (!value) throw new Error("无法确定用户目录");
-  return value;
+  return homeDirectory();
 }
 
 function stamp(epoch: number): string {
