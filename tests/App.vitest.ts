@@ -252,7 +252,7 @@ describe("dashboard", () => {
     await flushPromises();
     expect(wrapper.find("#sessionLineage").exists()).toBe(false);
     expect(wrapper.get("[aria-label='Session 关系链']").findAll(".dag-node")).toHaveLength(2);
-    expect(fetchMock.mock.calls.some(([input]) => String(input) === "/api/lineage?id=session-100&refresh=0")).toBe(true);
+    expect(fetchMock.mock.calls.some(([input]) => String(input) === "/api/lineage?id=session-100")).toBe(true);
     wrapper.unmount();
   });
 

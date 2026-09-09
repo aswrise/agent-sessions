@@ -595,7 +595,7 @@ async function loadLineage(id: string): Promise<void> {
   lineageLoading.value = true;
   lineage.value = undefined;
   try {
-    const response = await fetch(`/api/lineage?id=${encodeURIComponent(id)}&refresh=0`);
+    const response = await fetch(`/api/lineage?id=${encodeURIComponent(id)}`);
     if (!response.ok) throw new Error();
     lineage.value = parseLineageView(await response.json());
   } catch {

@@ -686,7 +686,8 @@ export class SessionCatalog {
   }
 
   async lineages(): Promise<{ sessions: Session[]; edges: LineageEdge[] }> {
-    const sessions = await this.list();
+    const sessions = await this.list({ fresh: true });
+    this.lineageIndex.refresh(sessions);
     const graph = this.lineageIndex.all(this.loadManualLineages());
     const ids = new Set(graph.session_ids);
     const present = new Set(sessions.filter((session) => ids.has(session.id)).map((session) => session.id));

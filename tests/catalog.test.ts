@@ -144,6 +144,23 @@ exec '${realRg}' "$@"
     expect(cached[0]!.name).not.toBe("caller mutation");
   });
 
+  test("automatically refreshes Lineage before returning the global graph", async () => {
+    const { home, catalog } = setup();
+    const artifact = join(home, "handoff.md");
+    appendFileSync(join(home, ".codex/sessions/2026/07/14/rollout-codex-b.jsonl"), [
+      JSON.stringify({ timestamp: "2026-07-14T01:00:00Z", type: "event_msg", payload: { type: "task_started", turn_id: "handoff" } }),
+      JSON.stringify({ timestamp: "2026-07-14T01:00:01Z", type: "event_msg", payload: { type: "user_message", message: "write handoff" } }),
+      JSON.stringify({ timestamp: "2026-07-14T01:00:02Z", type: "event_msg", payload: { type: "patch_apply_end", turn_id: "handoff", success: true, changes: { [artifact]: { type: "add" } } } }),
+    ].join("\n") + "\n");
+    appendFileSync(join(home, ".pi/agent/sessions/-tmp-gamma/pi-c.jsonl"), JSON.stringify({
+      type: "message", timestamp: "2026-07-14T02:00:00Z", message: { role: "user", content: [{ type: "text", text: `continue ${artifact}` }] },
+    }) + "\n");
+
+    expect((await catalog.lineages()).edges).toEqual([
+      expect.objectContaining({ upstream_id: "codex-b", downstream_id: "pi-c", path: artifact }),
+    ]);
+  });
+
   test("prefers Codex thread_name over a legacy local name", async () => {
     const { catalog } = setup();
     expect((await catalog.list({ fresh: true })).find(({ id }) => id === "codex-b")?.name).toBe("Codex explicit");
