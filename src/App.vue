@@ -137,6 +137,7 @@ function initialTheme(): "dark" | "light" {
   return typeof matchMedia === "function" && matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark";
 }
 const theme = ref<"dark" | "light">(initialTheme());
+const compact = ref(localStorage.getItem("compact") === "1");
 
 const chainInfo = computed(() => {
   const result = new Map<string, ChainInfo>();
@@ -896,6 +897,17 @@ function changePage(value: number): void {
   try { window.scrollTo(0, 0); } catch {}
 }
 
+function toggleCompact(): void {
+  compact.value = !compact.value;
+  localStorage.setItem("compact", compact.value ? "1" : "0");
+}
+
+// 紧凑模式下首条消息不显示，名称格改挂 Transcript 预览，免得那条信息彻底没入口。
+function previewSession(row: SessionView, event: MouseEvent): void {
+  if (compact.value) showTranscriptPreview(row, event);
+  else showTextPreview(event, `${row.id}:name`, row.name);
+}
+
 function toggleTheme(): void {
   theme.value = theme.value === "dark" ? "light" : "dark";
   document.documentElement.dataset.theme = theme.value;
@@ -991,6 +1003,7 @@ onBeforeUnmount(() => {
       <button id="filterToggle" type="button" class="f act filter-toggle" :class="{ on: advanced || activeFilterCount > 0 }" :aria-expanded="advanced" @click="advanced = !advanced">
         筛选<span v-if="activeFilterCount" class="filter-count">{{ activeFilterCount }}</span>
       </button>
+      <button id="density" type="button" class="f act" :class="{ on: compact }" :aria-pressed="compact" :title="compact ? '显示首条消息' : '隐藏首条消息'" @click="toggleCompact">紧凑</button>
       <button id="reload" type="button" class="f act" title="重新扫描 session 数据" :disabled="loading || refreshing" @click="load(true)">{{ refreshing ? "刷新中…" : "刷新" }}</button>
       <button id="theme" type="button" class="f act" :title="theme === 'dark' ? '切换到浅色主题' : '切换到深色主题'" :aria-label="theme === 'dark' ? '切换到浅色主题' : '切换到深色主题'" @click="toggleTheme">{{ theme === "dark" ? "☀︎" : "☾" }}</button>
     </div>
@@ -1030,7 +1043,7 @@ onBeforeUnmount(() => {
     </section>
 
     <section v-else-if="!detail && !detailError && !detailLoading" id="list" aria-label="Session 列表">
-      <table>
+      <table :class="{ compact }">
         <colgroup>
           <col v-for="(className, index) in ['c-star','c-date','c-model','','c-stat','c-path','c-ops']" :key="index" :class="className" :style="widths[index] ? { width: `${widths[index]}px` } : undefined" />
         </colgroup>
@@ -1056,14 +1069,14 @@ onBeforeUnmount(() => {
               <div class="line1">
                 <span class="nm" @click.stop="startEdit(row, 'name')">
                   <input v-if="editing?.id === row.id && editing.field === 'name'" v-model="editValue" class="cell-input" :data-edit="`${row.id}:name`" aria-label="名称" @click.stop @keydown="editKeydown(row, 'name', $event)" @blur="finishEdit(row, 'name', true)" />
-                  <span v-else class="name-text" @mouseenter="showTextPreview($event, `${row.id}:name`, row.name)" @mouseleave="schedulePreviewHide">{{ row.name }}</span>
+                  <span v-else class="name-text" @mouseenter="previewSession(row, $event)" @mouseleave="schedulePreviewHide">{{ row.name }}</span>
                 </span>
                 <span class="note-slot" :title="row.star_note || '添加备注'" @click.stop="startEdit(row, 'star_note')">
                   <input v-if="editing?.id === row.id && editing.field === 'star_note'" v-model="editValue" class="cell-input" :data-edit="`${row.id}:star_note`" aria-label="备注" @click.stop @keydown="editKeydown(row, 'star_note', $event)" @blur="finishEdit(row, 'star_note', true)" />
                   <template v-else>{{ row.star_note }}</template>
                 </span>
               </div>
-              <div class="line2 msg" @mouseenter="showTranscriptPreview(row, $event)" @mouseleave="schedulePreviewHide">{{ messageText(row) }}</div>
+              <div v-if="!compact" class="line2 msg" @mouseenter="showTranscriptPreview(row, $event)" @mouseleave="schedulePreviewHide">{{ messageText(row) }}</div>
             </td>
             <td><button type="button" class="status statusbtn" aria-haspopup="listbox" :aria-expanded="menu?.key === `status:${row.id}`" :style="{ '--sc': statusMeta[row.status].color }" @click.stop="openRowStatus(row, $event)"><span :class="{ none: !row.status }">{{ statusMeta[row.status].label }}</span></button></td>
             <td class="p" @mouseenter="showTextPreview($event, `${row.id}:path`, shortPath(row.cwd))" @mouseleave="schedulePreviewHide">{{ shortPath(row.cwd) }}</td>
@@ -1222,6 +1235,8 @@ input[type=search]:focus{border-color:color-mix(in srgb,var(--lime) 65%,var(--gr
 .f:active:not(:disabled){transform:scale(.97)}
 .f:focus-visible,input:focus-visible,select:focus-visible{outline:2px solid var(--lime);outline-offset:2px}
 .act{border:1px solid var(--graphite);border-radius:8px;background:var(--input-bg)}
+#density.on{color:var(--paper);border-color:color-mix(in srgb,var(--lime) 40%,var(--graphite));
+  background:color-mix(in srgb,var(--lime) 10%,var(--input-bg))}
 .filter-toggle.on{color:var(--paper);border-color:color-mix(in srgb,var(--lime) 40%,var(--graphite));
   background:color-mix(in srgb,var(--lime) 10%,var(--input-bg))}
 .filter-count{display:inline-grid;place-items:center;min-width:17px;height:17px;margin-left:5px;padding:0 5px;
@@ -1283,6 +1298,7 @@ tr.row.starred td{background:var(--star-wash)}
 .model-name{margin-left:7px}
 .line1{display:flex;align-items:baseline;gap:9px;min-width:0}
 .line1 .nm{flex:1;min-width:0;cursor:text}
+table.compact td{height:40px}
 .line2{margin-top:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px}
 .note-slot{flex:none;max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
   color:var(--ash);font-size:11px;cursor:text}

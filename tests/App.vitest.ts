@@ -569,6 +569,18 @@ describe("dashboard", () => {
     expect(wrapper.get("#tip").text()).toContain("Readable fixture");
     expect(wrapper.get("#tip .markdown h2").text()).toBe("Readable fixture");
 
+    expect(wrapper.findAll(".line2.msg").length).toBeGreaterThan(0);
+    await wrapper.get("#density").trigger("click");
+    expect(localStorage.getItem("compact")).toBe("1");
+    expect(wrapper.findAll(".line2.msg")).toHaveLength(0);
+    expect(wrapper.get("table").classes()).toContain("compact");
+    // 首条消息藏起来后，Transcript 预览改从名称格进入
+    await wrapper.get(".name-text").trigger("mouseenter");
+    await vi.advanceTimersByTimeAsync(181); await flushPromises();
+    expect(wrapper.get("#tip").text()).toContain("Readable fixture");
+    await wrapper.get("#density").trigger("click");
+    expect(localStorage.getItem("compact")).toBe("0");
+
     await wrapper.find(".rs").trigger("pointerdown", { clientX: 100 });
     window.dispatchEvent(new PointerEvent("pointermove", { clientX: 130 }));
     window.dispatchEvent(new PointerEvent("pointerup"));
