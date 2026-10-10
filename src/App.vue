@@ -7,6 +7,8 @@ import { lineageComponents } from "./lineageLayout.ts";
 import { compareModels, shortModel } from "./models.ts";
 import {
   isTool,
+  parseDashboardSettings,
+  type DashboardSettings,
   parseLineageRefresh,
   parseLineageView,
   parseSearchEnvelope,
@@ -138,6 +140,72 @@ function initialTheme(): "dark" | "light" {
 }
 const theme = ref<"dark" | "light">(initialTheme());
 const compact = ref(localStorage.getItem("compact") === "1");
+const settings = ref<DashboardSettings | null>(null);
+const claudeResumeCutoff = ref("");
+const resumeSettingsOpen = ref(false);
+const settingsBusy = ref<"" | "loading" | "saving">("");
+const settingsError = ref("");
+const settingsSaved = ref(false);
+const clipboardError = ref("");
+let settingsRevision = 0;
+const settingsDirty = computed(() => claudeResumeCutoff.value !== settings.value?.claudeResumeCutoff);
+watch(claudeResumeCutoff, () => { settingsSaved.value = false; });
+
+async function loadSettings(): Promise<boolean> {
+  if (settingsBusy.value === "saving") return false;
+  const revision = ++settingsRevision;
+  const preserveDraft = settings.value !== null && settingsDirty.value;
+  settingsBusy.value = "loading";
+  try {
+    const response = await fetch("/api/settings", { cache: "no-store" });
+    if (!response.ok) throw new Error("恢复设置加载失败，请重试");
+    const value = parseDashboardSettings(await response.json());
+    if (revision !== settingsRevision) return false;
+    settings.value = value;
+    if (!preserveDraft) claudeResumeCutoff.value = value.claudeResumeCutoff;
+    settingsError.value = "";
+    return true;
+  } catch (error) {
+    if (revision === settingsRevision) settingsError.value = error instanceof Error ? error.message : "恢复设置加载失败，请重试";
+    return false;
+  } finally {
+    if (revision === settingsRevision) settingsBusy.value = "";
+  }
+}
+
+async function saveSettings(targetDate: string): Promise<void> {
+  if (settingsBusy.value === "saving") return;
+  let value: DashboardSettings;
+  try {
+    value = parseDashboardSettings({ claudeResumeCutoff: targetDate });
+  } catch (error) {
+    settingsError.value = error instanceof Error ? error.message : "恢复日期无效，请重新选择";
+    return;
+  }
+  const confirmation = value.claudeResumeCutoff
+    ? `确认将 Claude 恢复起始日期保存为 ${value.claudeResumeCutoff}？该日期之前的 Claude 会话将禁止复制恢复命令，当天允许。所有浏览器共享此设置。`
+    : "确认清空 Claude 恢复起始日期？这将关闭日期限制，较早的 Claude 会话也可复制恢复命令。所有浏览器共享此设置。";
+  if (!window.confirm(confirmation)) return;
+  claudeResumeCutoff.value = value.claudeResumeCutoff;
+  const revision = ++settingsRevision;
+  settingsBusy.value = "saving";
+  settingsSaved.value = false;
+  try {
+    const response = await fetch("/api/settings", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(value) });
+    if (!response.ok) throw new Error("恢复设置保存失败，请重试");
+    settings.value = parseDashboardSettings(await response.json());
+    claudeResumeCutoff.value = settings.value.claudeResumeCutoff;
+    settingsError.value = "";
+    await nextTick();
+    settingsSaved.value = true;
+  } catch (error) {
+    settingsError.value = error instanceof Error ? error.message : "恢复设置保存失败，请重试";
+  } finally {
+    if (revision === settingsRevision) settingsBusy.value = "";
+  }
+}
+
+function refreshSettings(): void { void loadSettings(); }
 
 const chainInfo = computed(() => {
   const result = new Map<string, ChainInfo>();
@@ -205,6 +273,18 @@ const activeFilterCount = computed(() =>
 
 function toEpoch(value: string, end = false): number | undefined {
   return value ? new Date(`${value}T${end ? "23:59:59" : "00:00:00"}`).getTime() / 1000 : undefined;
+}
+
+function resumeBlockedReason(row: SessionView | TranscriptView): string {
+  if (row.tool !== "claude") return "";
+  if (settingsBusy.value === "saving" || !settings.value) return "恢复设置尚未确认，请稍后重试或复制源文件路径";
+  if (settingsError.value || settingsDirty.value) return "恢复设置未保存或加载失败，请重试或复制源文件路径";
+  const cutoff = toEpoch(settings.value.claudeResumeCutoff);
+  return cutoff !== undefined && row.birth < cutoff ? "该 Claude 会话早于恢复起始日期，请复制源文件路径" : "";
+}
+
+function resumeCopyBlocked(row: SessionView | TranscriptView): boolean {
+  return Boolean(resumeBlockedReason(row));
 }
 
 const filtered = computed(() => {
@@ -469,15 +549,29 @@ function sort(key: SortKey): void {
 }
 
 async function copy(row: SessionView | TranscriptView): Promise<void> {
-  await navigator.clipboard.writeText(row.resume_command);
-  showToast("已复制恢复命令");
+  if (row.tool === "claude") {
+    if (settingsBusy.value || !settings.value || settingsError.value || settingsDirty.value) {
+      showToast(resumeBlockedReason(row) || "恢复设置尚未确认，请稍后重试或复制源文件路径");
+      return;
+    }
+    if (!await loadSettings()) return;
+    if (resumeCopyBlocked(row)) { showToast(resumeBlockedReason(row)); return; }
+  }
+  try {
+    await navigator.clipboard.writeText(row.resume_command);
+    clipboardError.value = "";
+    showToast("已复制恢复命令");
+  } catch { clipboardError.value = "复制失败，请允许剪贴板访问后重试"; }
 }
 
-async function copySourcePath(row: SessionView): Promise<void> {
-  await navigator.clipboard.writeText(row.source_path);
-  clearTimeout(copiedPathTimer);
-  copiedPathId.value = row.id;
-  copiedPathTimer = setTimeout(() => { copiedPathId.value = ""; }, 1500);
+async function copySourcePath(row: SessionView | TranscriptView): Promise<void> {
+  try {
+    await navigator.clipboard.writeText(row.source_path);
+    clipboardError.value = "";
+    clearTimeout(copiedPathTimer);
+    copiedPathId.value = row.id;
+    copiedPathTimer = setTimeout(() => { copiedPathId.value = ""; }, 1500);
+  } catch { clipboardError.value = "复制失败，请允许剪贴板访问后重试"; }
 }
 
 function clearFilters(): void {
@@ -949,12 +1043,17 @@ onMounted(async () => {
   window.addEventListener("keydown", keydown);
   window.addEventListener("scroll", closeFloatingOnScroll, true);
   document.addEventListener("click", documentClick);
-  await load(new URLSearchParams(location.search).get("fresh") === "1");
+  window.addEventListener("focus", refreshSettings);
+  const sessions = load(new URLSearchParams(location.search).get("fresh") === "1");
+  void loadSettings();
+  await sessions;
   void loadGlobalLineage(true);
   syncHistory();
 });
 
 onBeforeUnmount(() => {
+  ++settingsRevision;
+  window.removeEventListener("focus", refreshSettings);
   clearTimeout(searchTimer);
   clearTimeout(toastTimer);
   clearTimeout(copiedPathTimer);
@@ -1003,9 +1102,24 @@ onBeforeUnmount(() => {
       <button id="filterToggle" type="button" class="f act filter-toggle" :class="{ on: advanced || activeFilterCount > 0 }" :aria-expanded="advanced" @click="advanced = !advanced">
         筛选<span v-if="activeFilterCount" class="filter-count">{{ activeFilterCount }}</span>
       </button>
+      <button id="resumeSettingsToggle" type="button" class="f act" :class="{ on: resumeSettingsOpen }" :aria-expanded="resumeSettingsOpen" aria-controls="resumeSettings" @click="resumeSettingsOpen = !resumeSettingsOpen">恢复设置</button>
       <button id="density" type="button" class="f act" :class="{ on: compact }" :aria-pressed="compact" :title="compact ? '显示首条消息' : '隐藏首条消息'" @click="toggleCompact">紧凑</button>
-      <button id="reload" type="button" class="f act" title="重新扫描 session 数据" :disabled="loading || refreshing" @click="load(true)">{{ refreshing ? "刷新中…" : "刷新" }}</button>
+      <button id="reload" type="button" class="f act" title="重新扫描 session 数据" :disabled="loading || refreshing" @click="load(true); refreshSettings()">{{ refreshing ? "刷新中…" : "刷新" }}</button>
       <button id="theme" type="button" class="f act" :title="theme === 'dark' ? '切换到浅色主题' : '切换到深色主题'" :aria-label="theme === 'dark' ? '切换到浅色主题' : '切换到深色主题'" @click="toggleTheme">{{ theme === "dark" ? "☀︎" : "☾" }}</button>
+    </div>
+    <div id="resumeSettings" v-show="resumeSettingsOpen" class="bar2" role="group" aria-label="恢复设置">
+      <label for="claudeResumeCutoff">Claude 恢复起始日期</label>
+      <input id="claudeResumeCutoff" v-model="claudeResumeCutoff" type="date" :disabled="!!settingsBusy" aria-describedby="resumeCutoffHelp" />
+      <button id="saveResumeSettings" type="button" class="f" :disabled="!!settingsBusy" @click="saveSettings(claudeResumeCutoff)">保存恢复日期</button>
+      <button id="clearResumeSettings" type="button" class="f" :disabled="!!settingsBusy || !claudeResumeCutoff" @click="saveSettings('')">清空恢复日期</button>
+      <span id="resumeCutoffHelp">按本地日期判断，当天允许；留空关闭。由本地服务保存，所有浏览器共享，重启后保留</span>
+    </div>
+    <div v-if="settingsBusy === 'saving' || (!settings && settingsBusy === 'loading') || settingsSaved || (settingsDirty && settings) || settingsError" class="bar2">
+      <span v-if="settingsBusy === 'saving' || (!settings && settingsBusy === 'loading')" role="status">{{ settingsBusy === 'saving' ? '保存中…' : '加载恢复设置…' }}</span>
+      <span v-else-if="settingsSaved" role="status">恢复日期已保存</span>
+      <span v-else-if="settingsDirty && settings" role="status">恢复日期未保存</span>
+      <span id="resumeSettingsError" v-if="settingsError" role="alert">{{ settingsError }}</span>
+      <button v-if="settingsError" type="button" class="f" :disabled="!!settingsBusy" @click="refreshSettings">重试加载恢复设置</button>
     </div>
     <div v-if="modelChips.length" id="modelChips" class="bar3">
       <span class="bar3-label">模型</span>
@@ -1059,7 +1173,7 @@ onBeforeUnmount(() => {
         <tbody>
           <tr v-if="loading"><td colspan="7"><div class="empty">加载中...</div></td></tr>
           <tr v-else-if="!filtered.length"><td colspan="7"><div class="empty">没有匹配的 session，试试更短的关键词或切换筛选</div></td></tr>
-          <tr v-for="row in visible" v-else :key="row.id" class="row" :class="{ starred: row.starred, archived: row.archived, pending: pending.has(row.id) }" tabindex="0" @click="copy(row)" @keydown.enter="copy(row)">
+          <tr v-for="row in visible" v-else :key="row.id" class="row" :class="{ starred: row.starred, archived: row.archived, pending: pending.has(row.id) }" tabindex="0" @click="copy(row)" @keydown.enter.self="copy(row)">
             <td class="starcell"><button type="button" class="rowbtn starbtn" :disabled="pending.has(row.id)" :aria-label="row.starred ? '取消标记' : '标记重要'" :title="row.starred ? '取消标记' : '标记重要'" @click.stop="toggleStar(row)">{{ row.starred ? "★" : "☆" }}</button></td>
             <td class="dt" @mouseenter="showTextPreview($event, `${row.id}:mtime`, `更新 ${formatDate(row.mtime)}　创建 ${formatDate(row.birth)}　${formatSize(row.size_kb)}`)" @mouseleave="schedulePreviewHide">{{ formatDate(row.mtime) }}</td>
             <td class="modelcell" @mouseenter="showTextPreview($event, `${row.id}:model`, row.model || '无模型')" @mouseleave="schedulePreviewHide">
@@ -1071,6 +1185,7 @@ onBeforeUnmount(() => {
                   <input v-if="editing?.id === row.id && editing.field === 'name'" v-model="editValue" class="cell-input" :data-edit="`${row.id}:name`" aria-label="名称" @click.stop @keydown="editKeydown(row, 'name', $event)" @blur="finishEdit(row, 'name', true)" />
                   <span v-else class="name-text" @mouseenter="previewSession(row, $event)" @mouseleave="schedulePreviewHide">{{ row.name }}</span>
                 </span>
+                <span v-if="resumeCopyBlocked(row)" class="resume-blocked" :title="resumeBlockedReason(row)">恢复已禁用</span>
                 <span class="note-slot" :title="row.star_note || '添加备注'" @click.stop="startEdit(row, 'star_note')">
                   <input v-if="editing?.id === row.id && editing.field === 'star_note'" v-model="editValue" class="cell-input" :data-edit="`${row.id}:star_note`" aria-label="备注" @click.stop @keydown="editKeydown(row, 'star_note', $event)" @blur="finishEdit(row, 'star_note', true)" />
                   <template v-else>{{ row.star_note }}</template>
@@ -1119,7 +1234,9 @@ onBeforeUnmount(() => {
       <template v-else-if="detail">
         <div class="detail-top">
           <button type="button" class="f act" @click="showList()">返回</button>
-          <button type="button" class="f act" @click="copy(detail)">复制恢复命令</button>
+          <button type="button" class="f act" :disabled="resumeCopyBlocked(detail) || (detail.tool === 'claude' && !!settingsBusy)" @click="copy(detail)">复制恢复命令</button>
+          <button type="button" class="f act" @click="copySourcePath(detail)">{{ copiedPathId === detail.id ? "已复制源文件路径" : "复制源文件路径" }}</button>
+          <span v-if="resumeCopyBlocked(detail)" class="resume-blocked">{{ resumeBlockedReason(detail) }}</span>
           <button id="addManualLineage" type="button" class="f act" :aria-expanded="manualLineageOpen" @click="manualLineageOpen = !manualLineageOpen">补充上游</button>
           <div class="detail-title">{{ detail.name || detail.first_msg || detail.id }}</div>
           <div class="detail-meta mono">{{ detail.tool }} · {{ detail.model || "无模型" }} · {{ shortPath(detail.cwd) }} · {{ formatSize(detail.size_kb) }}</div>
@@ -1157,6 +1274,7 @@ onBeforeUnmount(() => {
     <button v-for="item in menu.items" :key="item.value" type="button" class="menu-option" role="option" :aria-selected="item.value === menu.value" @click="chooseMenu(item)"><span>{{ item.label }}</span><span class="check">✓</span></button>
   </div>
 
+  <div v-if="clipboardError" role="alert">{{ clipboardError }}</div>
   <div v-if="error || notice" id="toast" class="show" :role="error ? 'alert' : 'status'">{{ error || notice }}</div>
 
   <aside v-if="preview" id="tip" ref="previewElement" class="show" :style="preview.style" @mouseenter="keepPreview" @mouseleave="schedulePreviewHide">
@@ -1271,6 +1389,8 @@ col.c-stat{width:116px}col.c-path{width:190px}col.c-ops{width:128px}
 .chip:focus-visible{outline:2px solid var(--lime);outline-offset:2px}
 .bar2{display:flex;gap:6px;align-items:center;flex-wrap:wrap;padding:11px 12px 12px;
   color:var(--ash);font-size:11px;border-top:1px solid color-mix(in srgb,var(--graphite) 70%,transparent)}
+.resume-blocked{color:var(--fog);font-size:11px}.detail-top .f:disabled{opacity:.4;cursor:default}
+#resumeCutoffHelp{color:var(--fog);font-size:11px}
 .bar2 label{margin-left:10px;text-transform:uppercase;letter-spacing:.04em}
 .bar2 input{padding:6px 8px;font:inherit;font-size:12px;color:var(--mist);
   border:1px solid var(--input-line);border-radius:7px;background:var(--input-bg);outline:none}

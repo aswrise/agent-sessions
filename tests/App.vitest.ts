@@ -27,13 +27,19 @@ const lineageEdge = (upstream_id: string, downstream_id: string, path = "/tmp/ha
   relation: "artifact" as const, upstream_id, downstream_id, path, produced_at: 1, referenced_at: 2,
   producer_turn: 3, reference_turn: 0, reference_source: "user" as const, kind: "add" as const,
 });
+let savedSettings = { claudeResumeCutoff: "" };
 let fetchMock: ReturnType<typeof vi.fn>;
 
 beforeEach(() => {
+  savedSettings = { claudeResumeCutoff: "" };
   localStorage.clear(); history.replaceState(null, "", "/");
   Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText: vi.fn().mockResolvedValue(undefined) } });
   fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input);
+    if (url === "/api/settings") {
+      if (init?.method === "POST") savedSettings = JSON.parse(String(init.body));
+      return response(savedSettings);
+    }
     if (url.startsWith("/api/sessions")) return response({ generatedAt: new Date(0).toISOString(), home: "/home/fixture", sessions: Array.from({ length: 101 }, (_, index) => makeRow(index)) });
     if (url.startsWith("/api/search")) return response({ total: 1, results: [{ ...makeRow(42), snippet: "deep transcript needle" }] });
     if (url === "/api/lineage/index") return response({ sessions: 101, scanned: 101, unchanged: 0, removed: 0, writes: 2, references: 2, edges: 1, elapsed_ms: 12 });
@@ -55,6 +61,7 @@ beforeEach(() => {
     return response({ ok: true });
   });
   vi.stubGlobal("fetch", fetchMock);
+  vi.stubGlobal("confirm", vi.fn(() => true));
 });
 
 afterEach(() => { vi.useRealTimers(); vi.unstubAllGlobals(); document.body.innerHTML = ""; });
@@ -752,4 +759,423 @@ describe("dashboard", () => {
     expect(location.pathname + location.search).toBe("/");
     missing.unmount();
   });
+});
+
+describe("Claude resume service settings", () => {
+  const cutoff = new Date(2026, 6, 1).getTime() / 1000;
+  const oldClaude = { ...makeRow(1), birth: cutoff - 1, mtime: cutoff + 86400 };
+
+  function serve(rows: SessionView[]): void {
+    const fallback = fetchMock.getMockImplementation() as (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
+    fetchMock.mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.startsWith("/api/sessions")) return response({ generatedAt: new Date(0).toISOString(), home: "/home/fixture", sessions: rows });
+      if (url.startsWith("/api/session?")) {
+        const id = new URL(url, "http://local").searchParams.get("id");
+        return response({ ...rows.find((row) => row.id === id)!, messages: [] });
+      }
+      return fallback(input, init);
+    });
+  }
+
+  test("starts collapsed and preserves the cutoff and draft across toggles without requests", async () => {
+    serve([oldClaude]);
+    savedSettings.claudeResumeCutoff = "2026-07-01";
+    let wrapper = mount(App, { attachTo: document.body }); await flushPromises();
+    expect(wrapper.get("#resumeSettingsToggle").attributes("aria-expanded")).toBe("false");
+    expect(wrapper.get("#resumeSettingsToggle").attributes("aria-controls")).toBe("resumeSettings");
+    expect(wrapper.get("#resumeSettings").isVisible()).toBe(false);
+    expect(wrapper.get("tbody tr.row").text()).toContain("恢复已禁用");
+    const calls = fetchMock.mock.calls.length;
+    await wrapper.get("#resumeSettingsToggle").trigger("click");
+    expect(wrapper.get("#resumeSettings").isVisible()).toBe(true);
+    await wrapper.get("#claudeResumeCutoff").setValue("2026-08-01");
+    await wrapper.get("#resumeSettingsToggle").trigger("click");
+    expect(wrapper.get("#resumeSettings").isVisible()).toBe(false);
+    expect(wrapper.get("[role='status']").isVisible()).toBe(true);
+    await wrapper.get("#resumeSettingsToggle").trigger("click");
+    expect(wrapper.get<HTMLInputElement>("#claudeResumeCutoff").element.value).toBe("2026-08-01");
+    expect(savedSettings.claudeResumeCutoff).toBe("2026-07-01");
+    expect(fetchMock.mock.calls).toHaveLength(calls);
+    expect(window.confirm).not.toHaveBeenCalled();
+    wrapper.unmount();
+    wrapper = mount(App, { attachTo: document.body }); await flushPromises();
+    expect(wrapper.get("#resumeSettings").isVisible()).toBe(false);
+    expect(wrapper.get<HTMLInputElement>("#claudeResumeCutoff").element.value).toBe("2026-07-01");
+    expect(wrapper.get("tbody tr.row").text()).toContain("恢复已禁用");
+    wrapper.unmount();
+  });
+
+  test("confirms the exact date and posts the confirmed value", async () => {
+    const wrapper = mount(App); await flushPromises();
+    await wrapper.get("#resumeSettingsToggle").trigger("click");
+    await wrapper.get("#claudeResumeCutoff").setValue("2026-07-01");
+    await wrapper.get("#saveResumeSettings").trigger("click"); await flushPromises();
+    expect(window.confirm).toHaveBeenCalledExactlyOnceWith("确认将 Claude 恢复起始日期保存为 2026-07-01？该日期之前的 Claude 会话将禁止复制恢复命令，当天允许。所有浏览器共享此设置。");
+    const posts = fetchMock.mock.calls.filter(([url, init]) => url === "/api/settings" && init?.method === "POST");
+    expect(posts).toHaveLength(1);
+    expect(JSON.parse(String(posts[0]![1]!.body))).toEqual({ claudeResumeCutoff: "2026-07-01" });
+    vi.mocked(window.confirm).mockReturnValueOnce(false);
+    await wrapper.get("#clearResumeSettings").trigger("click"); await flushPromises();
+    expect(savedSettings.claudeResumeCutoff).toBe("2026-07-01");
+    expect(wrapper.get<HTMLInputElement>("#claudeResumeCutoff").element.value).toBe("2026-07-01");
+    expect(wrapper.text()).toContain("恢复日期已保存");
+    expect(fetchMock.mock.calls.filter(([url, init]) => url === "/api/settings" && init?.method === "POST")).toHaveLength(1);
+    wrapper.unmount();
+  });
+
+  test.each(["save", "clear"])("cancelled %s preserves the saved cutoff and a distinct draft without POST", async (action) => {
+    savedSettings.claudeResumeCutoff = "2026-07-01";
+    const wrapper = mount(App); await flushPromises();
+    await wrapper.get("#resumeSettingsToggle").trigger("click");
+    await wrapper.get("#claudeResumeCutoff").setValue("2026-08-01");
+    vi.mocked(window.confirm).mockReturnValue(false);
+    const calls = fetchMock.mock.calls.length;
+    await wrapper.get(action === "save" ? "#saveResumeSettings" : "#clearResumeSettings").trigger("click"); await flushPromises();
+    expect(window.confirm).toHaveBeenCalledOnce();
+    expect(fetchMock.mock.calls).toHaveLength(calls);
+    expect(savedSettings.claudeResumeCutoff).toBe("2026-07-01");
+    expect(wrapper.get<HTMLInputElement>("#claudeResumeCutoff").element.value).toBe("2026-08-01");
+    expect(wrapper.text()).toContain("恢复日期未保存");
+    wrapper.unmount();
+  });
+
+  test.each(["clear", "empty save"])("confirmed %s warns about older sessions and posts an empty cutoff", async (action) => {
+    savedSettings.claudeResumeCutoff = "2026-07-01";
+    const wrapper = mount(App); await flushPromises();
+    await wrapper.get("#resumeSettingsToggle").trigger("click");
+    if (action === "empty save") await wrapper.get("#claudeResumeCutoff").setValue("");
+    await wrapper.get(action === "clear" ? "#clearResumeSettings" : "#saveResumeSettings").trigger("click"); await flushPromises();
+    expect(window.confirm).toHaveBeenCalledExactlyOnceWith("确认清空 Claude 恢复起始日期？这将关闭日期限制，较早的 Claude 会话也可复制恢复命令。所有浏览器共享此设置。");
+    const posts = fetchMock.mock.calls.filter(([url, init]) => url === "/api/settings" && init?.method === "POST");
+    expect(posts).toHaveLength(1);
+    expect(JSON.parse(String(posts[0]![1]!.body))).toEqual({ claudeResumeCutoff: "" });
+    expect(savedSettings.claudeResumeCutoff).toBe("");
+    expect(wrapper.get<HTMLInputElement>("#claudeResumeCutoff").element.value).toBe("");
+    wrapper.unmount();
+  });
+
+  test("blocks old Claude row click, row Enter, and detail copy before any clipboard write", async () => {
+    serve([oldClaude]);
+    const wrapper = mount(App);
+    await flushPromises();
+    await wrapper.get("#resumeSettingsToggle").trigger("click");
+    await wrapper.get("#claudeResumeCutoff").setValue("2026-07-01");
+    await wrapper.get("#saveResumeSettings").trigger("click");
+    await flushPromises();
+    const row = wrapper.get("tbody tr.row");
+    expect(row.text()).toContain("恢复已禁用");
+    await row.trigger("click");
+    await flushPromises();
+    expect(navigator.clipboard.writeText).not.toHaveBeenCalled();
+    expect(wrapper.get("#toast").text()).toContain("早于恢复起始日期");
+    await row.trigger("keydown", { key: "Enter" });
+    await flushPromises();
+    expect(navigator.clipboard.writeText).not.toHaveBeenCalled();
+    await row.get("[aria-label='打开详情页']").trigger("click");
+    await flushPromises();
+    const resume = wrapper.findAll("#detail button").find((button) => button.text() === "复制恢复命令")!;
+    expect((resume.element as HTMLButtonElement).disabled).toBe(true);
+    await resume.trigger("click");
+    expect(navigator.clipboard.writeText).not.toHaveBeenCalled();
+    (resume.element as HTMLButtonElement).disabled = false;
+    await resume.trigger("click");
+    expect(navigator.clipboard.writeText).not.toHaveBeenCalled();
+    const path = wrapper.findAll("#detail button").find((button) => button.text() === "复制源文件路径")!;
+    await path.trigger("click");
+    expect(navigator.clipboard.writeText).toHaveBeenCalledExactlyOnceWith(oldClaude.source_path);
+    wrapper.unmount();
+  });
+
+  test.each([true, false])("row path Enter cannot copy a resume command, with cutoff %s", async (enabled) => {
+    serve([oldClaude]);
+    if (enabled) savedSettings.claudeResumeCutoff = "2026-07-01";
+    const wrapper = mount(App);
+    await flushPromises();
+    const path = wrapper.get("tbody [aria-label='复制源文件路径']");
+    await path.trigger("keydown", { key: "Enter" });
+    expect(navigator.clipboard.writeText).not.toHaveBeenCalled();
+    await path.trigger("click");
+    expect(navigator.clipboard.writeText).toHaveBeenCalledExactlyOnceWith(oldClaude.source_path);
+    expect(wrapper.find("#toast").exists()).toBe(false);
+    wrapper.unmount();
+  });
+
+  test("allows local midnight, newer Claude, and old Codex and pi while checking birth rather than mtime", async () => {
+    const rows: SessionView[] = [
+      oldClaude,
+      { ...makeRow(3), birth: cutoff, mtime: cutoff + 3 },
+      { ...makeRow(5), birth: cutoff + 86400, mtime: cutoff + 5 },
+      { ...makeRow(2), birth: cutoff - 86400, mtime: cutoff + 2 },
+      { ...makeRow(4), tool: "pi", birth: cutoff - 86400, mtime: cutoff + 4 },
+    ];
+    serve(rows);
+    savedSettings.claudeResumeCutoff = "2026-07-01";
+    const wrapper = mount(App);
+    await flushPromises();
+    expect(wrapper.findAll(".resume-blocked")).toHaveLength(1);
+    for (const row of wrapper.findAll("tbody tr.row")) {
+      const name = row.get(".name-text").text();
+      const session = rows.find((item) => item.name === name)!;
+      vi.mocked(navigator.clipboard.writeText).mockClear();
+      await row.trigger("click");
+      await flushPromises();
+      if (session.id === oldClaude.id) expect(navigator.clipboard.writeText).not.toHaveBeenCalled();
+      else expect(navigator.clipboard.writeText).toHaveBeenCalledExactlyOnceWith(session.resume_command);
+    }
+    wrapper.unmount();
+  });
+
+  test("persists and reloads the setting, keeps it when filters clear, and removes it when cleared", async () => {
+    serve([oldClaude]);
+    let wrapper = mount(App);
+    await flushPromises();
+    await wrapper.get("#resumeSettingsToggle").trigger("click");
+    await wrapper.get("#claudeResumeCutoff").setValue("2026-07-01");
+    await wrapper.get("#saveResumeSettings").trigger("click");
+    await flushPromises();
+    expect(savedSettings.claudeResumeCutoff).toBe("2026-07-01");
+    expect(localStorage.getItem("claudeResumeCutoff")).toBeNull();
+    expect(wrapper.find(".filter-count").exists()).toBe(false);
+    wrapper.unmount();
+    localStorage.clear();
+    wrapper = mount(App);
+    await flushPromises();
+    expect(wrapper.get<HTMLInputElement>("#claudeResumeCutoff").element.value).toBe("2026-07-01");
+    await wrapper.get("#filterToggle").trigger("click");
+    await wrapper.get("[aria-label='创建起始']").setValue("2026-06-01");
+    await wrapper.findAll("button").find((button) => button.text() === "清除筛选")!.trigger("click");
+    expect(wrapper.get<HTMLInputElement>("#claudeResumeCutoff").element.value).toBe("2026-07-01");
+    expect(savedSettings.claudeResumeCutoff).toBe("2026-07-01");
+    await wrapper.get("tbody tr.row").trigger("click");
+    await flushPromises();
+    expect(navigator.clipboard.writeText).not.toHaveBeenCalled();
+    await wrapper.get("#resumeSettingsToggle").trigger("click");
+    await wrapper.findAll("button").find((button) => button.text() === "清空恢复日期")!.trigger("click");
+    await flushPromises();
+    expect(savedSettings.claudeResumeCutoff).toBe("");
+    await wrapper.get("tbody tr.row").trigger("click");
+    await flushPromises();
+    expect(navigator.clipboard.writeText).toHaveBeenCalledExactlyOnceWith(oldClaude.resume_command);
+    wrapper.unmount();
+    localStorage.clear();
+    wrapper = mount(App);
+    await flushPromises();
+    expect(wrapper.get<HTMLInputElement>("#claudeResumeCutoff").element.value).toBe("");
+    wrapper.unmount();
+  });
+
+  test.each(["2026-07-01", "2026-02-30"])("ignores legacy browser date %s", async (value) => {
+    serve([oldClaude]);
+    localStorage.setItem("claudeResumeCutoff", value);
+    const wrapper = mount(App);
+    await flushPromises();
+    expect(wrapper.get<HTMLInputElement>("#claudeResumeCutoff").element.value).toBe("");
+    await wrapper.get("tbody tr.row").trigger("click");
+    await flushPromises();
+    expect(navigator.clipboard.writeText).toHaveBeenCalledExactlyOnceWith(oldClaude.resume_command);
+    wrapper.unmount();
+  });
+
+  test("saves leap day only after an explicit save", async () => {
+    serve([oldClaude]);
+    const wrapper = mount(App); await flushPromises();
+    await wrapper.get("#resumeSettingsToggle").trigger("click");
+    await wrapper.get("#claudeResumeCutoff").setValue("2024-02-29");
+    expect(savedSettings.claudeResumeCutoff).toBe("");
+    await wrapper.get("#saveResumeSettings").trigger("click"); await flushPromises();
+    expect(savedSettings.claudeResumeCutoff).toBe("2024-02-29");
+    expect(wrapper.text()).toContain("恢复日期已保存");
+    wrapper.unmount();
+  });
+  test.each(["delayed", "failed", "invalid"])("blocks Claude with %s settings while paths and other tools work", async (state) => {
+    serve([oldClaude, makeRow(2), { ...makeRow(4), tool: "pi" }]);
+    localStorage.setItem("claudeResumeCutoff", "2020-01-01");
+    const fallback = fetchMock.getMockImplementation() as (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
+    let resolve!: (value: Response) => void;
+    fetchMock.mockImplementation((input: RequestInfo | URL, init?: RequestInit) => String(input) === "/api/settings"
+      ? state === "delayed" ? new Promise<Response>((done) => { resolve = done; }) : Promise.resolve(response(state === "failed" ? {} : { claudeResumeCutoff: "2026-02-30" }, state === "failed" ? 500 : 200))
+      : fallback(input, init));
+    const wrapper = mount(App); await flushPromises();
+    const row = wrapper.findAll("tbody tr.row").find((item) => item.text().includes(oldClaude.name))!;
+    await row.trigger("click"); await row.trigger("keydown", { key: "Enter" });
+    expect(navigator.clipboard.writeText).not.toHaveBeenCalled();
+    await row.get("[aria-label='复制源文件路径']").trigger("click");
+    expect(navigator.clipboard.writeText).toHaveBeenCalledWith(oldClaude.source_path);
+    for (const item of wrapper.findAll("tbody tr.row").filter((item) => !item.text().includes(oldClaude.name))) await item.trigger("click");
+    expect(navigator.clipboard.writeText).toHaveBeenCalledWith(makeRow(2).resume_command);
+    expect(navigator.clipboard.writeText).toHaveBeenCalledWith(makeRow(4).resume_command);
+    if (state !== "delayed") expect(wrapper.get("#resumeSettingsError").text()).toMatch(/失败|日期/);
+    if (state === "delayed") { resolve(response({ claudeResumeCutoff: "2026-07-01" })); await flushPromises(); }
+    expect(localStorage.getItem("claudeResumeCutoff")).toBe("2020-01-01");
+    wrapper.unmount();
+  });
+
+  test("retains unsaved draft through focus, pending save and save failure, then acknowledges retry", async () => {
+    serve([oldClaude]);
+    const fallback = fetchMock.getMockImplementation() as (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
+    const wrapper = mount(App, { attachTo: document.body }); await flushPromises();
+    await wrapper.get("#resumeSettingsToggle").trigger("click");
+    await wrapper.get("#claudeResumeCutoff").setValue("2026-07-01");
+    window.dispatchEvent(new Event("focus")); await flushPromises();
+    expect(wrapper.get<HTMLInputElement>("#claudeResumeCutoff").element.value).toBe("2026-07-01");
+    await wrapper.get("tbody tr.row").trigger("click");
+    expect(navigator.clipboard.writeText).not.toHaveBeenCalled();
+    let resolve!: (value: Response) => void;
+    fetchMock.mockImplementation((input: RequestInfo | URL, init?: RequestInit) => String(input) === "/api/settings" && init?.method === "POST"
+      ? new Promise<Response>((done) => { resolve = done; }) : fallback(input, init));
+    await wrapper.get("#saveResumeSettings").trigger("click");
+    const calls = fetchMock.mock.calls.length;
+    window.dispatchEvent(new Event("focus"));
+    expect(fetchMock.mock.calls.length).toBe(calls);
+    await wrapper.get("tbody tr.row").trigger("click");
+    expect(wrapper.text()).not.toContain("恢复日期已保存");
+    expect(wrapper.get("#chrome [role='status']").text()).toBe("保存中…");
+    expect(navigator.clipboard.writeText).not.toHaveBeenCalled();
+    await wrapper.get("#resumeSettingsToggle").trigger("click");
+    resolve(response({}, 500)); await flushPromises();
+    expect(wrapper.get("#resumeSettings").isVisible()).toBe(false);
+    expect(wrapper.get("#resumeSettingsError").isVisible()).toBe(true);
+    expect(wrapper.findAll("button").find((button) => button.text() === "重试加载恢复设置")!.isVisible()).toBe(true);
+    expect(wrapper.get("#resumeSettingsError").text()).toContain("保存失败");
+    expect(wrapper.get<HTMLInputElement>("#claudeResumeCutoff").element.value).toBe("2026-07-01");
+    expect(savedSettings.claudeResumeCutoff).toBe("");
+    await wrapper.get("tbody tr.row").trigger("click");
+    expect(navigator.clipboard.writeText).not.toHaveBeenCalled();
+    fetchMock.mockImplementation(fallback);
+    await wrapper.get("#resumeSettingsToggle").trigger("click");
+    vi.mocked(window.confirm).mockReturnValueOnce(false);
+    const retryCalls = fetchMock.mock.calls.length;
+    await wrapper.get("#saveResumeSettings").trigger("click"); await flushPromises();
+    expect(fetchMock.mock.calls).toHaveLength(retryCalls);
+    expect(wrapper.get("#resumeSettingsError").text()).toContain("保存失败");
+    await wrapper.get("#saveResumeSettings").trigger("click"); await flushPromises();
+    expect(window.confirm).toHaveBeenCalledTimes(3);
+    expect(wrapper.text()).toContain("恢复日期已保存");
+    expect(wrapper.find("#resumeSettingsError").exists()).toBe(false);
+    wrapper.unmount();
+  });
+
+  test.each(["row click", "row Enter", "detail"])("%s keeps confirmed hints and labels stable during a fresh read", async (entry) => {
+    const allowed = { ...makeRow(3), birth: cutoff };
+    serve([oldClaude, allowed]);
+    savedSettings.claudeResumeCutoff = "2026-07-01";
+    const wrapper = mount(App, { attachTo: document.body }); await flushPromises();
+    const row = wrapper.findAll("tbody tr.row").find((item) => item.text().includes(allowed.name))!;
+    if (entry === "detail") {
+      await row.get("[aria-label='打开详情页']").trigger("click"); await flushPromises();
+    }
+    const action = entry === "detail"
+      ? wrapper.findAll("#detail button").find((button) => button.text() === "复制恢复命令")!
+      : row;
+    const bars = wrapper.findAll("#chrome .bar2").filter((bar) => bar.isVisible()).length;
+    const reason = entry === "detail" ? "" : wrapper.get("tbody .resume-blocked").attributes("title");
+    const fallback = fetchMock.getMockImplementation() as (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
+    let resolve!: (value: Response) => void;
+    fetchMock.mockImplementation((input: RequestInfo | URL, init?: RequestInit) => String(input) === "/api/settings"
+      ? new Promise<Response>((done) => { resolve = done; }) : fallback(input, init));
+    const calls = fetchMock.mock.calls.filter(([url]) => url === "/api/settings").length;
+    await action.trigger(entry === "row Enter" ? "keydown" : "click", { key: "Enter" });
+    expect(navigator.clipboard.writeText).not.toHaveBeenCalled();
+    expect(wrapper.findAll("#chrome .bar2").filter((bar) => bar.isVisible())).toHaveLength(bars);
+    expect(wrapper.find("[role='status']").exists()).toBe(false);
+    if (entry === "detail") {
+      expect(action.text()).toBe("复制恢复命令");
+      expect((action.element as HTMLButtonElement).disabled).toBe(true);
+      expect(wrapper.find("#detail .resume-blocked").exists()).toBe(false);
+      (action.element as HTMLButtonElement).disabled = false;
+    } else {
+      expect(row.find(".resume-blocked").exists()).toBe(false);
+      expect(wrapper.get("tbody .resume-blocked").attributes("title")).toBe(reason);
+    }
+    await action.trigger("click");
+    if (entry !== "detail") await action.trigger("keydown", { key: "Enter" });
+    expect(wrapper.get("#toast").text()).toContain("尚未确认");
+    expect(fetchMock.mock.calls.filter(([url]) => url === "/api/settings")).toHaveLength(calls + 1);
+    expect(navigator.clipboard.writeText).not.toHaveBeenCalled();
+    resolve(response(savedSettings)); await flushPromises();
+    expect(navigator.clipboard.writeText).toHaveBeenCalledExactlyOnceWith(allowed.resume_command);
+    expect(wrapper.findAll("#chrome .bar2").filter((bar) => bar.isVisible())).toHaveLength(bars);
+    if (entry === "detail") {
+      expect(action.text()).toBe("复制恢复命令");
+      expect((action.element as HTMLButtonElement).disabled).toBe(false);
+      expect(wrapper.find("#detail .resume-blocked").exists()).toBe(false);
+    }
+    wrapper.unmount();
+  });
+
+  test.each(["saved", "dirty"])("keeps the %s status during a background settings read", async (state) => {
+    const wrapper = mount(App, { attachTo: document.body }); await flushPromises();
+    await wrapper.get("#resumeSettingsToggle").trigger("click");
+    await wrapper.get("#claudeResumeCutoff").setValue("2026-07-01");
+    if (state === "saved") {
+      await wrapper.get("#saveResumeSettings").trigger("click"); await flushPromises();
+    }
+    await wrapper.get("#resumeSettingsToggle").trigger("click");
+    const status = wrapper.get("#chrome [role='status']").text();
+    const fallback = fetchMock.getMockImplementation() as (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
+    let resolve!: (value: Response) => void;
+    fetchMock.mockImplementation((input: RequestInfo | URL, init?: RequestInit) => String(input) === "/api/settings"
+      ? new Promise<Response>((done) => { resolve = done; }) : fallback(input, init));
+    window.dispatchEvent(new Event("focus")); await flushPromises();
+    expect(wrapper.get("#chrome [role='status']").text()).toBe(status);
+    resolve(response(savedSettings)); await flushPromises();
+    expect(wrapper.get("#chrome [role='status']").text()).toBe(status);
+    expect(wrapper.get<HTMLInputElement>("#claudeResumeCutoff").element.value).toBe("2026-07-01");
+    wrapper.unmount();
+  });
+
+  test.each(["failed", "invalid"])("a %s fresh read keeps the hidden-panel error and retry visible without copying", async (state) => {
+    serve([oldClaude]);
+    const wrapper = mount(App, { attachTo: document.body }); await flushPromises();
+    const fallback = fetchMock.getMockImplementation() as (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
+    fetchMock.mockImplementation((input: RequestInfo | URL, init?: RequestInit) => String(input) === "/api/settings"
+      ? Promise.resolve(response(state === "failed" ? {} : { claudeResumeCutoff: "2026-02-30" }, state === "failed" ? 500 : 200))
+      : fallback(input, init));
+    await wrapper.get("tbody tr.row").trigger("click"); await flushPromises();
+    expect(wrapper.get("#resumeSettings").isVisible()).toBe(false);
+    expect(wrapper.get("#resumeSettingsError").isVisible()).toBe(true);
+    const retry = wrapper.findAll("button").find((button) => button.text() === "重试加载恢复设置")!;
+    expect(retry.isVisible()).toBe(true);
+    await wrapper.get("tbody tr.row").trigger("keydown", { key: "Enter" }); await flushPromises();
+    expect(wrapper.get("#resumeSettingsError").isVisible()).toBe(true);
+    expect(navigator.clipboard.writeText).not.toHaveBeenCalled();
+    fetchMock.mockImplementation(fallback);
+    await retry.trigger("click"); await flushPromises();
+    expect(wrapper.find("#resumeSettingsError").exists()).toBe(false);
+    expect(navigator.clipboard.writeText).not.toHaveBeenCalled();
+    wrapper.unmount();
+  });
+
+  test("copy-time read observes another client and clipboard failures stay visible", async () => {
+    serve([oldClaude]);
+    const wrapper = mount(App); await flushPromises();
+    savedSettings.claudeResumeCutoff = "2026-07-01";
+    await wrapper.get("tbody tr.row").trigger("click"); await flushPromises();
+    expect(navigator.clipboard.writeText).not.toHaveBeenCalled();
+    expect(wrapper.get<HTMLInputElement>("#claudeResumeCutoff").element.value).toBe("2026-07-01");
+    vi.mocked(navigator.clipboard.writeText).mockRejectedValueOnce(new Error("permission"));
+    await wrapper.get("[aria-label='复制源文件路径']").trigger("click"); await flushPromises();
+    expect(wrapper.findAll("[role='alert']").some((item) => item.text().includes("剪贴板"))).toBe(true);
+    wrapper.unmount();
+  });
+
+  test("discards an older GET response after an accepted save", async () => {
+    serve([oldClaude]);
+    const fallback = fetchMock.getMockImplementation() as (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
+    const wrapper = mount(App); await flushPromises();
+    await wrapper.get("#resumeSettingsToggle").trigger("click");
+    await wrapper.get("#claudeResumeCutoff").setValue("2026-07-01");
+    let resolve!: (value: Response) => void;
+    fetchMock.mockImplementation((input: RequestInfo | URL, init?: RequestInit) => String(input) === "/api/settings" && init?.method !== "POST"
+      ? new Promise<Response>((done) => { resolve = done; }) : fallback(input, init));
+    window.dispatchEvent(new Event("focus")); await flushPromises();
+    (wrapper.get("#saveResumeSettings").element as HTMLButtonElement).disabled = false;
+    await wrapper.get("#saveResumeSettings").trigger("click"); await flushPromises();
+    resolve(response({ claudeResumeCutoff: "" })); await flushPromises();
+    expect(wrapper.get<HTMLInputElement>("#claudeResumeCutoff").element.value).toBe("2026-07-01");
+    expect(wrapper.text()).toContain("恢复日期已保存");
+    wrapper.unmount();
+  });
+
 });

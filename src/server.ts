@@ -1,5 +1,5 @@
 import { CatalogError, SessionCatalog } from "./catalog.ts";
-import { isStatus, type MarkPatch } from "./contracts.ts";
+import { parseDashboardSettings, isStatus, type MarkPatch } from "./contracts.ts";
 import { withResumeCommand } from "./resume.ts";
 import { homeDirectory } from "./paths.ts";
 
@@ -52,6 +52,14 @@ export function startServer(options: ServerOptions): Bun.Server<undefined> {
           return url.searchParams.get("nonce") === nonce ? json({ ok: true, nonce }) : json({ error: "Not found" }, 404);
         if (request.method === "GET" && (url.pathname === "/" || url.pathname === "/index.html"))
           return new Response(html, { headers: { "content-type": "text/html; charset=utf-8" } });
+        if (request.method === "GET" && url.pathname === "/api/settings") return Response.json(catalog.getSettings(), { headers: { "cache-control": "no-store" } });
+        if (request.method === "POST" && url.pathname === "/api/settings") {
+          const value = await body(request);
+          let settings;
+          try { settings = parseDashboardSettings(value); }
+          catch { throw new RequestError(400, "恢复设置无效，日期必须为空或有效的 YYYY-MM-DD 日期"); }
+          return json(catalog.setSettings(settings));
+        }
         if (request.method === "GET" && url.pathname === "/api/sessions") {
           const sessions = await catalog.list({ fresh: url.searchParams.get("fresh") === "1" });
           return json({ generatedAt: new Date().toISOString(), home, sessions: sessions.map((session) => withResumeCommand(session, platform)) });

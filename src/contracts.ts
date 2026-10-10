@@ -4,6 +4,10 @@ export type Tool = (typeof TOOLS)[number];
 export const STATUSES = ["", "todo", "in progress", "review", "blocked", "done", "archived"] as const;
 export type SessionStatus = (typeof STATUSES)[number];
 
+export interface DashboardSettings {
+  claudeResumeCutoff: string;
+}
+
 export interface Session {
   id: string;
   tool: Tool;
@@ -111,6 +115,15 @@ const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value);
 const stringFields = (value: Record<string, unknown>, fields: string[]) => fields.every((field) => typeof value[field] === "string");
 const numberFields = (value: Record<string, unknown>, fields: string[]) => fields.every((field) => typeof value[field] === "number" && Number.isFinite(value[field]));
+
+export function parseDashboardSettings(value: unknown): DashboardSettings {
+  if (!isRecord(value) || typeof value.claudeResumeCutoff !== "string") throw new Error("恢复设置无效");
+  const date = value.claudeResumeCutoff;
+  if (date && (!/^\d{4}-\d{2}-\d{2}$/.test(date)
+      || !Number.isFinite(new Date(`${date}T00:00:00Z`).getTime())
+      || new Date(`${date}T00:00:00Z`).toISOString().slice(0, 10) !== date)) throw new Error("恢复日期必须是有效的 YYYY-MM-DD 日期");
+  return { claudeResumeCutoff: date };
+}
 
 export function isSessionView(value: unknown): value is SessionView {
   if (!isRecord(value)) return false;

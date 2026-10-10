@@ -15,7 +15,7 @@ import {
 import type { Stats } from "node:fs";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import packageJson from "../package.json" with { type: "json" };
-import { isStatus, type LineageEdge, type LineageRefresh, type ManualLineageEdge, type MarkPatch, type Session, type SessionStatus, type Tool, type Transcript, type TranscriptMessage } from "./contracts.ts";
+import { parseDashboardSettings, type DashboardSettings, isStatus, type LineageEdge, type LineageRefresh, type ManualLineageEdge, type MarkPatch, type Session, type SessionStatus, type Tool, type Transcript, type TranscriptMessage } from "./contracts.ts";
 import { LineageIndex } from "./lineage.ts";
 import { homeDirectory, userDataDirectory } from "./paths.ts";
 
@@ -662,6 +662,7 @@ function added(now: Date): string {
 export class SessionCatalog {
   private adapters: Adapter[];
   private marksFile: string;
+  private settingsFile: string;
   private manualLineageFile: string;
   private metadata = new Map<string, { signature: string; value: Metadata | null }>();
   private index: { expires: number; rows: Session[] } | undefined;
@@ -684,10 +685,26 @@ export class SessionCatalog {
     ];
     const dataDirectory = options.dataDirectory ?? userDataDirectory(home, options.environment, options.platform);
     this.marksFile = join(dataDirectory, "stars.json");
+    this.settingsFile = join(dataDirectory, "settings.json");
     this.manualLineageFile = join(dataDirectory, "manual-lineages.json");
     this.lineageIndex = new LineageIndex(join(dataDirectory, "lineage.sqlite"));
     this.now = options.now ?? (() => new Date());
     this.rgPath = options.rgPath;
+  }
+
+  getSettings(): DashboardSettings {
+    let text: string;
+    try { text = readFileSync(this.settingsFile, "utf8"); }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return { claudeResumeCutoff: "" };
+      throw error;
+    }
+    return parseDashboardSettings(JSON.parse(text));
+  }
+
+  setSettings(settings: DashboardSettings): DashboardSettings {
+    atomicWrite(this.settingsFile, JSON.stringify(settings));
+    return settings;
   }
 
   async list(options: { fresh?: boolean; tool?: Tool } = {}): Promise<Session[]> {

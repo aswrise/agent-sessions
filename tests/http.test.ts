@@ -1,4 +1,5 @@
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, describe, expect, test } from "bun:test";
 import { SessionCatalog } from "../src/catalog.ts";
@@ -155,5 +156,44 @@ describe("Bun HTTP seam", () => {
     const response = await fetch(`http://127.0.0.1:${server.port}/star`, { method: "POST", body: JSON.stringify({ id: "claude-a", star: false }) });
     expect(response.status).toBe(500);
     expect(await response.json()).toEqual({ error: "操作失败" });
+  });
+});
+
+describe("service settings", () => {
+  test("shares disk settings across clients and service restarts without listing Sessions", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "settings-http-"));
+    let server!: ReturnType<typeof startServer>;
+    const start = () => {
+      const catalog = new SessionCatalog({ home: directory, dataDirectory: directory });
+      catalog.list = async () => { throw new Error("must not scan histories"); };
+      server = startServer({ catalog, port: 0 });
+      return `http://127.0.0.1:${server.port}/api/settings`;
+    };
+    let url = start();
+    stops.push(() => { server.stop(true); rmSync(directory, { recursive: true, force: true }); });
+    const post = (body: string) => fetch(url, { method: "POST", body });
+    expect(await (await fetch(url)).json()).toEqual({ claudeResumeCutoff: "" });
+    expect(await (await post(JSON.stringify({ claudeResumeCutoff: "2026-07-01" }))).json()).toEqual({ claudeResumeCutoff: "2026-07-01" });
+    const saved = readFileSync(join(directory, "settings.json"), "utf8");
+    for (const body of ["{", "[]", "null", "{}", '{"claudeResumeCutoff":"2026-02-30"}']) {
+      expect((await post(body)).status).toBe(400);
+      expect(readFileSync(join(directory, "settings.json"), "utf8")).toBe(saved);
+    }
+    server.stop(true); url = start();
+    expect(await (await fetch(url)).json()).toEqual({ claudeResumeCutoff: "2026-07-01" });
+    await post('{"claudeResumeCutoff":""}');
+    server.stop(true); url = start();
+    expect(await (await fetch(url)).json()).toEqual({ claudeResumeCutoff: "" });
+    for (const corrupt of ["{", '{"claudeResumeCutoff":"2026-02-30"}']) {
+      writeFileSync(join(directory, "settings.json"), corrupt);
+      expect(await (await fetch(url)).json()).toEqual({ error: "操作失败" });
+      expect((await fetch(url)).status).toBe(500);
+    }
+    expect((await post('{"claudeResumeCutoff":"2024-02-29"}')).status).toBe(200);
+    rmSync(join(directory, "settings.json")); mkdirSync(join(directory, "settings.json"));
+    expect((await fetch(url)).status).toBe(500);
+    const failed = await post('{"claudeResumeCutoff":""}');
+    expect(failed.status).toBe(500);
+    expect(await failed.json()).toEqual({ error: "操作失败" });
   });
 });
