@@ -251,9 +251,69 @@ done
     expect(JSON.parse(readFileSync(join(home, ".codex/rename-request.json"), "utf8"))).toMatchObject({
       method: "thread/name/set", params: { threadId: "codex-b", name: "Codex new" },
     });
-    expect(JSON.parse(readFileSync(pi, "utf8").split("\n")[0]!).name).toBe("Pi new");
+    expect(JSON.parse(readFileSync(pi, "utf8").trimEnd().split("\n").at(-1)!).name).toBe("Pi new");
     if (process.platform !== "win32") expect(statSync(pi).mode & 0o777).toBe(0o640);
     expect(JSON.parse(readFileSync(join(home, ".local/share/session-snapshots/stars.json"), "utf8"))["codex-b"].name).toBeUndefined();
+  });
+
+  test.each([false, true])("reads the model from native pi assistant messages without model_change (spaced=%s)", async (spaced) => {
+    const { home, catalog } = setup();
+    const path = join(home, ".pi/agent/sessions/-tmp-gamma/pi-c.jsonl");
+    const records = [
+      { type: "session", version: 3, id: "pi-c", cwd: "/tmp/pi", timestamp: "2026-07-14T03:00:00Z" },
+      { type: "message", message: { role: "user", content: "Find the model" } },
+      { type: "message", message: { role: "assistant", model: "gpt-6.1-sol", content: [{ type: "text", text: "Done" }], provider: "openai-codex" } },
+      { type: "message", message: { role: "toolResult", model: "not-the-model", provider: "fake", content: "x".repeat(2200) } },
+    ];
+    writeFileSync(path, records.map((record) => {
+      const line = JSON.stringify(record);
+      return spaced ? line.replaceAll('\":', '\": ') : line;
+    }).join("\n") + "\n");
+    expect((await catalog.detail("pi-c")).model).toBe("openai-codex/gpt-6.1-sol");
+  });
+
+  test("reads reordered native pi model_change fields after the last assistant reply", async () => {
+    const { home, catalog } = setup();
+    const path = join(home, ".pi/agent/sessions/-tmp-gamma/pi-c.jsonl");
+    appendFileSync(path, JSON.stringify({ type: "model_change", modelId: "new-model", id: "selected", provider: "new-provider" }) + "\n");
+    expect((await catalog.detail("pi-c")).model).toBe("new-provider/new-model");
+  });
+
+  test("reads the latest native pi name even beyond the metadata head and refreshes it", async () => {
+    const { home, catalog } = setup();
+    const path = join(home, ".pi/agent/sessions/-tmp-gamma/pi-c.jsonl");
+    appendFileSync(path, (JSON.stringify({ type: "custom", data: {} }) + "\n").repeat(410));
+    appendFileSync(path, JSON.stringify({ type: "session_info", id: "name-old", parentId: null, name: "Pi native old" }) + "\n");
+    appendFileSync(path, JSON.stringify({ type: "session_info", id: "name-new", parentId: "name-old", name: "Pi native latest" }) + "\n");
+    expect((await catalog.detail("pi-c")).name).toBe("Pi native latest");
+    appendFileSync(path, JSON.stringify({ type: "session_info", id: "name-next", parentId: "name-new", name: "Pi external rename" }) + "\n");
+    expect((await catalog.list({ fresh: true })).find(({ id }) => id === "pi-c")?.name).toBe("Pi external rename");
+  });
+
+  test.each(["", "   ", undefined])("honors a cleared native pi name (%s) over an old header name", async (name) => {
+    const { home, catalog } = setup();
+    const path = join(home, ".pi/agent/sessions/-tmp-gamma/pi-c.jsonl");
+    appendFileSync(path, JSON.stringify({ type: "session_info", id: "clear", parentId: null, name }) + "\n");
+    expect((await catalog.detail("pi-c")).name).toBe("");
+  });
+
+  test.each([true, false])("renames pi with a native append-only session_info entry without rewriting history (newline=%s)", async (newline) => {
+    const { home, catalog } = setup();
+    const path = join(home, ".pi/agent/sessions/-tmp-gamma/pi-c.jsonl");
+    appendFileSync(path, JSON.stringify({ type: "message", id: "leaf", parentId: null, message: { role: "assistant", content: "Existing reply" } }) + "\n");
+    if (!newline) writeFileSync(path, readFileSync(path, "utf8").trimEnd());
+    const before = readFileSync(path, "utf8");
+    const messages = (await catalog.detail("pi-c")).messages;
+    await catalog.rename("pi-c", "  Pi native renamed  ");
+    const after = readFileSync(path, "utf8");
+    expect(after.startsWith(before)).toBe(true);
+    const entry = JSON.parse(after.slice(before.length).trim());
+    expect(entry).toMatchObject({ type: "session_info", name: "Pi native renamed", parentId: "leaf" });
+    expect(typeof entry.id).toBe("string");
+    expect(Number.isNaN(Date.parse(entry.timestamp))).toBe(false);
+    expect((await catalog.detail("pi-c")).name).toBe("Pi native renamed");
+    expect((await catalog.detail("pi-c")).messages).toEqual(messages);
+    expect((await new SessionCatalog({ home }).detail("pi-c")).name).toBe("Pi native renamed");
   });
 
   test("resolves only unique prefixes", async () => {

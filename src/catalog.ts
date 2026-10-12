@@ -260,10 +260,6 @@ function* tailLines(fd: number, size: number): Generator<string | undefined> {
   }
 }
 
-function lastMatch(line: string, pattern: RegExp): RegExpMatchArray | undefined {
-  return [...line.matchAll(pattern)].at(-1);
-}
-
 function tailMetadata(path: string, tool: Tool): Pick<Metadata, "model" | "thinking_level"> {
   let size: number;
   try {
@@ -271,24 +267,25 @@ function tailMetadata(path: string, tool: Tool): Pick<Metadata, "model" | "think
   } catch {
     return { model: "", thinking_level: "" };
   }
-  let model = "", modelId = "", record: Json | undefined;
+  let model = "", record: Json | undefined;
   const fd = openSync(path, "r");
   try {
     for (const line of tailLines(fd, size)) {
       if (line === undefined) {
-        if (tool === "pi") {
-          if (modelId) return { model: modelId, thinking_level: "" };
-          continue;
-        }
+        if (tool === "pi") continue;
         const thinking_level = tool === "codex" && isRecord(record?.payload)
           ? stringValue(record.payload.effort) : stringValue(record?.effort);
         if ((model || thinking_level) && (tool !== "codex" || record)) return { model, thinking_level };
         continue;
       }
       if (tool === "pi") {
-        const pair = lastMatch(line, /"provider":"([^"]+)","modelId":"([^"]+)"/g);
-        if (pair) return { model: `${pair[1]}/${pair[2]}`, thinking_level: "" };
-        modelId ||= lastMatch(line, /"modelId":"([^"]+)"/g)?.[1] ?? "";
+        if (!/"(?:model|modelId)"\s*:/.test(line)) continue;
+        const entry = parseRecord(line);
+        const message = entry?.type === "message" && isRecord(entry.message) && entry.message.role === "assistant" ? entry.message : undefined;
+        const source = entry?.type === "model_change" ? entry : message;
+        const id = stringValue(source?.modelId) || stringValue(source?.model) || (message ? stringValue(entry?.modelId) : "");
+        const provider = stringValue(source?.provider) || (message ? stringValue(entry?.provider) : "");
+        if (id) return { model: provider ? `${provider}/${id}` : id, thinking_level: "" };
         continue;
       }
       model ||= [...line.matchAll(/"model":"([^"]+)"/g)]
@@ -598,25 +595,27 @@ class PiAdapter extends JsonlAdapter {
   }
 
   parse(path: string): ParsedMetadata | null {
-    const lines = readHeadLines(path, MAX_HEAD_LINES + 1), meta = parseRecord(lines.next().value ?? ""), id = meta && stringValue(meta.id);
-    if (!meta || meta.type !== "session" || !id) {
-      lines.return(undefined);
-      return null;
-    }
-    let first = "";
+    const [header, ...lines] = readLines(path), meta = parseRecord(header ?? ""), id = meta && stringValue(meta.id);
+    if (!meta || meta.type !== "session" || !id) return null;
+    let first = "", name = stringValue(meta.name), lineNumber = 0;
     for (const line of lines) {
-      if (!line.includes('"role":"user"')) continue;
-      const record = parseRecord(line), message = record && isRecord(record.message) ? record.message : undefined;
-      if (record?.type === "message" && message?.role === "user") first = contentText(message.content);
-      if (first && !first.startsWith("<")) break;
-      first = "";
+      lineNumber++;
+      const readFirst = !first && lineNumber <= MAX_HEAD_LINES && line.includes('"message"');
+      if (!readFirst && !/"type"\s*:\s*"session_info"/.test(line)) continue;
+      const record = parseRecord(line);
+      if (record?.type === "session_info") name = stringValue(record.name).trim();
+      const message = readFirst && record?.type === "message" && isRecord(record.message) ? record.message : undefined;
+      if (message?.role === "user") {
+        const text = contentText(message.content);
+        if (text && !text.startsWith("<")) first = text;
+      }
     }
     return {
       id,
       cwd: stringValue(meta.cwd) || "?",
       first_msg: first,
       birth: isoToEpoch(meta.timestamp),
-      upstream_name: stringValue(meta.name),
+      upstream_name: name,
     };
   }
 
@@ -629,12 +628,16 @@ class PiAdapter extends JsonlAdapter {
   async rename(id: string, name: string, locatedPath?: string): Promise<void> {
     const path = locatedPath ?? this.findFile(id);
     if (!path) throw new CatalogError("not_found", `找不到 pi session 文件: ${id}`);
-    const text = readFileSync(path, "utf8"), newline = text.indexOf("\n");
-    const meta = parseRecord(newline < 0 ? text : text.slice(0, newline));
-    if (!meta) throw new CatalogError("invalid", `pi session metadata 无效: ${id}`);
-    meta.name = name;
-    const output = JSON.stringify(meta) + (newline < 0 ? "" : text.slice(newline));
-    atomicWrite(path, output);
+    const text = readFileSync(path, "utf8"), lines = text.split(/\r?\n/);
+    const meta = parseRecord(lines[0] ?? "");
+    if (meta?.type !== "session" || meta.id !== id) throw new CatalogError("invalid", `pi session metadata 无效: ${id}`);
+    let parentId: string | null = null;
+    for (const line of lines.slice(1)) {
+      const record = parseRecord(line);
+      if (record && typeof record.id === "string") parentId = record.id;
+    }
+    const entry = { type: "session_info", id: crypto.randomUUID(), parentId, timestamp: new Date().toISOString(), name: name.replace(/[\r\n]+/g, " ").trim() };
+    appendFileSync(path, (text.endsWith("\n") ? "" : "\n") + JSON.stringify(entry) + "\n");
   }
 }
 

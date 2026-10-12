@@ -595,6 +595,36 @@ describe("dashboard", () => {
     wrapper.unmount();
   });
 
+  test.each([false, true])("unnamed pi Sessions keep a visible preview and rename target (compact=%s)", async (compact) => {
+    if (compact) localStorage.setItem("compact", "1");
+    const session: SessionView = { ...makeRow(2), tool: "pi", name: "" };
+    fetchMock.mockImplementation(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url === "/api/settings") return response(savedSettings);
+      if (url.startsWith("/api/sessions")) return response({ generatedAt: new Date(0).toISOString(), home: "/home/fixture", sessions: [session] });
+      if (url.startsWith("/api/session?")) return response({ ...session, messages: [{ role: "user", text: "Pi preview text", timestamp: "" }] });
+      if (url === "/api/lineages") return response({ sessions: [], edges: [] });
+      return response({ ok: true });
+    });
+    vi.useFakeTimers();
+    const wrapper = mount(App, { attachTo: document.body });
+    await flushPromises();
+    const target = wrapper.get(".name-text");
+    expect(target.text()).toBe("未命名会话");
+    await target.trigger("mouseenter");
+    await vi.advanceTimersByTimeAsync(181); await flushPromises();
+    expect(wrapper.get("#tip").text()).toContain("Pi preview text");
+    await target.trigger("click"); await flushPromises();
+    const input = wrapper.get<HTMLInputElement>("input[aria-label='名称']");
+    expect(input.element.value).toBe("");
+    await input.setValue("Pi renamed");
+    await input.trigger("keydown", { key: "Enter" }); await flushPromises();
+    expect(fetchMock).toHaveBeenCalledWith("/rename", expect.objectContaining({ body: JSON.stringify({ id: session.id, name: "Pi renamed" }) }));
+    expect(wrapper.get(".name-text").text()).toBe("Pi renamed");
+    expect(navigator.clipboard.writeText).not.toHaveBeenCalled();
+    wrapper.unmount();
+  });
+
   test("coalesces repeated hover requests while Transcript detail is loading", async () => {
     vi.useFakeTimers();
     let finishDetail!: (value: Response) => void;

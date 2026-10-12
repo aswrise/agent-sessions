@@ -998,7 +998,7 @@ function toggleCompact(): void {
 
 // 紧凑模式下首条消息不显示，名称格改挂 Transcript 预览，免得那条信息彻底没入口。
 function previewSession(row: SessionView, event: MouseEvent): void {
-  if (compact.value) showTranscriptPreview(row, event);
+  if (compact.value || !row.name) showTranscriptPreview(row, event);
   else showTextPreview(event, `${row.id}:name`, row.name);
 }
 
@@ -1181,9 +1181,9 @@ onBeforeUnmount(() => {
             </td>
             <td class="sessioncell">
               <div class="line1">
-                <span class="nm" @click.stop="startEdit(row, 'name')">
+                <span class="nm" title="点击修改会话名" @click.stop="startEdit(row, 'name')">
                   <input v-if="editing?.id === row.id && editing.field === 'name'" v-model="editValue" class="cell-input" :data-edit="`${row.id}:name`" aria-label="名称" @click.stop @keydown="editKeydown(row, 'name', $event)" @blur="finishEdit(row, 'name', true)" />
-                  <span v-else class="name-text" @mouseenter="previewSession(row, $event)" @mouseleave="schedulePreviewHide">{{ row.name }}</span>
+                  <span v-else class="name-text" @mouseenter="previewSession(row, $event)" @mouseleave="schedulePreviewHide">{{ row.name || "未命名会话" }}</span>
                 </span>
                 <span v-if="resumeCopyBlocked(row)" class="resume-blocked" :title="resumeBlockedReason(row)">恢复已禁用</span>
                 <span class="note-slot" :title="row.star_note || '添加备注'" @click.stop="startEdit(row, 'star_note')">
