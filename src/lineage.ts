@@ -1,6 +1,7 @@
 import { Database } from "bun:sqlite";
-import { mkdirSync, readFileSync, statSync } from "node:fs";
+import { mkdirSync, statSync } from "node:fs";
 import { basename, dirname, normalize } from "node:path";
+import { readText } from "./paths.ts";
 import type { ArtifactLineageEdge, LineageEdge, LineageRefresh, Session } from "./contracts.ts";
 
 type Json = Record<string, unknown>;
@@ -38,7 +39,7 @@ function parseLine(line: string): Json | undefined {
 }
 
 function records(path: string): Json[] {
-  return readFileSync(path, "utf8").split(/\r?\n/).flatMap((line) => {
+  return readText(path).split(/\r?\n/).flatMap((line) => {
     const record = parseLine(line);
     return record ? [record] : [];
   });

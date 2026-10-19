@@ -17,7 +17,7 @@ import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "nod
 import packageJson from "../package.json" with { type: "json" };
 import { parseDashboardSettings, type DashboardSettings, isStatus, type LineageEdge, type LineageRefresh, type ManualLineageEdge, type MarkPatch, type Session, type SessionStatus, type Tool, type Transcript, type TranscriptMessage } from "./contracts.ts";
 import { LineageIndex } from "./lineage.ts";
-import { homeDirectory, userDataDirectory } from "./paths.ts";
+import { homeDirectory, readText, userDataDirectory } from "./paths.ts";
 
 const MIN_SIZE = 2048;
 const MAX_HEAD_LINES = 400;
@@ -125,15 +125,17 @@ function skipTranscript(role: string, text: string): boolean {
 }
 
 function readLines(path: string, strict = false): string[] {
-  if (strict) return readFileSync(path, "utf8").split(/\r?\n/);
+  if (strict) return readText(path).split(/\r?\n/);
   try {
-    return readFileSync(path, "utf8").split(/\r?\n/);
+    return readText(path).split(/\r?\n/);
   } catch {
     return [];
   }
 }
 
 function* readHeadLines(path: string, limit: number): Generator<string> {
+  // ponytail: .zst 整文件解压；Codex 元数据优先走 state_5.sqlite，只有未入库的文件会到这里
+  if (path.endsWith(".zst")) return yield* readLines(path).slice(0, limit);
   let fd: number | undefined;
   try {
     fd = openSync(path, "r");
@@ -261,6 +263,7 @@ function* tailLines(fd: number, size: number): Generator<string | undefined> {
 }
 
 function tailMetadata(path: string, tool: Tool): Pick<Metadata, "model" | "thinking_level"> {
+  if (path.endsWith(".zst")) return { model: "", thinking_level: "" };
   let size: number;
   try {
     size = statSync(path).size;
@@ -456,14 +459,15 @@ class CodexAdapter extends JsonlAdapter {
 
   discover(): string[] {
     if (!existsSync(this.root)) return [];
-    return [...new Bun.Glob("*/*/*/rollout-*.jsonl").scanSync({ cwd: this.root, absolute: true, dot: true })];
+    return [...new Bun.Glob("*/*/*/rollout-*.{jsonl,jsonl.zst}").scanSync({ cwd: this.root, absolute: true, dot: true })];
   }
 
   parse(path: string): ParsedMetadata | null {
-    const indexedPath = resolve(path);
+    const indexedPath = resolve(path).replace(/\.zst$/, "");
     if (this.indexedMetadata.has(indexedPath)) {
       const indexed = this.indexedMetadata.get(indexedPath);
       if (!indexed) return null;
+      if (path.endsWith(".zst")) return indexed;
       const meta = parseRecord(readHeadLines(path, 1).next().value ?? "");
       const payload = meta && isRecord(meta.payload) ? meta.payload : undefined;
       const birth = isoToEpoch(payload?.timestamp) ?? isoToEpoch(meta?.timestamp);
@@ -507,7 +511,7 @@ class CodexAdapter extends JsonlAdapter {
   }
 
   metadataSignature(path: string): string {
-    const indexedPath = resolve(path);
+    const indexedPath = resolve(path).replace(/\.zst$/, "");
     return this.indexedMetadata.has(indexedPath)
       ? JSON.stringify(this.indexedMetadata.get(indexedPath))
       : this.metadataRevision;
@@ -546,7 +550,7 @@ class CodexAdapter extends JsonlAdapter {
       database = new Database(this.stateFile, { readonly: true });
       const columns = new Set((database.query("SELECT name FROM pragma_table_info('threads')").all() as Json[]).map((row) => stringValue(row.name)));
       const optional = (name: string) => columns.has(name) ? name : `NULL AS ${name}`;
-      const rows = database.query(`SELECT id, title, first_user_message, ${optional("model")}, ${optional("rollout_path")}, ${optional("cwd")}, ${optional("created_at")}, ${optional("created_at_ms")}, ${optional("thread_source")} FROM threads`).all() as Json[];
+      const rows = database.query(`SELECT id, title, first_user_message, ${optional("model")}, ${optional("rollout_path")}, ${optional("cwd")}, ${optional("created_at")}, ${optional("created_at_ms")}, ${optional("thread_source")}, ${optional("reasoning_effort")} FROM threads`).all() as Json[];
       for (const row of rows) {
         const id = stringValue(row.id), title = stringValue(row.title), first = stringValue(row.first_user_message);
         if (id && first) firstMessages.set(id, first);
@@ -560,6 +564,7 @@ class CodexAdapter extends JsonlAdapter {
           birth: numberValue(row.created_at_ms) === undefined ? numberValue(row.created_at) : numberValue(row.created_at_ms)! / 1000,
           upstream_name: "",
           ...(stringValue(row.model) ? { model: stringValue(row.model) } : {}),
+          ...(stringValue(row.reasoning_effort) ? { thinking_level: stringValue(row.reasoning_effort) } : {}),
         });
       }
     } catch { return this.namesLoaded ? this.names : names; }
@@ -795,7 +800,7 @@ export class SessionCatalog {
     if (roots.length) {
       const patterns = [...new Set([query, JSON.stringify(query).slice(1, -1)]
         .filter((pattern) => !pattern.includes("\n") && !pattern.includes("\r")))];
-      const processResult = Bun.spawnSync([rg, "-i", "-F", "-l", "--no-messages", "--no-ignore", "--hidden",
+      const processResult = Bun.spawnSync([rg, "-i", "-F", "-l", "-z", "--no-messages", "--no-ignore", "--hidden",
         ...patterns.flatMap((pattern) => ["-e", pattern]), "--", ...roots]);
       if (processResult.exitCode > 1)
         throw new CatalogError("search_failed", processResult.stderr.toString().trim() || "ripgrep 搜索失败");
@@ -880,7 +885,7 @@ export class SessionCatalog {
     const live = new Set(files.map(({ adapter, path }) => `${adapter.tool}:${resolve(path)}`));
     const seen = new Set<string>(), rows: Session[] = [], locations = new Map<string, Located>();
     for (const file of files) {
-      if (file.stat.size < MIN_SIZE) continue;
+      if (file.stat.size < MIN_SIZE && !file.path.endsWith(".zst")) continue;
       const metadata = this.cached(file);
       if (!metadata || seen.has(metadata.id)) continue;
       seen.add(metadata.id);

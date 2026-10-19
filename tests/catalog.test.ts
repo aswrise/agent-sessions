@@ -50,6 +50,18 @@ describe("SessionCatalog", () => {
     expect((await catalog.list({ fresh: true })).map((session) => session.id)).not.toContain("codex-child");
   });
 
+  test("reads Codex rollouts compressed to .jsonl.zst", async () => {
+    const { home, catalog } = setup();
+    const rollout = join(home, ".codex/sessions/2026/07/14/rollout-codex-b.jsonl");
+    const expected = (await catalog.detail("codex-b")).messages;
+    writeFileSync(rollout + ".zst", Bun.zstdCompressSync(readFileSync(rollout)));
+    rmSync(rollout);
+    const fresh = new SessionCatalog({ home });
+    expect((await fresh.list({ fresh: true })).find(({ id }) => id === "codex-b")?.source_path).toBe(rollout + ".zst");
+    expect((await fresh.detail("codex-b")).messages).toEqual(expected);
+    expect((await fresh.find("FIXTURE-ASSISTANT-CODEX")).results.map(({ id }) => id)).toEqual(["codex-b"]);
+  });
+
   test("deep search combines summary fields with readable Transcript text", async () => {
     const { home, catalog } = setup();
     appendFileSync(join(home, ".claude/projects/-tmp-alpha/claude-a.jsonl"), JSON.stringify({
