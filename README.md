@@ -180,6 +180,12 @@ omitted until their source returns; their marks and manual relations remain.
 Archive discovery accepts valid flat or nested JSONL files and excludes
 recognized internal subagents and malformed records. Valid tiny archive files
 are included. Live files retain the existing 2 KiB minimum for compatibility.
+Decompress `.jsonl.zst` snapshots into a separate JSONL archive directory before
+registering that directory; retain the compressed originals. Archive Codex
+readers also accept early `id`/`timestamp`/`instructions` headers and direct
+message records, including nullable instructions. Claude archive readers accept
+transcript exports with direct user/assistant content. Missing historical working
+directories display as `?`.
 Diagnostics report discovered, valid, and skipped counts. Escaping file links
 are skipped. The same real file in overlapping roots appears once, with live
 roots taking precedence and then configuration order. Separate snapshot files

@@ -395,16 +395,16 @@ class ClaudeAdapter extends JsonlAdapter {
       cwd ||= stringValue(record.cwd);
       birth ??= isoToEpoch(record.timestamp);
       if (!first && record.type === "user" && !record.isSidechain) {
-        const message = isRecord(record.message) ? record.message : {};
+        const message = isRecord(record.message) ? record.message : this.archive ? record : {};
         const text = contentText(message.content);
         if (text && !text.startsWith("<") && !text.startsWith("Caveat:")) first = text;
       }
       if (cwd && first) break;
     }
-    if (!cwd || this.archive && !recognized) return null;
+    if (this.archive ? !recognized : !cwd) return null;
     const id = this.archive && originalId ? originalId : basename(path, ".jsonl");
     const titles = this.archive ? this.titleFiles.get(resolve(path)) : undefined;
-    return { id, cwd, first_msg: first, birth, upstream_name: titles?.custom.get(id) || titles?.ai.get(id) || "" };
+    return { id, cwd: cwd || "?", first_msg: first, birth, upstream_name: titles?.custom.get(id) || titles?.ai.get(id) || "" };
   }
 
   loadNames(): Map<string, string> {
@@ -466,8 +466,8 @@ class ClaudeAdapter extends JsonlAdapter {
   transcript(id: string, path?: string): TranscriptMessage[] {
     return this.messages(id, (record) => {
       if (!["user", "assistant"].includes(stringValue(record.type)) || record.isSidechain || record.toolUseResult) return;
-      return isRecord(record.message) ? record.message : undefined;
-    }, path, '"message"');
+      return isRecord(record.message) ? record.message : this.archive ? { ...record, role: record.type } : undefined;
+    }, path, this.archive ? '"content"' : '"message"');
   }
 
   async rename(id: string, name: string, locatedPath?: string): Promise<void> {
@@ -506,7 +506,9 @@ class CodexAdapter extends JsonlAdapter {
     }
     const lines = readHeadLines(path, MAX_HEAD_LINES + 1);
     const meta = parseRecord(lines.next().value ?? "");
-    const payload = meta && isRecord(meta.payload) ? meta.payload : undefined;
+    const legacy = this.archive && meta?.type === undefined && typeof meta?.id === "string"
+      && (typeof meta.instructions === "string" || meta.instructions === null) && isoToEpoch(meta.timestamp) !== undefined;
+    const payload = meta && isRecord(meta.payload) ? meta.payload : legacy ? meta : undefined;
     const id = payload && stringValue(payload.id);
     if (!meta || !payload || !id || payload.thread_source === "subagent"
       || this.archive && (payload.source === "subagent" || isRecord(payload.source) && "subagent" in payload.source)) {
@@ -522,7 +524,7 @@ class CodexAdapter extends JsonlAdapter {
       for (const line of lines) {
         if (!line.includes("user")) continue;
         const record = parseRecord(line);
-        const value = record?.payload;
+        const value = legacy && record?.type === "message" ? record : record?.payload;
         if (!isRecord(value)) continue;
         if (value.type === "user_message") first = stringValue(value.message).trim();
         else {
@@ -651,9 +653,10 @@ class CodexAdapter extends JsonlAdapter {
 
   transcript(id: string, path?: string): TranscriptMessage[] {
     return this.messages(id, (record) => {
+      if (this.archive && record.type === "message") return record;
       if (record.type !== "response_item" || !isRecord(record.payload) || record.payload.type !== "message") return;
       return record.payload;
-    }, path, '"response_item"');
+    }, path, this.archive ? '"message"' : '"response_item"');
   }
 
   async rename(id: string, name: string): Promise<void> {

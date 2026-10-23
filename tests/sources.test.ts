@@ -367,6 +367,45 @@ describe("configured archive sources", () => {
     for (const row of rows) { expect(primaryAction(row)).toEqual({ kind: "path", value: row.source_path }); expect(withResumeCommand(row).resume_command).toBeUndefined(); }
   });
 
+  test("reads legacy Codex archive headers and direct messages without changing live discovery", async () => {
+    const f = setup(), old = join(f.root, "legacy");
+    const records = [
+      { id: "legacy-codex", timestamp: "2025-09-01T00:00:00Z", instructions: null },
+      { record_type: "state" },
+      { type: "message", role: "user", content: [{ type: "input_text", text: "legacy question" }] },
+      { type: "message", role: "assistant", content: [{ type: "output_text", text: "legacy answer needle" }] },
+    ];
+    const path = jsonl(join(old, "legacy.jsonl"), records);
+    jsonl(join(old, "not-session.jsonl"), [{ id: "not-session" }, ...records.slice(1)]);
+    jsonl(join(f.home, ".codex/sessions/2025/09/01/rollout-legacy.jsonl"), records, true);
+    f.configure([source("old", old, "codex")]);
+    const rows = await f.catalog.list();
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ session_id: "legacy-codex", cwd: "?", first_msg: "legacy question", primary_action: { kind: "path", value: path } });
+    expect((await f.catalog.detail(rows[0]!.id)).messages.map(({ role, text }) => ({ role, text }))).toEqual([
+      { role: "user", text: "legacy question" }, { role: "assistant", text: "legacy answer needle" },
+    ]);
+    expect((await f.catalog.find("legacy answer needle")).results.map(row => row.id)).toEqual([rows[0]!.id]);
+  });
+
+  test("reads Claude transcript exports with direct content and no historical cwd", async () => {
+    const f = setup(), old = join(f.root, "exports");
+    const records = [
+      { type: "user", timestamp: "2025-09-01T00:00:00Z", content: "export question" },
+      { type: "assistant", timestamp: "2025-09-01T00:01:00Z", content: "export answer needle" },
+    ];
+    const path = jsonl(join(old, "ses_export.jsonl"), records);
+    jsonl(join(f.home, ".claude/projects/project/live.jsonl"), records, true);
+    f.configure([source("exports", old, "claude")]);
+    const rows = await f.catalog.list();
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ session_id: "ses_export", cwd: "?", first_msg: "export question", primary_action: { kind: "path", value: path } });
+    expect((await f.catalog.detail(rows[0]!.id)).messages.map(({ role, text }) => ({ role, text }))).toEqual([
+      { role: "user", text: "export question" }, { role: "assistant", text: "export answer needle" },
+    ]);
+    expect((await f.catalog.find("export answer needle")).results.map(row => row.id)).toEqual([rows[0]!.id]);
+  });
+
   test("CLI lists and searches all archives by default and preserves result limit semantics", async () => {
     const f = setup(), old = join(f.root, "old");
     pi(join(old, "one.jsonl"), "one"); pi(join(old, "two.jsonl"), "two");

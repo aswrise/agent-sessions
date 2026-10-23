@@ -183,6 +183,11 @@ SQLite 名称、首条消息和模型只用于真实 rollout 路径与原始 ID 
 读取旧 SQLite 时，先把数据库和可选 WAL 复制到临时应用数据目录，再打开副本，
 避免 SQLite 在归档目录创建或更新附属文件。
 
+`.jsonl.zst` 快照需先解压到独立的 JSONL 归档目录，再登记该目录，原压缩文件继续保留。
+旧 Codex 也支持早期的 `id`、`timestamp`、`instructions` 文件头和直接消息记录，
+其中 `instructions` 可以为 null。旧 Claude 支持直接包含用户或助手内容的 transcript 导出。
+历史工作目录缺失时显示 `?`。
+
 旧来源禁止原生改名。标星、备注、状态和手动关系只写 Agent Sessions 应用
 数据。自动血缘只在同一来源内建立；明确添加的手动关系可以跨来源。
 
