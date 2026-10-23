@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { CatalogError, SessionCatalog } from "./catalog.ts";
 import { isTool, type Session, type Tool } from "./contracts.ts";
-import { formatResumeCommand, withResumeCommand } from "./resume.ts";
+import { primaryAction, withResumeCommand } from "./resume.ts";
 import { serveResident, startDashboard, stopDashboard } from "./lifecycle.ts";
 import { homeDirectory, userDataDirectory } from "./paths.ts";
 import packageJson from "../package.json" with { type: "json" };
@@ -36,7 +36,12 @@ function stamp(epoch: number): string {
 function printEntry(row: Session, snippet?: string): void {
   console.log(`${row.starred ? "★" : " "} [${stamp(row.mtime)}] ${row.tool.padEnd(6)} ${row.cwd}`);
   console.log(`    ${snippet ?? (row.name || row.first_msg)}`);
-  console.log(`    ↳ ${formatResumeCommand(row)}\n`);
+  console.log(`    ↳ ${primaryAction(row).value}\n`);
+}
+
+function reportSources(catalog: SessionCatalog): void {
+  for (const diagnostic of catalog.sourceDiagnostics())
+    console.error(`[${diagnostic.source_id}${diagnostic.root_id ? `/${diagnostic.root_id}` : ""}] ${diagnostic.message}`);
 }
 
 function flag(args: string[], name: string): boolean {
@@ -83,12 +88,14 @@ export async function main(argv = process.argv.slice(2), options: { html?: strin
       const rawTool = args[0]; if (rawTool && !isTool(rawTool)) throw new Error(`未知工具: ${rawTool}`);
       const tool: Tool | undefined = rawTool && isTool(rawTool) ? rawTool : undefined;
       const rows = (await catalog.list({ fresh: true, ...(tool ? { tool } : {}) })).filter((row) => !row.archived).slice(0, n);
-      if (json) console.log(JSON.stringify({ sessions: rows.map((row) => withResumeCommand(row)) }, null, 2));
+      reportSources(catalog);
+      if (json) console.log(JSON.stringify({ sessions: rows.map((row) => withResumeCommand(row)), diagnostics: catalog.sourceDiagnostics() }, null, 2));
       else rows.forEach((row) => printEntry(row));
       return 0;
     }
     if (command === "find" && args.length) {
       const { total, results } = await catalog.find(args.join(" "), n);
+      reportSources(catalog);
       if (json) { console.log(JSON.stringify({ total, results: results.map((row) => withResumeCommand(row)) }, null, 2)); return 0; }
       if (!results.length) { console.log("没有匹配的 session"); return 0; }
       console.log(`共 ${total} 个匹配 session，显示最近 ${results.length} 个：\n`);
@@ -97,6 +104,7 @@ export async function main(argv = process.argv.slice(2), options: { html?: strin
     if (command === "show" && args.length === 1) {
       const row = await catalog.resolve(args[0]!);
       const transcript = await catalog.detail(row.id);
+      reportSources(catalog);
       if (json) console.log(JSON.stringify(withResumeCommand(transcript), null, 2));
       else {
         printEntry(transcript);
@@ -106,6 +114,7 @@ export async function main(argv = process.argv.slice(2), options: { html?: strin
     }
     if (command === "index" && !args.length) {
       const result = await catalog.refreshLineage(rebuild);
+      reportSources(catalog);
       if (json) console.log(JSON.stringify(result, null, 2));
       else console.log(`已分析 ${result.sessions} 个 session（本次扫描 ${result.scanned} 个），发现 ${result.edges} 条关系，耗时 ${result.elapsed_ms}ms`);
       return 0;
@@ -113,6 +122,7 @@ export async function main(argv = process.argv.slice(2), options: { html?: strin
     if (command === "lineage" && args.length === 1) {
       const row = await catalog.resolve(args[0]!);
       const lineage = await catalog.lineage(row.id);
+      reportSources(catalog);
       const value = { ...lineage, sessions: lineage.sessions.map((session) => withResumeCommand(session)) };
       if (json) console.log(JSON.stringify(value, null, 2));
       else if (!lineage.edges.length) console.log(`${row.id} 暂未发现上下游 session`);

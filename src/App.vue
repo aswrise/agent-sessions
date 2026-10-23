@@ -5,6 +5,7 @@ import LineageGraph from "./LineageGraph.vue";
 import LineagePreview from "./LineagePreview.vue";
 import { lineageComponents } from "./lineageLayout.ts";
 import { compareModels, shortModel } from "./models.ts";
+import { sourceCopy } from "./sourceCopy.ts";
 import {
   isTool,
   parseLineageRefresh,
@@ -14,6 +15,7 @@ import {
   parseTranscriptView,
   STATUSES,
   type SessionStatus,
+  type SourceDiagnostic,
   type SessionView,
   type LineageView,
   type Tool,
@@ -59,6 +61,21 @@ const generatedAt = ref("");
 const home = ref("");
 const loading = ref(true);
 const refreshing = ref(false);
+const source = ref("");
+const diagnostics = ref<SourceDiagnostic[]>([]);
+const hasSourceErrors = computed(() => diagnostics.value.some((item) => item.level === "error"));
+const sourceItems = computed(() => [...new Map(rows.value.map((row) => [row.source_id ?? "live", row.source_label ?? sourceCopy.live])).entries()]);
+const copyGroups = computed(() => {
+  const groups = new Map<string, SessionView[]>();
+  for (const row of rows.value) {
+    const key = JSON.stringify([row.tool, row.session_id ?? row.id]);
+    const group = groups.get(key) ?? [];
+    group.push(row);
+    groups.set(key, group);
+  }
+  return groups;
+});
+const copies = (row: SessionView) => copyGroups.value.get(JSON.stringify([row.tool, row.session_id ?? row.id])) ?? [];
 const error = ref("");
 const notice = ref("");
 const viewMode = ref<ViewMode>("sessions");
@@ -220,6 +237,7 @@ const filtered = computed(() => {
     if (tab.value === "__star__" && !row.starred) return false;
     if (tab.value === "__chain__" && !chainInfo.value.has(row.id)) return false;
     if (isTool(tab.value) && row.tool !== tab.value) return false;
+    if (source.value && (row.source_id ?? "live") !== source.value) return false;
     if (model.value && row.model !== model.value) return false;
     if (path.value && row.cwd !== path.value) return false;
     if (status.value && row.status !== status.value) return false;
@@ -244,7 +262,7 @@ const footerText = computed(() => {
   const start = (page.value - 1) * PAGE_SIZE;
   const range = pages.value > 1 ? `显示第 ${start + 1}-${start + visible.value.length} 行，共 ${total} 个匹配` : `${total} 个匹配`;
   const deep = searchMode.value === "deep" && deepSearched.value && deepTotal.value > total ? `，深度检索共 ${deepTotal.value} 个` : "";
-  return `${range}${deep}。点击行复制恢复命令，悬停行显示操作，首条消息悬停预览对话`;
+  return `${range}${deep}。${sourceCopy.footer}`;
 });
 
 watch(keyword, (value) => {
@@ -256,7 +274,7 @@ watch(keyword, (value) => {
   }
   searchTimer = setTimeout(() => { effectiveKeyword.value = value; }, 120);
 });
-watch([path, model, status, updatedFrom, updatedTo, createdFrom, createdTo, sizeMin, sizeMax], () => { page.value = 1; });
+watch([source, path, model, status, updatedFrom, updatedTo, createdFrom, createdTo, sizeMin, sizeMax], () => { page.value = 1; });
 watch(pages, (value) => { page.value = value ? Math.min(page.value, value) : 1; });
 
 function shortPath(value: string): string {
@@ -303,6 +321,7 @@ async function load(fresh = false): Promise<void> {
     rows.value = envelope.sessions;
     generatedAt.value = envelope.generatedAt;
     home.value = envelope.home;
+    diagnostics.value = envelope.diagnostics ?? [];
   } catch (cause) {
     error.value = cause instanceof Error ? cause.message : "加载失败";
   } finally {
@@ -425,7 +444,7 @@ async function toggleArchive(row: SessionView): Promise<void> {
 }
 
 function startEdit(row: SessionView, field: Editing["field"]): void {
-  if (pending.value.has(row.id)) return;
+  if (pending.value.has(row.id) || field === "name" && row.source_kind === "archive") return;
   editing.value = { id: row.id, field };
   editValue.value = row[field];
   nextTick(() => {
@@ -469,8 +488,12 @@ function sort(key: SortKey): void {
 }
 
 async function copy(row: SessionView | TranscriptView): Promise<void> {
-  await navigator.clipboard.writeText(row.resume_command);
-  showToast("已复制恢复命令");
+  await navigator.clipboard.writeText(row.primary_action?.value ?? row.resume_command ?? "");
+  showToast(sourceCopy.actions[row.primary_action?.kind ?? "resume"].success);
+}
+
+function copyLabel(row: SessionView): string {
+  return sourceCopy.actions[row.primary_action?.kind ?? "resume"].label;
 }
 
 async function copySourcePath(row: SessionView): Promise<void> {
@@ -481,6 +504,7 @@ async function copySourcePath(row: SessionView): Promise<void> {
 }
 
 function clearFilters(): void {
+  source.value = "";
   keyword.value = "";
   effectiveKeyword.value = "";
   path.value = "";
@@ -997,6 +1021,10 @@ onBeforeUnmount(() => {
       <div class="tabs" role="group" aria-label="会话来源">
         <button v-for="item in tabs" :key="item.value" type="button" class="f" :class="{ on: tab === item.value }" :data-count="tabCounts[item.value]" :aria-pressed="tab === item.value" @click="setTab(item.value)">{{ item.label }}</button>
       </div>
+      <select v-model="source" id="sourceFilter" class="select-button" :aria-label="sourceCopy.sourceFilter">
+        <option value="">{{ sourceCopy.allSources }}</option>
+        <option v-for="[id, label] in sourceItems" :key="id" :value="id">{{ label }}</option>
+      </select>
       <button id="pathButton" type="button" class="select-button" aria-haspopup="listbox" :aria-expanded="menu?.key === 'path'" @click.stop="openPathMenu">
         <span class="select-label">{{ pathLabel }}</span><svg viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="m2 4 4 4 4-4" /></svg>
       </button>
@@ -1029,6 +1057,7 @@ onBeforeUnmount(() => {
   </div>
 
   <main>
+    <details v-if="diagnostics.length" class="source-diagnostics" :open="hasSourceErrors"><summary>{{ hasSourceErrors ? sourceCopy.scanProblem : sourceCopy.scanInfo }}</summary><p v-for="item in diagnostics" :key="`${item.source_id}/${item.root_id}`">[{{ item.source_id }}{{ item.root_id ? `/${item.root_id}` : '' }}] {{ item.message }}</p></details>
     <section v-if="!detail && !detailError && !detailLoading && viewMode === 'lineage'" id="lineageOverview" aria-label="全部关系链">
       <div class="lineage-toolbar">
         <div><h2>Session 关系图</h2><p>按文件传递方向从左到右排列；悬停节点可聚焦直接上下游。</p></div>
@@ -1059,7 +1088,7 @@ onBeforeUnmount(() => {
         <tbody>
           <tr v-if="loading"><td colspan="7"><div class="empty">加载中...</div></td></tr>
           <tr v-else-if="!filtered.length"><td colspan="7"><div class="empty">没有匹配的 session，试试更短的关键词或切换筛选</div></td></tr>
-          <tr v-for="row in visible" v-else :key="row.id" class="row" :class="{ starred: row.starred, archived: row.archived, pending: pending.has(row.id) }" tabindex="0" @click="copy(row)" @keydown.enter="copy(row)">
+          <tr v-for="row in visible" v-else :key="row.id" class="row" :class="{ starred: row.starred, archived: row.archived, pending: pending.has(row.id) }" :title="copyLabel(row)" tabindex="0" @click="copy(row)" @keydown.enter="copy(row)">
             <td class="starcell"><button type="button" class="rowbtn starbtn" :disabled="pending.has(row.id)" :aria-label="row.starred ? '取消标记' : '标记重要'" :title="row.starred ? '取消标记' : '标记重要'" @click.stop="toggleStar(row)">{{ row.starred ? "★" : "☆" }}</button></td>
             <td class="dt" @mouseenter="showTextPreview($event, `${row.id}:mtime`, `更新 ${formatDate(row.mtime)}　创建 ${formatDate(row.birth)}　${formatSize(row.size_kb)}`)" @mouseleave="schedulePreviewHide">{{ formatDate(row.mtime) }}</td>
             <td class="modelcell" @mouseenter="showTextPreview($event, `${row.id}:model`, row.model || '无模型')" @mouseleave="schedulePreviewHide">
@@ -1067,7 +1096,9 @@ onBeforeUnmount(() => {
             </td>
             <td class="sessioncell">
               <div class="line1">
-                <span class="nm" @click.stop="startEdit(row, 'name')">
+                <span v-if="row.source_kind === 'archive'" class="source-label" :title="`${row.source_id}/${row.root_id} · ${row.session_id}`">{{ row.source_label }}{{ row.source_scope ? ` · ${row.source_scope}` : '' }}</span>
+                <span v-if="copies(row).length > 1" class="source-label">{{ sourceCopy.copies(copies(row).length) }}</span>
+                <span class="nm" :aria-disabled="row.source_kind === 'archive'" :title="row.source_kind === 'archive' ? sourceCopy.readonlyName : undefined" @click.stop="startEdit(row, 'name')">
                   <input v-if="editing?.id === row.id && editing.field === 'name'" v-model="editValue" class="cell-input" :data-edit="`${row.id}:name`" aria-label="名称" @click.stop @keydown="editKeydown(row, 'name', $event)" @blur="finishEdit(row, 'name', true)" />
                   <span v-else class="name-text" @mouseenter="previewSession(row, $event)" @mouseleave="schedulePreviewHide">{{ row.name }}</span>
                 </span>
@@ -1119,10 +1150,14 @@ onBeforeUnmount(() => {
       <template v-else-if="detail">
         <div class="detail-top">
           <button type="button" class="f act" @click="showList()">返回</button>
-          <button type="button" class="f act" @click="copy(detail)">复制恢复命令</button>
+          <button type="button" class="f act" @click="copy(detail)">{{ copyLabel(detail) }}</button>
+          <button type="button" class="f act" @click="copySourcePath(detail)">{{ sourceCopy.copySourcePath }}</button>
           <button id="addManualLineage" type="button" class="f act" :aria-expanded="manualLineageOpen" @click="manualLineageOpen = !manualLineageOpen">补充上游</button>
           <div class="detail-title">{{ detail.name || detail.first_msg || detail.id }}</div>
-          <div class="detail-meta mono">{{ detail.tool }} · {{ detail.model || "无模型" }} · {{ shortPath(detail.cwd) }} · {{ formatSize(detail.size_kb) }}</div>
+          <div class="detail-meta mono">{{ detail.tool }} · {{ detail.model || "无模型" }} · {{ shortPath(detail.cwd) }} · {{ formatSize(detail.size_kb) }}<template v-if="detail.source_kind === 'archive'"> · {{ detail.source_label }} · {{ detail.session_id }}</template></div>
+          <p v-if="detail.primary_action?.kind === 'fork'">{{ sourceCopy.forkHelp }}</p>
+          <p v-else-if="detail.primary_action?.kind === 'path'">{{ sourceCopy.pathHelp }}</p>
+          <div v-if="copies(detail).length > 1">{{ sourceCopy.otherCopies }}：<button v-for="copy in copies(detail).filter((row) => row.id !== detail!.id)" :key="copy.id" type="button" class="f act" @click="openDetail(copy.id)">{{ copy.source_label ?? sourceCopy.live }} · {{ copy.root_id ?? copy.tool }}</button></div>
           <form v-if="manualLineageOpen" id="manualLineageForm" class="manual-lineage-form" @submit.prevent="addManualLineage">
             <label for="manualUpstream">上游 Session</label>
             <input id="manualUpstream" v-model="manualUpstreamId" list="manualUpstreamOptions" type="text" placeholder="输入名称或 ID 后选择" autocomplete="off" />
@@ -1242,6 +1277,11 @@ input[type=search]:focus{border-color:color-mix(in srgb,var(--lime) 65%,var(--gr
 .filter-count{display:inline-grid;place-items:center;min-width:17px;height:17px;margin-left:5px;padding:0 5px;
   border-radius:999px;background:var(--lime);color:var(--void);font-size:10px;font-weight:700}
 main{max-width:1760px;margin:0 auto;padding:0 32px 56px}
+.source-diagnostics{margin:12px 0;color:var(--ash);font-size:12px;overflow-wrap:anywhere}
+.source-diagnostics summary{cursor:pointer}
+.source-label{max-width:140px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:11px;color:var(--ash)}
+.nm[aria-disabled="true"]{cursor:default}
+.nm[aria-disabled="true"]:empty::after{content:""}
 #list{overflow-x:auto;border:1px solid var(--obsidian);border-radius:14px;background:var(--carbon);
   box-shadow:0 16px 40px rgba(0,0,0,.08)}
 #lineageOverview{display:grid;gap:14px}.lineage-toolbar{display:flex;align-items:center;justify-content:space-between;gap:20px;padding:16px 18px;border:1px solid var(--obsidian);border-radius:14px;background:var(--carbon)}.lineage-toolbar h2{margin:0;color:var(--paper);font-size:15px;font-weight:650}.lineage-toolbar p{margin:3px 0 0;color:var(--ash);font-size:11px}.lineage-zero{display:grid;justify-items:center;gap:8px;padding:72px 20px;border:1px dashed var(--graphite);border-radius:14px;color:var(--ash);text-align:center}.lineage-zero strong{color:var(--mist);font-size:14px}.lineage-zero span{max-width:520px;font-size:12px}.detail-lineage{margin-top:12px}.lineage-loading{margin-top:12px;padding:28px;border:1px solid var(--obsidian);border-radius:12px;background:var(--carbon);color:var(--ash);text-align:center}

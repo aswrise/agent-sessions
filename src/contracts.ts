@@ -1,8 +1,13 @@
+import { sourceCopy } from "./sourceCopy.ts";
+
 export const TOOLS = ["claude", "codex", "pi"] as const;
 export type Tool = (typeof TOOLS)[number];
 
 export const STATUSES = ["", "todo", "in progress", "review", "blocked", "done", "archived"] as const;
 export type SessionStatus = (typeof STATUSES)[number];
+
+export type PrimaryAction = { kind: "path" | "resume" | "fork"; value: string };
+export type SourceDiagnostic = { source_id: string; root_id?: string; level: "info" | "error"; message: string; discovered?: number; valid?: number; skipped?: number };
 
 export interface Session {
   id: string;
@@ -20,6 +25,13 @@ export interface Session {
   star_note: string;
   archived: boolean;
   status: SessionStatus;
+  session_id?: string;
+  source_id?: string;
+  source_label?: string;
+  source_scope?: string;
+  source_kind?: "archive";
+  root_id?: string;
+  primary_action?: PrimaryAction;
 }
 
 export interface TranscriptMessage {
@@ -33,17 +45,18 @@ export interface Transcript extends Session {
 }
 
 export interface SessionView extends Session {
-  resume_command: string;
+  resume_command?: string;
 }
 
 export interface TranscriptView extends Transcript {
-  resume_command: string;
+  resume_command?: string;
 }
 
 export interface SessionsEnvelope {
   generatedAt: string;
   home: string;
   sessions: SessionView[];
+  diagnostics?: SourceDiagnostic[];
 }
 
 export interface SearchHitView extends SessionView {
@@ -114,7 +127,16 @@ const numberFields = (value: Record<string, unknown>, fields: string[]) => field
 
 export function isSessionView(value: unknown): value is SessionView {
   if (!isRecord(value)) return false;
-  return stringFields(value, ["id", "source_path", "cwd", "name", "first_msg", "model", "star_note", "resume_command"])
+  const action = value.primary_action;
+  const validAction = isRecord(action) && ["path", "resume", "fork"].includes(action.kind as string) && typeof action.value === "string";
+  if (value.source_kind === "archive" && (!stringFields(value, ["session_id", "source_id", "source_label", "root_id"])
+    || !validAction || action.kind === "resume" || value.resume_command !== undefined)) return false;
+  return stringFields(value, ["id", "source_path", "cwd", "name", "first_msg", "model", "star_note"])
+    && (typeof value.resume_command === "string" || validAction)
+    && (value.resume_command === undefined || typeof value.resume_command === "string")
+    && (action === undefined || validAction)
+    && ["session_id", "source_id", "source_label", "source_scope", "root_id"].every((key) => value[key] === undefined || typeof value[key] === "string")
+    && (value.source_kind === undefined || value.source_kind === "archive")
     && numberFields(value, ["mtime", "birth", "size_kb"])
     && isTool(value.tool) && isStatus(value.status)
     && typeof value.starred === "boolean" && typeof value.archived === "boolean";
@@ -124,6 +146,8 @@ export function parseSessionsEnvelope(value: unknown): SessionsEnvelope {
   if (!isRecord(value) || typeof value.generatedAt !== "string" || typeof value.home !== "string"
       || !Array.isArray(value.sessions) || !value.sessions.every(isSessionView))
     throw new Error("Session 列表响应无效");
+  if (value.diagnostics !== undefined && (!Array.isArray(value.diagnostics) || !value.diagnostics.every((item) => isRecord(item) && stringFields(item, ["source_id", "message"]) && ["info", "error"].includes(item.level as string))))
+    throw new Error(sourceCopy.errors.scanResponse);
   return value as unknown as SessionsEnvelope;
 }
 

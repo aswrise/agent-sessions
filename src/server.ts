@@ -53,8 +53,8 @@ export function startServer(options: ServerOptions): Bun.Server<undefined> {
         if (request.method === "GET" && (url.pathname === "/" || url.pathname === "/index.html"))
           return new Response(html, { headers: { "content-type": "text/html; charset=utf-8" } });
         if (request.method === "GET" && url.pathname === "/api/sessions") {
-          const sessions = await catalog.list({ fresh: url.searchParams.get("fresh") === "1" });
-          return json({ generatedAt: new Date().toISOString(), home, sessions: sessions.map((session) => withResumeCommand(session, platform)) });
+          const sessions = await catalog.list({ fresh: true });
+          return json({ generatedAt: new Date().toISOString(), home, sessions: sessions.map((session) => withResumeCommand(session, platform)), diagnostics: catalog.sourceDiagnostics() });
         }
         if (request.method === "GET" && url.pathname === "/api/search") {
           const query = url.searchParams.get("q")?.trim();
