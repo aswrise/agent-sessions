@@ -144,6 +144,9 @@ describe("dashboard", () => {
     await keyword.setValue("Session 42");
     await vi.advanceTimersByTimeAsync(121);
     expect(wrapper.findAll("tbody tr")).toHaveLength(1);
+    await keyword.setValue("SESSION-42");
+    await vi.advanceTimersByTimeAsync(121);
+    expect(wrapper.findAll("tbody tr")).toHaveLength(1);
     await keyword.setValue("");
     await vi.advanceTimersByTimeAsync(121);
     await wrapper.get("#pathButton").trigger("click");
