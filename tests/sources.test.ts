@@ -54,6 +54,7 @@ describe("configured archive sources", () => {
     const defaultFile = join(userDataDirectory(f.home), "sources.json");
     write(defaultFile, { version: 1, sources: [source("default", archive)] });
     expect((await new SessionCatalog({ home: f.home, dataDirectory: f.dataDirectory }).list()).find((row) => row.session_id === "old-id")?.source_id).toBe("default");
+    expect((await new SessionCatalog({ home: f.home, dataDirectory: f.dataDirectory }).find("OLD-ID")).results.map((row) => row.session_id)).toContain("old-id");
     f.configure([source("option", archive)]);
     const envFile = join(f.root, "environment.json"); write(envFile, { version: 1, sources: [source("environment", archive)] });
     const environment = { AGENT_SESSIONS_SOURCES_FILE: envFile };

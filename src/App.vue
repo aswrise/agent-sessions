@@ -245,7 +245,7 @@ const filtered = computed(() => {
     if (fromCreate && row.birth < fromCreate || toCreate && row.birth > toCreate) return false;
     if (!Number.isNaN(min) && row.size_kb < min * 1024 || !Number.isNaN(max) && row.size_kb > max * 1024) return false;
     if (searchMode.value === "deep" && deepSearched.value) return deepIds.value.has(row.id);
-    return !query || `${row.id} ${row.name} ${row.star_note} ${row.first_msg}`.toLowerCase().includes(query);
+    return !query || `${row.id} ${row.session_id ?? ""} ${row.name} ${row.star_note} ${row.first_msg}`.toLowerCase().includes(query);
   });
   if (!sortKey.value) return result.sort((left, right) => right.mtime - left.mtime);
   return result.sort((left, right) => {
