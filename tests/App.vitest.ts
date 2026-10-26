@@ -60,6 +60,63 @@ beforeEach(() => {
 afterEach(() => { vi.useRealTimers(); vi.unstubAllGlobals(); document.body.innerHTML = ""; });
 
 describe("dashboard", () => {
+  test("loads all archive sources, filters display only, and copies correctly labeled actions without renaming archives", async () => {
+    const live = makeRow(1);
+    const pathRow: SessionView = { ...makeRow(2), id: "archive:path", session_id: live.id, tool: live.tool, source_kind: "archive", source_id: "cp", source_label: "Company", root_id: "claude", primary_action: { kind: "path", value: "/archive/session.jsonl" } };
+    delete pathRow.resume_command;
+    const forkRow: SessionView = { ...makeRow(3), id: "archive:fork", session_id: "pi-old", tool: "pi", source_kind: "archive", source_id: "review", source_label: "Review", root_id: "pi", primary_action: { kind: "fork", value: "cd /mapped && pi --fork /archive/pi.jsonl --session-dir /continuations" } };
+    delete forkRow.resume_command;
+    const sessions = [live, pathRow, forkRow];
+    fetchMock.mockImplementation(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.startsWith("/api/sessions")) return response({ generatedAt: new Date(0).toISOString(), home: "/home/fixture", sessions,
+        diagnostics: [{ source_id: "offline", level: "error", message: "source unavailable" }] });
+      if (url === "/api/lineages" || url.startsWith("/api/lineage?")) return response({ sessions: [], edges: [] });
+      if (url.startsWith("/api/session?")) {
+        const id = new URL(url, "http://local").searchParams.get("id");
+        return response({ ...sessions.find((row) => row.id === id), messages: [] });
+      }
+      if (url.startsWith("/api/search")) return response({ total: 3, results: sessions.map((row) => ({ ...row, snippet: "needle" })) });
+      return response({ ok: true });
+    });
+    const wrapper = mount(App, { attachTo: document.body });
+    await flushPromises();
+    expect(wrapper.findAll("tbody tr.row")).toHaveLength(3);
+    expect(wrapper.get<HTMLSelectElement>("#sourceFilter").element.value).toBe("");
+    expect(wrapper.get(".source-diagnostics").attributes("open")).toBeDefined();
+    expect(wrapper.get(".source-diagnostics").text()).toContain("source unavailable");
+    expect(wrapper.text()).toContain("同 ID 共 2 份");
+    await wrapper.get("#sourceFilter").setValue("cp");
+    expect(wrapper.findAll("tbody tr.row")).toHaveLength(1);
+    expect(wrapper.get("tbody .nm").attributes("aria-disabled")).toBe("true");
+    await wrapper.get("tbody .nm").trigger("click");
+    expect(wrapper.find("input[aria-label='名称']").exists()).toBe(false);
+    await wrapper.get("tbody tr.row").trigger("click");
+    expect(navigator.clipboard.writeText).toHaveBeenLastCalledWith(pathRow.primary_action!.value);
+    expect(wrapper.get("#toast").text()).toBe("已复制归档路径");
+    await wrapper.get("#searchModeDeep").trigger("click");
+    await wrapper.get("#q").setValue("needle");
+    await wrapper.get("#deepSearch").trigger("click");
+    await flushPromises();
+    expect(wrapper.findAll("tbody tr.row")).toHaveLength(1);
+    await wrapper.get("#reload").trigger("click");
+    await flushPromises();
+    expect(wrapper.get<HTMLSelectElement>("#sourceFilter").element.value).toBe("cp");
+    expect(wrapper.findAll("tbody tr.row")).toHaveLength(1);
+    await wrapper.get("#sourceFilter").setValue("review");
+    await wrapper.get("tbody tr.row").trigger("click");
+    expect(navigator.clipboard.writeText).toHaveBeenLastCalledWith(forkRow.primary_action!.value);
+    expect(wrapper.get("#toast").text()).toBe("已复制新建分支命令");
+    await wrapper.get("[aria-label='打开详情页']").trigger("click");
+    await flushPromises();
+    expect(location.search).toContain("archive%3Afork");
+    const copyButton = wrapper.findAll("button").find((button) => button.text() === "复制新建分支命令")!;
+    await copyButton.trigger("click");
+    expect(navigator.clipboard.writeText).toHaveBeenLastCalledWith(forkRow.primary_action!.value);
+    expect(fetchMock.mock.calls.every(([, init]) => init === undefined)).toBe(true);
+    wrapper.unmount();
+  });
+
   test("filters, sorts, and paginates the public list", async () => {
     const wrapper = mount(App, { attachTo: document.body });
     await flushPromises();

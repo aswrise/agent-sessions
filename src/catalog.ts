@@ -3,21 +3,28 @@ import {
   appendFileSync,
   chmodSync,
   closeSync,
+  copyFileSync,
   existsSync,
   mkdirSync,
+  mkdtempSync,
   openSync,
   readFileSync,
   readSync,
+  realpathSync,
   renameSync,
+  rmSync,
   statSync,
   writeFileSync,
 } from "node:fs";
 import type { Stats } from "node:fs";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import packageJson from "../package.json" with { type: "json" };
-import { isStatus, type LineageEdge, type LineageRefresh, type ManualLineageEdge, type MarkPatch, type Session, type SessionStatus, type Tool, type Transcript, type TranscriptMessage } from "./contracts.ts";
+import { isStatus, type LineageEdge, type LineageRefresh, type ManualLineageEdge, type MarkPatch, type Session, type SessionStatus, type SourceDiagnostic, type Tool, type Transcript, type TranscriptMessage } from "./contracts.ts";
 import { LineageIndex } from "./lineage.ts";
 import { homeDirectory, userDataDirectory } from "./paths.ts";
+import { archiveAction } from "./resume.ts";
+import { readSources, realContained, type ArchiveSource } from "./sources.ts";
+import { sourceCopy } from "./sourceCopy.ts";
 
 const MIN_SIZE = 2048;
 const MAX_HEAD_LINES = 400;
@@ -36,7 +43,9 @@ type Metadata = {
   thinking_level: string;
 };
 type ParsedMetadata = Omit<Metadata, "model" | "thinking_level"> & { model?: string; thinking_level?: string };
-type Located = { adapter: Adapter; path: string; stat: Stats };
+type Binding = { adapter: Adapter; source?: ArchiveSource; rootId: string };
+type DiscoveredFile = Binding & { path: string; stat: Stats };
+type Located = DiscoveredFile & { originalId: string };
 type Mark = {
   starred?: boolean;
   note?: string;
@@ -55,6 +64,7 @@ export interface CatalogOptions {
   rgPath?: string | null;
   codexPath?: string | null;
   now?: () => Date;
+  sourcesFile?: string;
 }
 
 export class CatalogError extends Error {
@@ -67,6 +77,7 @@ export class CatalogError extends Error {
 interface Adapter {
   readonly tool: Tool;
   readonly root: string;
+  readonly discoveredCount: number;
   discover(): string[];
   parse(path: string): ParsedMetadata | null;
   metadataSignature(path: string): string;
@@ -102,6 +113,12 @@ function isoToEpoch(value: unknown): number | undefined {
 function oneLine(value: string, limit: number): string {
   const text = value.replace(/\s+/g, " ");
   return text.length > limit ? text.slice(0, limit) + "…" : text;
+}
+
+function compareSessions(left: Session, right: Session): number {
+  return right.mtime - left.mtime || (left.source_kind === "archive"
+    ? right.source_kind === "archive" ? left.id.localeCompare(right.id) : 1
+    : right.source_kind === "archive" ? -1 : 0);
 }
 
 function contentText(content: unknown): string {
@@ -308,7 +325,8 @@ function tailMetadata(path: string, tool: Tool): Pick<Metadata, "model" | "think
 
 abstract class JsonlAdapter implements Adapter {
   abstract readonly tool: Tool;
-  constructor(readonly root: string) {}
+  discoveredCount = 0;
+  constructor(readonly root: string, private realPaths = false) {}
   abstract discover(): string[];
   abstract parse(path: string): ParsedMetadata | null;
   abstract loadNames(): Map<string, string>;
@@ -316,7 +334,14 @@ abstract class JsonlAdapter implements Adapter {
 
   metadataSignature(_path: string): string { return ""; }
 
+  protected files(pattern: string): string[] {
+    const files = existsSync(this.root) ? [...new Bun.Glob(pattern).scanSync({ cwd: this.root, absolute: true, dot: true })] : [];
+    this.discoveredCount = files.length;
+    return this.realPaths ? files.filter((path) => this.allowed(path)) : files;
+  }
+
   allowed(path: string): boolean {
+    if (this.realPaths) return realContained(this.root, path);
     const child = relative(resolve(this.root), resolve(path));
     return child !== "" && child !== ".." && !child.startsWith(`..${sep}`) && !isAbsolute(child);
   }
@@ -351,31 +376,35 @@ class ClaudeAdapter extends JsonlAdapter {
   private titleFiles = new Map<string, { signature: string; ai: Map<string, string>; custom: Map<string, string> }>();
   private titlesLoaded = false;
 
-  constructor(root: string, private rgPath: string | null) { super(root); }
+  constructor(root: string, private rgPath: string | null, private archive = false) { super(root, archive); }
 
   discover(): string[] {
-    if (!existsSync(this.root)) return [];
-    return [...new Bun.Glob("*/*.jsonl").scanSync({ cwd: this.root, absolute: true, dot: true })]
-      .filter((path) => !basename(path).startsWith("agent-"));
+    return this.files(this.archive ? "**/*.jsonl" : "*/*.jsonl")
+      .filter((path) => !basename(path).startsWith("agent-") && (!this.archive || !relative(this.root, path).split(sep).includes("subagents")));
   }
 
   parse(path: string): ParsedMetadata | null {
-    let cwd = "", first = "", birth: number | undefined;
+    let cwd = "", first = "", originalId = "", recognized = false, birth: number | undefined;
     for (const line of readHeadLines(path, MAX_HEAD_LINES)) {
       if (cwd && birth !== undefined && !line.includes('"user"')) continue;
       const record = parseRecord(line);
       if (!record) continue;
+      if (this.archive && record.isSidechain === true) return null;
+      originalId ||= stringValue(record.sessionId);
+      recognized ||= ["user", "assistant", "system"].includes(stringValue(record.type));
       cwd ||= stringValue(record.cwd);
       birth ??= isoToEpoch(record.timestamp);
       if (!first && record.type === "user" && !record.isSidechain) {
-        const message = isRecord(record.message) ? record.message : {};
+        const message = isRecord(record.message) ? record.message : this.archive ? record : {};
         const text = contentText(message.content);
         if (text && !text.startsWith("<") && !text.startsWith("Caveat:")) first = text;
       }
       if (cwd && first) break;
     }
-    if (!cwd) return null;
-    return { id: basename(path, ".jsonl"), cwd, first_msg: first, birth, upstream_name: "" };
+    if (this.archive ? !recognized : !cwd) return null;
+    const id = this.archive && originalId ? originalId : basename(path, ".jsonl");
+    const titles = this.archive ? this.titleFiles.get(resolve(path)) : undefined;
+    return { id, cwd: cwd || "?", first_msg: first, birth, upstream_name: titles?.custom.get(id) || titles?.ai.get(id) || "" };
   }
 
   loadNames(): Map<string, string> {
@@ -394,7 +423,8 @@ class ClaudeAdapter extends JsonlAdapter {
       for (const [id, name] of value.ai) ai.set(id, name);
       for (const [id, name] of value.custom) custom.set(id, name);
     }
-    if (existsSync(this.root)) for (const path of new Bun.Glob("*/sessions-index.json").scanSync({ cwd: this.root, absolute: true, dot: true })) {
+    if (existsSync(this.root)) for (const path of new Bun.Glob(this.archive ? "**/sessions-index.json" : "*/sessions-index.json").scanSync({ cwd: this.root, absolute: true, dot: true })) {
+      if (!this.allowed(path)) continue;
       try {
         const data: unknown = JSON.parse(readFileSync(path, "utf8"));
         const entries = isRecord(data) && Array.isArray(data.entries) ? data.entries : [];
@@ -417,7 +447,8 @@ class ClaudeAdapter extends JsonlAdapter {
       else if (record.type === "ai-title" && record.aiTitle) value.ai.set(id, stringValue(record.aiTitle));
     };
     if (this.rgPath && existsSync(this.root)) {
-      const targets = initial ? [this.root] : [...values.keys()];
+      const targets = initial && !this.archive ? [this.root] : [...values.keys()];
+      if (!targets.length) return true;
       const result = Bun.spawnSync([this.rgPath, "--json", "-N", "--no-messages", "--no-ignore", "--hidden",
         String.raw`"type"\s*:\s*"(?:ai|custom)-title"`, ...targets]);
       if (result.exitCode > 1) return false;
@@ -435,8 +466,8 @@ class ClaudeAdapter extends JsonlAdapter {
   transcript(id: string, path?: string): TranscriptMessage[] {
     return this.messages(id, (record) => {
       if (!["user", "assistant"].includes(stringValue(record.type)) || record.isSidechain || record.toolUseResult) return;
-      return isRecord(record.message) ? record.message : undefined;
-    }, path, '"message"');
+      return isRecord(record.message) ? record.message : this.archive ? { ...record, role: record.type } : undefined;
+    }, path, this.archive ? '"content"' : '"message"');
   }
 
   async rename(id: string, name: string, locatedPath?: string): Promise<void> {
@@ -451,20 +482,20 @@ class CodexAdapter extends JsonlAdapter {
   private firstMessages = new Map<string, string>();
   private models = new Map<string, string>();
   private indexedMetadata = new Map<string, ParsedMetadata | null>();
+  private archiveSubagents = new Map<string, string>();
   private names = new Map<string, string>();
   private namesSignature = "";
   private namesLoaded = false;
   private metadataRevision = "";
-  constructor(root: string, private indexFile: string, private stateFile: string, private codexPath: string | null) { super(root); }
+  constructor(root: string, private indexFile: string, private stateFile: string, private codexPath: string | null, private archive = false, private snapshotDirectory = "") { super(root, archive); }
 
   discover(): string[] {
-    if (!existsSync(this.root)) return [];
-    return [...new Bun.Glob("*/*/*/rollout-*.jsonl").scanSync({ cwd: this.root, absolute: true, dot: true })];
+    return this.files(this.archive ? "**/*.jsonl" : "*/*/*/rollout-*.jsonl");
   }
 
   parse(path: string): ParsedMetadata | null {
-    const indexedPath = resolve(path);
-    if (this.indexedMetadata.has(indexedPath)) {
+    const indexedPath = this.archive ? realpathSync(path) : resolve(path);
+    if (!this.archive && this.indexedMetadata.has(indexedPath)) {
       const indexed = this.indexedMetadata.get(indexedPath);
       if (!indexed) return null;
       const meta = parseRecord(readHeadLines(path, 1).next().value ?? "");
@@ -475,19 +506,25 @@ class CodexAdapter extends JsonlAdapter {
     }
     const lines = readHeadLines(path, MAX_HEAD_LINES + 1);
     const meta = parseRecord(lines.next().value ?? "");
-    const payload = meta && isRecord(meta.payload) ? meta.payload : undefined;
+    const legacy = this.archive && meta?.type === undefined && typeof meta?.id === "string"
+      && (typeof meta.instructions === "string" || meta.instructions === null) && isoToEpoch(meta.timestamp) !== undefined;
+    const payload = meta && isRecord(meta.payload) ? meta.payload : legacy ? meta : undefined;
     const id = payload && stringValue(payload.id);
-    if (!meta || !payload || !id || payload.thread_source === "subagent") {
+    if (!meta || !payload || !id || payload.thread_source === "subagent"
+      || this.archive && (payload.source === "subagent" || isRecord(payload.source) && "subagent" in payload.source)) {
       lines.return(undefined);
       return null;
     }
-    let first = this.firstMessages.get(id)?.trim() ?? "";
+    const owned = this.archive ? this.indexedMetadata.get(indexedPath) : undefined;
+    if (owned === null || this.archive && this.archiveSubagents.get(indexedPath) === id) { lines.return(undefined); return null; }
+    const indexed = owned?.id === id ? owned : undefined;
+    let first = (this.archive ? indexed?.first_msg : this.firstMessages.get(id))?.trim() ?? "";
     if (!first || ["<", "#", "⚠"].some((prefix) => first.startsWith(prefix))) {
       first = "";
       for (const line of lines) {
         if (!line.includes("user")) continue;
         const record = parseRecord(line);
-        const value = record?.payload;
+        const value = legacy && record?.type === "message" ? record : record?.payload;
         if (!isRecord(value)) continue;
         if (value.type === "user_message") first = stringValue(value.message).trim();
         else {
@@ -498,25 +535,33 @@ class CodexAdapter extends JsonlAdapter {
         first = "";
       }
     } else lines.return(undefined);
-    const model = this.models.get(id);
+    const model = this.archive ? indexed?.model : this.models.get(id);
     return {
       id,
       cwd: stringValue(payload.cwd) || "?",
       first_msg: first,
       birth: isoToEpoch(payload.timestamp) ?? isoToEpoch(meta.timestamp),
-      upstream_name: "",
+      upstream_name: this.archive ? indexed?.upstream_name ?? "" : "",
       ...(model ? { model } : {}),
     };
   }
 
   metadataSignature(path: string): string {
-    const indexedPath = resolve(path);
+    const indexedPath = this.archive ? realpathSync(path) : resolve(path);
+    if (this.archiveSubagents.has(indexedPath)) return JSON.stringify(["subagent", this.archiveSubagents.get(indexedPath)]);
     return this.indexedMetadata.has(indexedPath)
       ? JSON.stringify(this.indexedMetadata.get(indexedPath))
       : this.metadataRevision;
   }
 
   loadNames(): Map<string, string> {
+    if (this.archive && [this.indexFile, this.stateFile, `${this.stateFile}-wal`, `${this.stateFile}-shm`]
+      .some((path) => existsSync(path) && !this.allowed(path))) {
+      this.indexedMetadata.clear();
+      this.archiveSubagents.clear();
+      this.metadataRevision = "unavailable";
+      return new Map();
+    }
     const signature = [this.indexFile, this.stateFile, `${this.stateFile}-wal`].map((path) => {
       try { const stat = statSync(path); return `${stat.ctimeMs}:${stat.size}`; } catch { return ""; }
     }).join("|");
@@ -525,6 +570,7 @@ class CodexAdapter extends JsonlAdapter {
     const firstMessages = new Map<string, string>();
     const models = new Map<string, string>();
     const indexedMetadata = new Map<string, ParsedMetadata | null>();
+    const archiveSubagents = new Map<string, string>();
     let indexLines: string[];
     try { indexLines = readLines(this.indexFile, existsSync(this.indexFile)); }
     catch { return this.namesLoaded ? this.names : names; }
@@ -538,6 +584,7 @@ class CodexAdapter extends JsonlAdapter {
       this.firstMessages = firstMessages;
       this.models = models;
       this.indexedMetadata = indexedMetadata;
+      this.archiveSubagents = archiveSubagents;
       this.names = names;
       this.namesSignature = signature;
       this.namesLoaded = true;
@@ -545,31 +592,58 @@ class CodexAdapter extends JsonlAdapter {
       return this.names;
     }
     let database: Database | undefined;
+    let snapshot: string | undefined;
     try {
-      database = new Database(this.stateFile, { readonly: true });
+      let stateFile = this.stateFile;
+      if (this.archive) {
+        mkdirSync(this.snapshotDirectory, { recursive: true });
+        snapshot = mkdtempSync(join(this.snapshotDirectory, ".codex-metadata-"));
+        stateFile = join(snapshot, "state.sqlite");
+        copyFileSync(this.stateFile, stateFile);
+        if (existsSync(`${this.stateFile}-wal`)) copyFileSync(`${this.stateFile}-wal`, `${stateFile}-wal`);
+      }
+      database = new Database(stateFile, { readonly: true });
       const columns = new Set((database.query("SELECT name FROM pragma_table_info('threads')").all() as Json[]).map((row) => stringValue(row.name)));
       const optional = (name: string) => columns.has(name) ? name : `NULL AS ${name}`;
       const rows = database.query(`SELECT id, title, first_user_message, ${optional("model")}, ${optional("rollout_path")}, ${optional("cwd")}, ${optional("created_at")}, ${optional("created_at_ms")}, ${optional("thread_source")} FROM threads`).all() as Json[];
       for (const row of rows) {
         const id = stringValue(row.id), title = stringValue(row.title), first = stringValue(row.first_user_message);
-        if (id && first) firstMessages.set(id, first);
-        if (id && stringValue(row.model)) models.set(id, stringValue(row.model));
-        if (!names.has(id) && title && title !== stringValue(row.first_user_message)) names.set(id, title);
+        if (!this.archive) {
+          if (id && first) firstMessages.set(id, first);
+          if (id && stringValue(row.model)) models.set(id, stringValue(row.model));
+          if (!names.has(id) && title && title !== stringValue(row.first_user_message)) names.set(id, title);
+        }
         const path = stringValue(row.rollout_path);
-        if (!id || !path) continue;
-        if (row.thread_source === "subagent") indexedMetadata.set(resolve(path), null);
-        else if (first && !["<", "#", "⚠"].some((prefix) => first.startsWith(prefix))) indexedMetadata.set(resolve(path), {
-          id, cwd: stringValue(row.cwd) || "?", first_msg: first,
+        if (!id || !path || this.archive && !this.allowed(path)) continue;
+        const indexedPath = this.archive ? realpathSync(path) : resolve(path);
+        const validFirst = first && !["<", "#", "⚠"].some((prefix) => first.startsWith(prefix));
+        if (row.thread_source === "subagent") {
+          if (this.archive) archiveSubagents.set(indexedPath, id);
+          else indexedMetadata.set(indexedPath, null);
+        }
+        else if (this.archive || validFirst) indexedMetadata.set(indexedPath, {
+          id, cwd: stringValue(row.cwd) || "?", first_msg: validFirst ? first : "",
           birth: numberValue(row.created_at_ms) === undefined ? numberValue(row.created_at) : numberValue(row.created_at_ms)! / 1000,
-          upstream_name: "",
+          upstream_name: this.archive && title !== first ? title : "",
           ...(stringValue(row.model) ? { model: stringValue(row.model) } : {}),
         });
       }
-    } catch { return this.namesLoaded ? this.names : names; }
-    finally { database?.close(); }
+    } catch {
+      if (this.archive) {
+        this.indexedMetadata.clear();
+        this.archiveSubagents.clear();
+        this.metadataRevision = signature;
+        return names;
+      }
+      return this.namesLoaded ? this.names : names;
+    }
+    finally {
+      try { database?.close(); } finally { if (snapshot) rmSync(snapshot, { recursive: true, force: true }); }
+    }
     this.firstMessages = firstMessages;
     this.models = models;
     this.indexedMetadata = indexedMetadata;
+    this.archiveSubagents = archiveSubagents;
     this.names = names;
     this.namesSignature = signature;
     this.namesLoaded = true;
@@ -579,9 +653,10 @@ class CodexAdapter extends JsonlAdapter {
 
   transcript(id: string, path?: string): TranscriptMessage[] {
     return this.messages(id, (record) => {
+      if (this.archive && record.type === "message") return record;
       if (record.type !== "response_item" || !isRecord(record.payload) || record.payload.type !== "message") return;
       return record.payload;
-    }, path, '"response_item"');
+    }, path, this.archive ? '"message"' : '"response_item"');
   }
 
   async rename(id: string, name: string): Promise<void> {
@@ -591,10 +666,10 @@ class CodexAdapter extends JsonlAdapter {
 
 class PiAdapter extends JsonlAdapter {
   readonly tool = "pi" as const;
+  constructor(root: string, private archive = false) { super(root, archive); }
 
   discover(): string[] {
-    if (!existsSync(this.root)) return [];
-    return [...new Bun.Glob("*/*.jsonl").scanSync({ cwd: this.root, absolute: true, dot: true })];
+    return this.files(this.archive ? "**/*.jsonl" : "*/*.jsonl");
   }
 
   parse(path: string): ParsedMetadata | null {
@@ -660,8 +735,17 @@ function added(now: Date): string {
 }
 
 export class SessionCatalog {
-  private adapters: Adapter[];
+  private bindings: Binding[];
+  private liveBindings: Binding[];
+  private archiveBindings = new Map<string, Binding>();
+  private sourcesFile: string;
+  private explicitSourcesFile: boolean;
+  private home: string;
+  private platform: NodeJS.Platform;
+  private codexPath: string | null;
+  private diagnostics: SourceDiagnostic[] = [];
   private marksFile: string;
+  private dataDirectory: string;
   private manualLineageFile: string;
   private metadata = new Map<string, { signature: string; value: Metadata | null }>();
   private index: { expires: number; rows: Session[] } | undefined;
@@ -676,13 +760,20 @@ export class SessionCatalog {
     const codex = join(home, ".codex");
     const pi = join(home, ".pi", "agent", "sessions");
     const rg = options.rgPath === undefined ? Bun.which("rg") : options.rgPath;
-    this.adapters = [
+    this.home = home;
+    this.platform = options.platform ?? process.platform;
+    this.codexPath = options.codexPath === undefined ? Bun.which("codex") : options.codexPath;
+    this.liveBindings = [
       new ClaudeAdapter(claude, rg),
       new CodexAdapter(join(codex, "sessions"), join(codex, "session_index.jsonl"), join(codex, "state_5.sqlite"),
-        options.codexPath === undefined ? Bun.which("codex") : options.codexPath),
+        this.codexPath),
       new PiAdapter(pi),
-    ];
+    ].map((adapter) => ({ adapter, rootId: adapter.tool }));
+    this.bindings = this.liveBindings;
     const dataDirectory = options.dataDirectory ?? userDataDirectory(home, options.environment, options.platform);
+    this.dataDirectory = dataDirectory;
+    this.sourcesFile = options.sourcesFile ?? (options.environment ?? process.env).AGENT_SESSIONS_SOURCES_FILE ?? join(userDataDirectory(home, options.environment, options.platform), "sources.json");
+    this.explicitSourcesFile = options.sourcesFile !== undefined || (options.environment ?? process.env).AGENT_SESSIONS_SOURCES_FILE !== undefined;
     this.marksFile = join(dataDirectory, "stars.json");
     this.manualLineageFile = join(dataDirectory, "manual-lineages.json");
     this.lineageIndex = new LineageIndex(join(dataDirectory, "lineage.sqlite"));
@@ -692,16 +783,17 @@ export class SessionCatalog {
 
   async list(options: { fresh?: boolean; tool?: Tool } = {}): Promise<Session[]> {
     if (!options.fresh && !options.tool && this.index && this.index.expires > Date.now()) return structuredClone(this.index.rows);
-    const rows = this.build(options.tool);
-    if (!options.tool) this.index = { expires: Date.now() + INDEX_TTL_MS, rows };
-    return structuredClone(rows);
+    const rows = this.build();
+    this.index = { expires: Date.now() + INDEX_TTL_MS, rows };
+    return structuredClone(options.tool ? rows.filter((row) => row.tool === options.tool) : rows);
   }
+
+  sourceDiagnostics(): SourceDiagnostic[] { return structuredClone(this.diagnostics); }
 
   async detail(id: string): Promise<Transcript> {
     const session = await this.exact(id);
-    const location = this.locations.get(id);
-    const adapter = location?.adapter ?? this.adapters.find(({ tool }) => tool === session.tool)!;
-    return { ...session, messages: adapter.transcript(id, location?.path) };
+    const location = this.location(id);
+    return { ...session, messages: location.adapter.transcript(location.originalId, location.path) };
   }
 
   async refreshLineage(force = false): Promise<LineageRefresh> {
@@ -764,32 +856,33 @@ export class SessionCatalog {
     if (!rg) throw new CatalogError("missing_rg", "需要 ripgrep (rg)，请安装并加入 PATH");
     const query = keyword.trim();
     if (!query) return { total: 0, results: [] };
-    const rows = await this.list();
-    const indexed = new Map(rows.map((session) => [session.id, session]));
+    const rows = await this.list({ fresh: true });
+    const indexed = new Map(rows.map((session) => [realpathSync(session.source_path), session]));
     const hits = new Map<string, Session & { snippet: string }>();
     for (const session of rows) {
       const summary = [session.name, session.star_note, session.first_msg, session.id].find((value) => value.toLowerCase().includes(query.toLowerCase()));
       if (summary) hits.set(session.id, { ...session, snippet: matchSnippet(summary, query) });
     }
-    const roots = this.adapters.map((adapter) => adapter.root).filter((root) => existsSync(root));
-    if (roots.length) {
+    const paths = rows.map((row) => row.source_path);
+    if (paths.length) {
       const patterns = [...new Set([query, JSON.stringify(query).slice(1, -1)]
         .filter((pattern) => !pattern.includes("\n") && !pattern.includes("\r")))];
-      const processResult = Bun.spawnSync([rg, "-i", "-F", "-l", "--no-messages", "--no-ignore", "--hidden",
-        ...patterns.flatMap((pattern) => ["-e", pattern]), "--", ...roots]);
-      if (processResult.exitCode > 1)
-        throw new CatalogError("search_failed", processResult.stderr.toString().trim() || "ripgrep 搜索失败");
-      for (const path of processResult.stdout.toString().split(/\r?\n/).filter(Boolean)) {
-        const adapter = this.adapters.find((candidate) => candidate.allowed(path));
-        const metadata = adapter?.parse(path);
-        const session = metadata && indexed.get(metadata.id);
-        if (!adapter || !session || hits.has(session.id)) continue;
-        const message = adapter.transcript(session.id, path)
-          .find(({ text }) => text.toLowerCase().includes(query.toLowerCase()));
-        if (message) hits.set(session.id, { ...session, snippet: matchSnippet(message.text, query) });
+      for (let offset = 0; offset < paths.length; offset += 128) {
+        const processResult = Bun.spawnSync([rg, "-i", "-F", "-l", "--null", "--no-messages", "--no-ignore", "--hidden",
+          ...patterns.flatMap((pattern) => ["-e", pattern]), "--", ...paths.slice(offset, offset + 128)]);
+        if (processResult.exitCode > 1)
+          throw new CatalogError("search_failed", processResult.stderr.toString().trim() || "ripgrep 搜索失败");
+        for (const path of processResult.stdout.toString().split("\0").filter(Boolean)) {
+          const session = indexed.get(realpathSync(path));
+          if (!session || hits.has(session.id)) continue;
+          const location = this.location(session.id);
+          const message = location.adapter.transcript(location.originalId, location.path)
+            .find(({ text }) => text.toLowerCase().includes(query.toLowerCase()));
+          if (message) hits.set(session.id, { ...session, snippet: matchSnippet(message.text, query) });
+        }
       }
     }
-    const sorted = [...hits.values()].sort((left, right) => right.mtime - left.mtime);
+    const sorted = [...hits.values()].sort(compareSessions);
     return { total: sorted.length, results: sorted.slice(0, limit) };
   }
 
@@ -836,9 +929,9 @@ export class SessionCatalog {
   async rename(id: string, name: string): Promise<void> {
     if (!name.trim()) throw new CatalogError("invalid", "名称不能为空");
     const session = await this.exact(id);
-    const location = this.locations.get(id);
-    const adapter = location?.adapter ?? this.adapters.find(({ tool }) => tool === session.tool)!;
-    await adapter.rename(session.id, name.trim(), location?.path);
+    const location = this.location(id);
+    if (location.source) throw new CatalogError("invalid", sourceCopy.errors.readonly);
+    await location.adapter.rename(location.originalId, name.trim(), location.path);
     if (session.tool === "codex") {
       const marks = this.loadMarks(), mark = marks[id];
       if (mark?.name) {
@@ -850,26 +943,105 @@ export class SessionCatalog {
     this.index = undefined;
   }
 
-  private build(tool?: Tool): Session[] {
+  private discoverSources(): void {
+    const { sources, diagnostics } = readSources(this.sourcesFile, this.home);
+    this.diagnostics = diagnostics;
+    if (this.explicitSourcesFile && !existsSync(this.sourcesFile)) this.diagnostics.push({ source_id: "config", level: "error", message: sourceCopy.errors.missingConfig });
+    const bindings: Binding[] = [...this.liveBindings];
+    const retained = new Map<string, Binding>();
+    for (const source of sources) for (const root of source.roots) {
+      const key = JSON.stringify([source.id, root.id, root.tool, root.path]);
+      let binding = this.archiveBindings.get(key);
+      if (!binding) {
+        const adapter = root.tool === "claude" ? new ClaudeAdapter(root.path, this.rgPath === undefined ? Bun.which("rg") : this.rgPath, true)
+          : root.tool === "pi" ? new PiAdapter(root.path, true)
+          : new CodexAdapter(root.path, join(root.path, "session_index.jsonl"), join(root.path, "state_5.sqlite"), null, true, this.dataDirectory);
+        binding = { adapter, source, rootId: root.id };
+      } else binding.source = source;
+      retained.set(key, binding);
+      bindings.push(binding);
+    }
+    this.archiveBindings = retained;
+    this.bindings = bindings;
+  }
+
+  private location(id: string): Located {
+    const location = this.locations.get(id);
+    if (!location || !location.adapter.allowed(location.path)) throw new CatalogError("not_found", sourceCopy.errors.fileUnavailable(id));
+    return location;
+  }
+
+  private recordKey(file: DiscoveredFile, id: string): string {
+    const identity = [file.source?.id ?? "live", file.rootId, file.adapter.tool, id, relative(file.adapter.root, file.path)];
+    return `${file.source ? "archive" : "live"}:${new Bun.CryptoHasher("sha256").update(JSON.stringify(identity)).digest("hex")}`;
+  }
+
+  private build(): Session[] {
+    this.discoverSources();
     const marks = this.loadMarks();
-    const names = new Map(this.adapters.map((adapter) => [adapter.tool, adapter.loadNames()]));
-    const files: Located[] = [];
-    for (const adapter of this.adapters) if (!tool || adapter.tool === tool)
-      for (const path of adapter.discover()) try { files.push({ adapter, path, stat: statSync(path) }); } catch {}
-    files.sort((left, right) => right.stat.mtimeMs - left.stat.mtimeMs);
-    const live = new Set(files.map(({ adapter, path }) => `${adapter.tool}:${resolve(path)}`));
-    const seen = new Set<string>(), rows: Session[] = [], locations = new Map<string, Located>();
+    const names = new Map<Adapter, Map<string, string>>();
+    const files: DiscoveredFile[] = [];
+    const seenPaths = new Set<string>();
+    const reports = new Map<Adapter, SourceDiagnostic>();
+    for (const binding of this.bindings) {
+      const { adapter, source, rootId } = binding;
+      const report: SourceDiagnostic = { source_id: source?.id ?? "live", root_id: rootId, level: "info", message: "", discovered: 0, valid: 0, skipped: 0 };
+      reports.set(adapter, report);
+      try {
+        if (source && !statSync(adapter.root).isDirectory()) throw new Error(sourceCopy.errors.notDirectory);
+        names.set(adapter, adapter.loadNames());
+        const paths = adapter.discover();
+        if (source) paths.sort();
+        report.discovered = adapter.discoveredCount;
+        report.skipped = adapter.discoveredCount - paths.length;
+        for (const path of paths) {
+          if (!adapter.allowed(path)) { report.skipped!++; continue; }
+          const real = realpathSync(path);
+          if (source && seenPaths.has(real)) { report.skipped!++; continue; }
+          const stat = statSync(real);
+          if (!stat.isFile() || !source && stat.size < MIN_SIZE) { report.skipped!++; continue; }
+          seenPaths.add(real);
+          files.push({ ...binding, path: resolve(path), stat });
+        }
+      } catch (error) {
+        report.level = "error";
+        report.message = sourceCopy.errors.inaccessible(error instanceof Error ? error.message : sourceCopy.errors.read);
+      }
+      if (source || report.message) this.diagnostics.push(report);
+    }
+    const parsed: { file: DiscoveredFile; metadata: Metadata }[] = [];
+    const liveFiles = new Map<string, DiscoveredFile>();
+    const rootCounts = new Map<Adapter, Map<string, number>>();
     for (const file of files) {
-      if (file.stat.size < MIN_SIZE) continue;
       const metadata = this.cached(file);
-      if (!metadata || seen.has(metadata.id)) continue;
-      seen.add(metadata.id);
-      locations.set(metadata.id, file);
-      const mark = marks[metadata.id];
-      const upstream = metadata.upstream_name || names.get(file.adapter.tool)?.get(metadata.id) || "";
+      const report = reports.get(file.adapter);
+      if (!metadata) { if (report) report.skipped!++; continue; }
+      if (report) report.valid!++;
+      parsed.push({ file, metadata });
+      const counts = rootCounts.get(file.adapter) ?? new Map<string, number>();
+      counts.set(metadata.id, (counts.get(metadata.id) ?? 0) + 1);
+      rootCounts.set(file.adapter, counts);
+      if (!file.source && (!liveFiles.has(metadata.id) || file.stat.mtimeMs > liveFiles.get(metadata.id)!.stat.mtimeMs))
+        liveFiles.set(metadata.id, file);
+    }
+    for (const report of reports.values()) if (!report.message)
+      report.message = sourceCopy.counts(report.discovered!, report.valid!, report.skipped!);
+    const rows: Session[] = [], locations = new Map<string, Located>();
+    const archiveRoots = this.bindings.filter((binding) => binding.source).map((binding) => binding.adapter.root);
+    for (const { file, metadata } of parsed) {
+      if (!file.source && liveFiles.get(metadata.id) !== file) continue;
+      const id = file.source ? this.recordKey(file, metadata.id) : metadata.id;
+      locations.set(id, { ...file, originalId: metadata.id });
+      const mark = marks[id];
+      const rootName = file.source && rootCounts.get(file.adapter)!.get(metadata.id)! > 1 ? "" : names.get(file.adapter)?.get(metadata.id);
+      const upstream = metadata.upstream_name || rootName || "";
       const name = file.adapter.tool === "codex" ? upstream || mark?.name || "" : mark?.name || upstream;
       rows.push({
-        id: metadata.id,
+        id,
+        ...(file.source ? { session_id: metadata.id, source_id: file.source.id, source_label: file.source.label,
+          ...(file.source.scope ? { source_scope: file.source.scope } : {}), source_kind: "archive" as const, root_id: file.rootId,
+          primary_action: archiveAction({ tool: file.adapter.tool, cwd: metadata.cwd, path: resolve(file.path) }, file.source, archiveRoots, join(this.home, ".pi", "agent", "sessions"), this.platform) }
+          : {}),
         tool: file.adapter.tool,
         source_path: resolve(file.path),
         cwd: metadata.cwd,
@@ -886,14 +1058,15 @@ export class SessionCatalog {
         status: mark?.status ?? "",
       });
     }
-    for (const key of this.metadata.keys()) if (!live.has(key)) this.metadata.delete(key);
-    if (!tool) this.locations = locations;
-    return rows;
+    this.locations = locations;
+    const present = new Set(files.map((file) => this.recordKey(file, "")));
+    for (const key of this.metadata.keys()) if (!present.has(key)) this.metadata.delete(key);
+    return rows.sort(compareSessions);
   }
 
-  private cached(file: Located): Metadata | null {
-    const key = `${file.adapter.tool}:${resolve(file.path)}`;
-    const signature = `${file.stat.mtimeMs}:${file.stat.size}:${file.adapter.metadataSignature(file.path)}`;
+  private cached(file: DiscoveredFile): Metadata | null {
+    const key = this.recordKey(file, "");
+    const signature = `${file.stat.ctimeMs}:${file.stat.mtimeMs}:${file.stat.size}:${file.adapter.metadataSignature(file.path)}`;
     const previous = this.metadata.get(key);
     if (previous?.signature === signature) return previous.value;
     const parsed = file.adapter.parse(file.path);

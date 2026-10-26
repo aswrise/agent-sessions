@@ -66,8 +66,9 @@ Use **普通** search for names, notes, and first messages. Switch to **深度**
 press Enter to search readable Transcript text. Narrow the result with the tool,
 project path, updated/created date, size, or status filters.
 
-Click a row to copy its resume command. Click **查看** to open the Transcript and
-**复制恢复命令** to copy it from the detail page. Press `/` to focus search and
+Click a live row to copy its resume command. Archive rows copy their source path
+or an eligible pi fork command. Open the Transcript with the detail button and
+use its labeled copy action. Press `/` to focus search and
 `Esc` to leave the detail page.
 
 ![Dashboard filters](docs/dashboard-filters.png)
@@ -75,7 +76,7 @@ Click a row to copy its resume command. Click **查看** to open the Transcript 
 ### Organize your work
 
 - Click ☆ to star an important Session.
-- Click the name or note cell to edit it.
+- Click a live name or any note cell to edit it. Archive names are read-only.
 - Choose a status such as `todo`, `in progress`, `review`, `blocked`, or `done`.
 - Archive completed work; it remains available from the **归档** tab and can be
   restored later.
@@ -123,6 +124,110 @@ Session IDs may be shortened to any unique prefix.
 
 Add `--json` to `list`, `find`, `show`, `index`, or `lineage` for stable
 machine-readable output.
+
+## Additional archive sources
+
+The three default live roots work without configuration. To read additional
+snapshots, create `sources.json` in the application data directory described
+below. It is `~/.local/share/session-snapshots/sources.json` on POSIX and
+`%LOCALAPPDATA%\session-snapshots\sources.json` on Windows.
+Use `AGENT_SESSIONS_SOURCES_FILE` to select another file. Library callers can
+set `CatalogOptions.sourcesFile`, which takes precedence over the environment.
+Keep this file private when its paths identify projects or organizations.
+
+```json
+{
+  "version": 1,
+  "sources": [
+    {
+      "id": "snapshot-2024",
+      "label": "Laptop snapshot",
+      "scope": "personal",
+      "roots": [
+        { "id": "claude", "tool": "claude", "path": "~/Archives/laptop/claude-projects" },
+        { "id": "codex", "tool": "codex", "path": "~/Archives/laptop/codex-sessions" },
+        { "id": "pi", "tool": "pi", "path": "~/Archives/laptop/pi-sessions" },
+        { "id": "pi-extra", "tool": "pi", "path": "~/Archives/other/pi-sessions" }
+      ],
+      "cwdMappings": [
+        { "from": "/old/projects/example", "to": "~/Projects/example" }
+      ],
+      "continuationDirectory": "~/SessionContinuations/pi"
+    }
+  ]
+}
+```
+
+`version` and `sources` are required. Each source needs a stable unique `id`
+and at least one root. Each root needs an `id` unique within its source, a
+`tool` of `claude`, `codex`, or `pi`, and a path. IDs use letters, digits,
+periods, underscores, or hyphens and start with a letter or digit. `live` is
+reserved. `label` defaults to the source ID. `scope` is an optional display
+label and does not grant tool access. Multiple roots for one tool are allowed.
+Paths must be absolute or start with `~/`; Windows JSON paths need escaped
+backslashes. There is no configuration editor in the dashboard.
+
+Initial dashboard loading, every dashboard refresh, and CLI list/search include
+all configured sources. The source selector defaults to all sources and only
+filters displayed results, including deep-search results. Refresh rereads the
+configuration and discovers new files in every root, keeps the current list
+visible while scanning, preserves filters, and clamps the page when necessary.
+Library callers use `list({ fresh: true })` to rescan; normal list/detail calls
+may reuse the current catalog cache. Missing roots and invalid configuration
+produce visible diagnostics while other sources keep working. Offline rows are
+omitted until their source returns; their marks and manual relations remain.
+
+Archive discovery accepts valid flat or nested JSONL files and excludes
+recognized internal subagents and malformed records. Valid tiny archive files
+are included. Live files retain the existing 2 KiB minimum for compatibility.
+Decompress `.jsonl.zst` snapshots into a separate JSONL archive directory before
+registering that directory; retain the compressed originals. Archive Codex
+readers also accept early `id`/`timestamp`/`instructions` headers and direct
+message records, including nullable instructions. Claude archive readers accept
+transcript exports with direct user/assistant content. Missing historical working
+directories display as `?`.
+Diagnostics report discovered, valid, and skipped counts. Escaping file links
+are skipped. The same real file in overlapping roots appears once, with live
+roots taking precedence and then configuration order. Separate snapshot files
+remain separate even when their original IDs match.
+
+Archive `id` values are stable record keys derived from source ID, root ID,
+tool, original ID, and relative file path. `session_id` contains the original
+tool ID. Use the row `id` for detail, search, marks, and lineage. Keep IDs and
+relative paths unchanged to retain annotations. Live records retain their
+original IDs and raw-ID annotations. When live files share an ID, the newest
+file supplies the single live row. Archive copies keep independent keys and
+annotations. Names and optional
+Codex metadata belong to each root. An archive Codex root may contain its own
+`session_index.jsonl` and `state_5.sqlite`; it never uses the live database or
+follows a database rollout path outside that root.
+SQLite title, first-message, and model fields apply only when the canonical
+rollout path and original ID match that exact archive file. Stale foreign paths
+fall back to the file's own metadata.
+Archive SQLite reads use a temporary application-data copy of the database and
+its WAL, so SQLite cannot create or update sidecars in the archive directory.
+
+Archive rename is rejected by the catalog. Stars, notes, statuses, and manual
+relations write only application data. Automatic lineage connects records
+within a source; explicit manual relations may cross sources.
+
+Live `resume_command` values keep their existing behavior. Archive JSON has a
+`primary_action` with `kind` of `path` or `fork` and its copy `value`, and omits
+`resume_command`. Claude archives always copy their path, regardless of date.
+Codex archives also copy their path. Every row has a separate source-path copy
+action. Copying never launches a terminal, tool, or model.
+
+Pi can copy `cd ... && pi --fork <archive-file> --session-dir <directory>` when
+the longest directory-boundary `cwdMappings.from` match resolves to an existing
+directory. Historical `from` paths may use POSIX or Windows syntax; `to` paths
+use the current machine's filesystem. The continuation directory must already exist, be writable, and be
+outside every configured archive root and the live pi store, including through
+symlinks. Otherwise pi falls back to the source path. Create that independent
+directory yourself before enabling the action. The command quotes all values
+and does not inherit the archived model or provider. This file behavior was
+verified offline with pi 1.3.0; interactive TUI and provider execution are not
+part of that verification. Register the continuation directory as a separate
+source if its new branches should appear on refresh.
 
 ## Local data and privacy
 

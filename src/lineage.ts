@@ -10,7 +10,7 @@ type Write = { path: string; at: number; turn: number; kind: WriteKind };
 type Turn = { texts: TextInput[]; writes: Omit<Write, "turn">[] };
 type Facts = { references: Reference[]; writes: Write[] };
 type Reference = { session_id: string; path: string; at: number; turn: number; source: "user" };
-const INDEX_VERSION = 3;
+const INDEX_VERSION = 4;
 const AMBIENT_ARTIFACTS = new Set(["agents.md", "claude.md", "memory.md", "skill.md"]);
 
 interface LineageGraph {
@@ -231,7 +231,7 @@ export class LineageIndex {
       const removed = [...prior.keys()].filter((id) => !ids.has(id));
       const changed = sessions.flatMap((session) => {
         const stat = statSync(session.source_path);
-        const signature = `${INDEX_VERSION}:${session.tool}:${session.source_path}:${stat.size}:${stat.mtimeMs}`;
+        const signature = `${INDEX_VERSION}:${session.source_id ?? "live"}:${session.tool}:${session.source_path}:${stat.size}:${stat.mtimeMs}`;
         return force || prior.get(session.id) !== signature ? [{ session, signature, facts: facts(session) }] : [];
       });
       const transaction = db.transaction(() => {
@@ -251,10 +251,12 @@ export class LineageIndex {
         db.run("DELETE FROM lineage_edges");
         const references = db.query("SELECT * FROM lineage_references ORDER BY at, session_id, path").all() as Reference[];
         const inserted = new Set<string>();
+        const sources = new Map(sessions.map((session) => [session.id, session.source_id ?? "live"]));
         for (const reference of references) {
-          const writer = db.query(`SELECT session_id, path, at, turn, kind FROM lineage_writes
-            WHERE path = ? AND session_id != ? AND at < ? ORDER BY at DESC, session_id DESC LIMIT 1`)
-            .get(reference.path, reference.session_id, reference.at) as { session_id: string; path: string; at: number; turn: number; kind: WriteKind } | null;
+          const candidates = db.query(`SELECT session_id, path, at, turn, kind FROM lineage_writes
+            WHERE path = ? AND session_id != ? AND at < ? ORDER BY at DESC, session_id DESC`)
+            .all(reference.path, reference.session_id, reference.at) as { session_id: string; path: string; at: number; turn: number; kind: WriteKind }[];
+          const writer = candidates.find((candidate) => sources.get(candidate.session_id) === sources.get(reference.session_id));
           const key = writer ? `${writer.session_id}\0${reference.session_id}\0${reference.path}` : "";
           if (writer && !inserted.has(key)) {
             inserted.add(key);
