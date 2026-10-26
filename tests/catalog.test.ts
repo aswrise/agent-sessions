@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { Database } from "bun:sqlite";
 import { appendFileSync, chmodSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { afterEach, describe, expect, test } from "bun:test";
 import { CatalogError, SessionCatalog } from "../src/catalog.ts";
 import { fixtureHome } from "./fixture-home.ts";
@@ -57,6 +57,8 @@ describe("SessionCatalog", () => {
     }) + "\n");
     expect((await catalog.find("LEGACY NOTE")).results.map(({ id }) => id)).toEqual(["claude-a"]);
     expect((await catalog.find("CODEX-B")).results.map(({ id }) => id)).toContain("codex-b");
+    const rollout = (await catalog.list()).find(({ id }) => id === "codex-b")!;
+    expect((await catalog.find(basename(rollout.source_path, ".jsonl"))).results.map(({ id }) => id)).toContain("codex-b");
     expect((await catalog.find("FIXTURE-ASSISTANT-CODEX")).results.map(({ id }) => id)).toEqual(["codex-b"]);
     expect((await catalog.find("\"quoted\"")).results.map(({ id }) => id)).toEqual(["claude-a"]);
     expect((await catalog.find(String.raw`C:\temp`)).results.map(({ id }) => id)).toEqual(["claude-a"]);

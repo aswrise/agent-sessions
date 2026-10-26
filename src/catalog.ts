@@ -860,7 +860,7 @@ export class SessionCatalog {
     const indexed = new Map(rows.map((session) => [realpathSync(session.source_path), session]));
     const hits = new Map<string, Session & { snippet: string }>();
     for (const session of rows) {
-      const summary = [session.name, session.star_note, session.first_msg, session.id, session.session_id ?? ""].find((value) => value.toLowerCase().includes(query.toLowerCase()));
+      const summary = [session.name, session.star_note, session.first_msg, session.id, session.session_id ?? "", session.source_path].find((value) => value.toLowerCase().includes(query.toLowerCase()));
       if (summary) hits.set(session.id, { ...session, snippet: matchSnippet(summary, query) });
     }
     const paths = rows.map((row) => row.source_path);
