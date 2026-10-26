@@ -227,7 +227,7 @@ const filtered = computed(() => {
     if (fromCreate && row.birth < fromCreate || toCreate && row.birth > toCreate) return false;
     if (!Number.isNaN(min) && row.size_kb < min * 1024 || !Number.isNaN(max) && row.size_kb > max * 1024) return false;
     if (searchMode.value === "deep" && deepSearched.value) return deepIds.value.has(row.id);
-    return !query || `${row.name} ${row.star_note} ${row.first_msg}`.toLowerCase().includes(query);
+    return !query || `${row.id} ${row.name} ${row.star_note} ${row.first_msg}`.toLowerCase().includes(query);
   });
   if (!sortKey.value) return result.sort((left, right) => right.mtime - left.mtime);
   return result.sort((left, right) => {
@@ -990,7 +990,7 @@ onBeforeUnmount(() => {
       </div>
       <label class="searchbox">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="11" cy="11" r="7" /><path d="m16.5 16.5 4 4" /></svg>
-        <input id="q" v-model="keyword" type="search" :placeholder="searchMode === 'deep' ? '搜索完整 Transcript，按 Enter…' : '搜索名称、备注或首条消息…'" aria-label="搜索会话" @keydown.enter.prevent="runDeepSearch" />
+        <input id="q" v-model="keyword" type="search" :placeholder="searchMode === 'deep' ? '搜索完整 Transcript，按 Enter…' : '搜索名称、备注、首条消息或 Session ID…'" aria-label="搜索会话" @keydown.enter.prevent="runDeepSearch" />
         <kbd aria-hidden="true">/</kbd>
       </label>
       <button v-if="searchMode === 'deep'" id="deepSearch" type="button" class="f act" :disabled="deepSearching || !keyword.trim()" @click="runDeepSearch">{{ deepSearching ? "检索中…" : "检索" }}</button>

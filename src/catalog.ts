@@ -768,7 +768,7 @@ export class SessionCatalog {
     const indexed = new Map(rows.map((session) => [session.id, session]));
     const hits = new Map<string, Session & { snippet: string }>();
     for (const session of rows) {
-      const summary = [session.name, session.star_note, session.first_msg].find((value) => value.toLowerCase().includes(query.toLowerCase()));
+      const summary = [session.name, session.star_note, session.first_msg, session.id].find((value) => value.toLowerCase().includes(query.toLowerCase()));
       if (summary) hits.set(session.id, { ...session, snippet: matchSnippet(summary, query) });
     }
     const roots = this.adapters.map((adapter) => adapter.root).filter((root) => existsSync(root));
