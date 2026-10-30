@@ -608,6 +608,37 @@ describe("dashboard", () => {
     wrapper.unmount();
   });
 
+  test.each([
+    { first_msg: "First pi message", label: "First pi message" },
+    { first_msg: "", label: "session-1" },
+  ])("previews unnamed pi Sessions in compact mode ($label)", async ({ first_msg, label }) => {
+    localStorage.setItem("compact", "1");
+    vi.useFakeTimers();
+    const row: SessionView = { ...makeRow(1), tool: "pi", name: "", first_msg };
+    fetchMock.mockImplementation(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.startsWith("/api/sessions")) return response({ generatedAt: new Date(0).toISOString(), home: "/home/fixture", sessions: [row] });
+      if (url.startsWith("/api/session?")) return response({ ...row, messages: [
+        { role: "user", text: "Pi user message", timestamp: "" },
+        { role: "assistant", text: "Pi assistant reply", timestamp: "" },
+      ] } satisfies TranscriptView);
+      return response({ sessions: [], edges: [] });
+    });
+    const wrapper = mount(App, { attachTo: document.body });
+    try {
+      await flushPromises();
+      const name = wrapper.get(".name-text");
+      expect(name.text()).toBe(label);
+      await name.trigger("mouseenter");
+      await vi.advanceTimersByTimeAsync(181); await flushPromises();
+      expect(wrapper.get("#tip").text()).toContain("Pi user message");
+      expect(wrapper.get("#tip").text()).toContain("Pi assistant reply");
+      expect(wrapper.findAll("#tip .tipmsg")).toHaveLength(2);
+    } finally {
+      wrapper.unmount();
+    }
+  });
+
   test("restores preferences, keyboard shortcuts, and hover Transcript preview", async () => {
     localStorage.setItem("colw5", "not-json");
     localStorage.setItem("theme", "dark");

@@ -1100,7 +1100,7 @@ onBeforeUnmount(() => {
                 <span v-if="copies(row).length > 1" class="source-label">{{ sourceCopy.copies(copies(row).length) }}</span>
                 <span class="nm" :aria-disabled="row.source_kind === 'archive'" :title="row.source_kind === 'archive' ? sourceCopy.readonlyName : undefined" @click.stop="startEdit(row, 'name')">
                   <input v-if="editing?.id === row.id && editing.field === 'name'" v-model="editValue" class="cell-input" :data-edit="`${row.id}:name`" aria-label="名称" @click.stop @keydown="editKeydown(row, 'name', $event)" @blur="finishEdit(row, 'name', true)" />
-                  <span v-else class="name-text" @mouseenter="previewSession(row, $event)" @mouseleave="schedulePreviewHide">{{ row.name }}</span>
+                  <span v-else class="name-text" @mouseenter="previewSession(row, $event)" @mouseleave="schedulePreviewHide">{{ row.name || (compact ? row.first_msg || row.session_id || row.id : '') }}</span>
                 </span>
                 <span class="note-slot" :title="row.star_note || '添加备注'" @click.stop="startEdit(row, 'star_note')">
                   <input v-if="editing?.id === row.id && editing.field === 'star_note'" v-model="editValue" class="cell-input" :data-edit="`${row.id}:star_note`" aria-label="备注" @click.stop @keydown="editKeydown(row, 'star_note', $event)" @blur="finishEdit(row, 'star_note', true)" />
