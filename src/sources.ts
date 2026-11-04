@@ -1,5 +1,5 @@
-import { existsSync, readFileSync, realpathSync } from "node:fs";
-import { isAbsolute, join, posix, relative, resolve, sep, win32 } from "node:path";
+import { existsSync, lstatSync, readFileSync, realpathSync } from "node:fs";
+import { basename, dirname, isAbsolute, join, posix, relative, resolve, sep, win32 } from "node:path";
 import { isTool, type SourceDiagnostic, type Tool } from "./contracts.ts";
 import { sourceCopy } from "./sourceCopy.ts";
 
@@ -17,8 +17,29 @@ export function contained(root: string, path: string): boolean {
   return child === "" || child !== ".." && !child.startsWith(`..${sep}`) && !isAbsolute(child);
 }
 
+let realpaths: Map<string, string> | undefined;
+
+/** Memoizes realpath for the duration of one synchronous scan, so symlink changes are seen by the next scan. */
+export async function withRealpathMemo<T>(scan: () => T | Promise<T>): Promise<T> {
+  realpaths = new Map();
+  try { return await scan(); } finally { realpaths = undefined; }
+}
+
+/** Inside a scan, a normalized non-symlink path resolves through its memoized parent: one lstat instead of a full realpath. */
+export function realPath(path: string): string {
+  if (!realpaths) return realpathSync(path);
+  let real = realpaths.get(path);
+  if (real === undefined) {
+    const parent = dirname(path);
+    real = parent === path || path !== resolve(path) || lstatSync(path).isSymbolicLink()
+      ? realpathSync(path) : join(realPath(parent), basename(path));
+    realpaths.set(path, real);
+  }
+  return real;
+}
+
 export function realContained(root: string, path: string): boolean {
-  try { return contained(realpathSync(root), realpathSync(path)); } catch { return false; }
+  try { return contained(realPath(root), realPath(path)); } catch { return false; }
 }
 
 const historicalPath = (path: string) => /^[A-Za-z]:[\\/]/.test(path) || path.startsWith("\\\\") ? win32 : posix;

@@ -6,6 +6,7 @@ import { dirname, join } from "node:path";
 import { SessionCatalog } from "../src/catalog.ts";
 import { parseSessionsEnvelope, parseTranscriptView } from "../src/contracts.ts";
 import { userDataDirectory } from "../src/paths.ts";
+import { realContained, realPath, withRealpathMemo } from "../src/sources.ts";
 import { primaryAction, withResumeCommand } from "../src/resume.ts";
 import { startServer } from "../src/server.ts";
 
@@ -74,6 +75,58 @@ describe("configured archive sources", () => {
     f.configure([source("cp", a), source("per", b), source("review", c)]);
     expect((await list()).sessions.map((row) => row.session_id).sort()).toEqual(["four", "one", "three", "two"]);
     expect((await f.catalog.find("deep", 100)).total).toBe(4);
+  });
+
+  test("rescans only live roots for scope=live and serves cached archive rows until fresh or a mark change", async () => {
+    const f = setup(), a = join(f.root, "a");
+    pi(join(a, "one.jsonl"), "one"); pi(join(f.home, ".pi/agent/sessions/project/live.jsonl"), "live-id", "live", undefined, true);
+    f.configure([source("cp", a)]);
+    const server = startServer({ catalog: f.catalog, home: f.home, port: 0 }); cleanups.push(() => server.stop(true));
+    const get = (query: string) => fetch(`http://127.0.0.1:${server.port}/api/sessions?${query}`);
+    const ids = async (query: string) => parseSessionsEnvelope(await (await get(query)).json()).sessions.map((row) => row.session_id ?? row.id).sort();
+    expect(await ids("scope=archive")).toEqual(["one"]);
+    pi(join(a, "two.jsonl"), "two");
+    expect(await ids("scope=live")).toEqual(["live-id"]);
+    expect(await ids("scope=archive")).toEqual(["one"]);
+    const archived = (await f.catalog.list({ scope: "archive" }))[0]!;
+    expect((await f.catalog.detail(archived.id)).messages.length).toBeGreaterThan(0);
+    await f.catalog.updateMark(archived.id, { star: true });
+    expect(await ids("scope=archive")).toEqual(["one", "two"]);
+    expect((await f.catalog.list({ scope: "archive" })).find((row) => row.id === archived.id)?.starred).toBe(true);
+    pi(join(a, "three.jsonl"), "three");
+    expect(await ids("scope=archive&fresh=1")).toEqual(["one", "three", "two"]);
+    expect((await get("scope=all")).status).toBe(400);
+  });
+
+  test("reuses persisted metadata in a new catalog and rescans when the cache comes from other code or is corrupt", async () => {
+    const f = setup(), a = join(f.root, "a"), cacheFile = join(f.dataDirectory, "metadata-cache.json");
+    pi(join(a, "one.jsonl"), "one");
+    f.configure([source("cp", a)]);
+    const fresh = () => new SessionCatalog({ home: f.home, dataDirectory: f.dataDirectory, sourcesFile: f.sourcesFile, codexPath: null }).list({ fresh: true });
+    expect((await f.catalog.list({ fresh: true }))[0]?.first_msg).toBe("first");
+    const cache = JSON.parse(readFileSync(cacheFile, "utf8"));
+    cache.entries[0][2].first_msg = "from cache";
+    writeFileSync(cacheFile, JSON.stringify(cache));
+    expect((await fresh())[0]?.first_msg).toBe("from cache");
+    writeFileSync(cacheFile, JSON.stringify({ ...cache, version: "older parser" }));
+    expect((await fresh())[0]?.first_msg).toBe("first");
+    writeFileSync(cacheFile, "{");
+    expect((await fresh())[0]?.first_msg).toBe("first");
+  });
+
+  test("parses a large cold archive in workers into the same fields as an inline parse", async () => {
+    const f = setup(), a = join(f.root, "a");
+    for (let index = 0; index < 100; index++) {
+      pi(join(a, "pi", `p${index}.jsonl`), `pi-${index}`, `pi name ${index}`);
+      codex(join(a, "codex", `c${index}.jsonl`), `codex-${index}`, `answer ${index}`);
+      jsonl(join(a, "claude", "project", `k${index}.jsonl`), [
+        { type: "user", sessionId: `claude-${index}`, cwd: "/old/project", timestamp: "2020-01-01T00:00:00Z", message: { role: "user", content: `ask ${index}` } },
+        { type: "custom-title", sessionId: `claude-${index}`, customTitle: `title ${index}` }]);
+    }
+    f.configure([source("pi", join(a, "pi")), source("codex", join(a, "codex"), "codex"), source("claude", join(a, "claude"), "claude")]);
+    const rows = await f.catalog.list({ fresh: true }), row = (id: string) => rows.find((item) => item.session_id === id)!;
+    expect(rows).toHaveLength(300);
+    expect([row("pi-7").name, row("codex-7").first_msg, row("claude-7").name, row("claude-7").first_msg]).toEqual(["pi name 7", "first", "title 7", "ask 7"]);
   });
 
   test("isolates duplicate Codex IDs, names, transcripts, marks, routes, and search across live and two roots", async () => {
@@ -207,6 +260,15 @@ describe("configured archive sources", () => {
     expect(rows.map((row) => row.session_id).sort()).toEqual(["same", "tiny"]);
     expect(rows.find((row) => row.session_id === "same")?.name).toBe("");
     expect((await f.catalog.find("escape")).total).toBe(0);
+  });
+
+  test.skipIf(process.platform === "win32")("resolves realpaths through symlinked ancestors and rechecks escaping symlinks on each scan", async () => {
+    const f = setup(), old = join(f.root, "old"), outside = join(f.root, "outside"), path = join(old, "project/swap.jsonl");
+    pi(path, "inside"); pi(join(outside, "escape.jsonl"), "escaped");
+    expect(await withRealpathMemo(() => realContained(old, path))).toBe(true);
+    rmSync(path); symlinkSync(join(outside, "escape.jsonl"), path);
+    expect(await withRealpathMemo(() => realContained(old, path))).toBe(false);
+    expect(await withRealpathMemo(() => realPath(join(old, "project")))).toBe(realpathSync(join(old, "project")));
   });
 
   test("reports missing and invalid sources while retaining working sources and reloads repaired config", async () => {

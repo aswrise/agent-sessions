@@ -17,13 +17,14 @@ import {
   writeFileSync,
 } from "node:fs";
 import type { Stats } from "node:fs";
+import { open } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import packageJson from "../package.json" with { type: "json" };
 import { isStatus, type LineageEdge, type LineageRefresh, type ManualLineageEdge, type MarkPatch, type Session, type SessionStatus, type SourceDiagnostic, type Tool, type Transcript, type TranscriptMessage } from "./contracts.ts";
 import { LineageIndex } from "./lineage.ts";
 import { homeDirectory, userDataDirectory } from "./paths.ts";
 import { archiveAction } from "./resume.ts";
-import { readSources, realContained, type ArchiveSource } from "./sources.ts";
+import { readSources, realContained, realPath, withRealpathMemo, type ArchiveSource } from "./sources.ts";
 import { sourceCopy } from "./sourceCopy.ts";
 
 const MIN_SIZE = 2048;
@@ -31,6 +32,53 @@ const MAX_HEAD_LINES = 400;
 const TAIL_CHUNK = 65_536;
 const TAIL_LIMIT = 4_194_304;
 const INDEX_TTL_MS = 30_000;
+const HEAD_PREFETCH = 32_768;
+const PREFETCH_BATCH = 512;
+const PREFETCH_CONCURRENCY = 32;
+const WORKER_THRESHOLD = 256;
+const WORKER_JOB_SIZE = 32;
+
+const TAIL_NEEDLES: Record<Tool, Buffer[]> = {
+  claude: [Buffer.from('"model":"'), Buffer.from('"effort"')],
+  codex: [Buffer.from('"model":"'), Buffer.from('"turn_context"')],
+  pi: [Buffer.from('"modelId":"')],
+};
+
+let cacheVersion: string | undefined;
+/** Hashes this module in development and the whole bundle in a compiled binary, so any parser change drops persisted metadata. */
+function metadataCacheVersion(): string {
+  try { return cacheVersion ??= Bun.hash(readFileSync(import.meta.path)).toString(36); }
+  catch { return cacheVersion ??= crypto.randomUUID(); }
+}
+
+type Prefetched = { head: Buffer; tail: Buffer; size: number };
+let prefetched: Map<string, Prefetched> | undefined;
+
+/** Reads each file's head and tail concurrently, since per-file open latency dominates a cold scan. */
+async function prefetch(paths: string[]): Promise<Map<string, Prefetched>> {
+  const result = new Map<string, Prefetched>();
+  let next = 0;
+  await Promise.all(Array.from({ length: Math.min(PREFETCH_CONCURRENCY, paths.length) }, async () => {
+    while (next < paths.length) {
+      const path = paths[next++]!;
+      try {
+        const handle = await open(path, "r");
+        try {
+          const { size } = await handle.stat();
+          const head = Buffer.allocUnsafe(Math.min(size, HEAD_PREFETCH));
+          await handle.read(head, 0, head.length, 0);
+          let tail = head;
+          if (size > head.length) {
+            tail = Buffer.allocUnsafe(Math.min(size, TAIL_CHUNK));
+            await handle.read(tail, 0, tail.length, size - tail.length);
+          }
+          result.set(path, { head, tail, size });
+        } finally { await handle.close(); }
+      } catch {}
+    }
+  }));
+  return result;
+}
 
 type Json = Record<string, unknown>;
 type Metadata = {
@@ -46,6 +94,7 @@ type ParsedMetadata = Omit<Metadata, "model" | "thinking_level"> & { model?: str
 type Binding = { adapter: Adapter; source?: ArchiveSource; rootId: string };
 type DiscoveredFile = Binding & { path: string; stat: Stats };
 type Located = DiscoveredFile & { originalId: string };
+type MetadataEntry = { file: DiscoveredFile; key: string; signature: string };
 type Mark = {
   starred?: boolean;
   note?: string;
@@ -81,8 +130,9 @@ interface Adapter {
   readonly discoveredCount: number;
   discover(): string[];
   parse(path: string): ParsedMetadata | null;
+  parseJob(paths: string[]): ArchiveParseJob;
   metadataSignature(path: string): string;
-  loadNames(): Map<string, string>;
+  loadNames(paths: string[]): Map<string, string>;
   transcript(id: string, path?: string): TranscriptMessage[];
   rename(id: string, name: string, path?: string): Promise<void>;
   findFile(id: string): string | undefined;
@@ -153,12 +203,18 @@ function readLines(path: string, strict = false): string[] {
 
 function* readHeadLines(path: string, limit: number): Generator<string> {
   let fd: number | undefined;
+  const ahead = prefetched?.get(path);
   try {
-    fd = openSync(path, "r");
-    let pending = Buffer.alloc(0), lines = 0, capacity = 8192;
+    let pending = Buffer.alloc(0), lines = 0, capacity = 8192, position = 0;
     while (lines < limit) {
-      const chunk = Buffer.allocUnsafe(capacity);
-      const length = readSync(fd, chunk, 0, capacity, null);
+      let chunk = ahead?.head ?? Buffer.alloc(0), length = 0;
+      if (ahead && position === 0) length = chunk.length;
+      else if (!ahead || position < ahead.size) {
+        fd ??= openSync(path, "r");
+        chunk = Buffer.allocUnsafe(capacity);
+        length = readSync(fd, chunk, 0, capacity, position);
+      }
+      position += length;
       if (!length) {
         if (pending.length) yield pending.toString("utf8").replace(/\r$/, "");
         break;
@@ -252,13 +308,14 @@ async function setCodexSessionName(executable: string | null, codexHome: string,
 
 // 从文件尾往前按 64KB 推进，块与块之间 yield 一次 undefined 让调用方判定够不够；
 // 找到就停，不必像按窗口重读那样为了多看 1MB 把前 64KB 再读一遍。
-function* tailLines(fd: number, size: number): Generator<string | undefined> {
+// 不含任何 needle 的块里没有调用方关心的行，跳过解码直接往前翻。
+function* tailLines(read: (chunk: Buffer, length: number, offset: number) => void, size: number, needles: Buffer[]): Generator<string | undefined> {
   let offset = size, carry = Buffer.alloc(0);
   while (offset > 0 && size - offset < TAIL_LIMIT) {
     const length = Math.min(TAIL_CHUNK, offset);
     offset -= length;
     const chunk = Buffer.allocUnsafe(length);
-    readSync(fd, chunk, 0, length, offset);
+    read(chunk, length, offset);
     const block = carry.length ? Buffer.concat([chunk, carry]) : chunk;
     // 块首那半行要等下一块补齐，留成 Buffer 以免在 UTF-8 字符中间截断。
     const split = offset === 0 ? -1 : block.indexOf(10);
@@ -268,6 +325,10 @@ function* tailLines(fd: number, size: number): Generator<string | undefined> {
       continue;
     }
     carry = split < 0 ? Buffer.alloc(0) : block.subarray(0, split);
+    if (!needles.some((needle) => block.indexOf(needle, split + 1) >= 0)) {
+      yield undefined;
+      continue;
+    }
     const text = block.toString("utf8", split + 1);
     for (let end = text.length; end > 0;) {
       const newline = text.lastIndexOf("\n", end - 1);
@@ -289,10 +350,15 @@ function tailMetadata(path: string, tool: Tool): Pick<Metadata, "model" | "think
   } catch {
     return { model: "", thinking_level: "" };
   }
-  let model = "", modelId = "", record: Json | undefined;
-  const fd = openSync(path, "r");
+  let model = "", modelId = "", record: Json | undefined, fd: number | undefined;
+  const ahead = prefetched?.get(path)?.size === size ? prefetched.get(path) : undefined;
+  const read = (chunk: Buffer, length: number, offset: number) => {
+    const start = ahead ? offset - (size - ahead.tail.length) : -1;
+    if (ahead && start >= 0) ahead.tail.copy(chunk, 0, start, start + length);
+    else readSync(fd ??= openSync(path, "r"), chunk, 0, length, offset);
+  };
   try {
-    for (const line of tailLines(fd, size)) {
+    for (const line of tailLines(read, size, TAIL_NEEDLES[tool])) {
       if (line === undefined) {
         if (tool === "pi") {
           if (modelId) return { model: modelId, thinking_level: "" };
@@ -319,9 +385,49 @@ function tailMetadata(path: string, tool: Tool): Pick<Metadata, "model" | "think
       }
     }
   } finally {
-    closeSync(fd);
+    if (fd !== undefined) closeSync(fd);
   }
   return { model, thinking_level: "" };
+}
+
+function parseMetadata(adapter: Adapter, path: string): Metadata | null {
+  const parsed = adapter.parse(path);
+  if (!parsed) return null;
+  const tail = tailMetadata(path, adapter.tool);
+  return { ...parsed, first_msg: oneLine(parsed.first_msg, 240), model: parsed.model || tail.model, thinking_level: parsed.thinking_level || tail.thinking_level };
+}
+
+/** An archive adapter's parse inputs, cloneable into a worker; Claude titles are filled in by the caller. */
+export type ArchiveParseJob = { tool: Tool; root: string; paths: string[]; indexed?: [string, ParsedMetadata | null][]; subagents?: [string, string][] };
+
+export function parseArchiveJob(job: ArchiveParseJob): (Metadata | null)[] {
+  const adapter = job.tool === "claude" ? new ClaudeAdapter(job.root, null, true)
+    : job.tool === "pi" ? new PiAdapter(job.root, true)
+      : CodexAdapter.archiveParser(job.root, job.indexed ?? [], job.subagents ?? []);
+  return job.paths.map((path) => parseMetadata(adapter, path));
+}
+
+async function runWorkers(jobs: ArchiveParseJob[]): Promise<(Metadata | null)[][]> {
+  const results: (Metadata | null)[][] = [];
+  const workers = Array.from({ length: Math.min(jobs.length, Math.max(1, navigator.hardwareConcurrency - 1)) },
+    // A compiled binary embeds the worker under its source path, which import.meta.url does not resolve to.
+    () => new Worker(import.meta.url.includes("/$bunfs/") ? "./src/metadataWorker.ts" : new URL("./metadataWorker.ts", import.meta.url)));
+  let next = 0;
+  try {
+    await Promise.all(workers.map((worker) => new Promise<void>((resolve, reject) => {
+      const send = () => {
+        if (next >= jobs.length) return resolve();
+        const index = next++;
+        worker.onmessage = (event: MessageEvent<(Metadata | null)[]>) => { results[index] = event.data; send(); };
+        worker.postMessage(jobs[index]);
+      };
+      worker.onerror = (event) => reject(event.error ?? new Error(event.message));
+      send();
+    })));
+  } finally {
+    for (const worker of workers) worker.terminate();
+  }
+  return results;
 }
 
 abstract class JsonlAdapter implements Adapter {
@@ -330,10 +436,12 @@ abstract class JsonlAdapter implements Adapter {
   constructor(readonly root: string, private realPaths = false) {}
   abstract discover(): string[];
   abstract parse(path: string): ParsedMetadata | null;
-  abstract loadNames(): Map<string, string>;
+  abstract loadNames(paths: string[]): Map<string, string>;
   abstract rename(id: string, name: string): Promise<void>;
 
   metadataSignature(_path: string): string { return ""; }
+
+  parseJob(paths: string[]): ArchiveParseJob { return { tool: this.tool, root: this.root, paths }; }
 
   protected files(pattern: string): string[] {
     const files = existsSync(this.root) ? [...new Bun.Glob(pattern).scanSync({ cwd: this.root, absolute: true, dot: true })] : [];
@@ -404,13 +512,17 @@ class ClaudeAdapter extends JsonlAdapter {
     }
     if (this.archive ? !recognized : !cwd) return null;
     const id = this.archive && originalId ? originalId : basename(path, ".jsonl");
-    const titles = this.archive ? this.titleFiles.get(resolve(path)) : undefined;
-    return { id, cwd: cwd || "?", first_msg: first, birth, upstream_name: titles?.custom.get(id) || titles?.ai.get(id) || "" };
+    return { id, cwd: cwd || "?", first_msg: first, birth, upstream_name: this.archive ? this.archiveTitle(path, id) : "" };
   }
 
-  loadNames(): Map<string, string> {
+  archiveTitle(path: string, id: string): string {
+    const titles = this.titleFiles.get(resolve(path));
+    return titles?.custom.get(id) || titles?.ai.get(id) || "";
+  }
+
+  loadNames(paths: string[]): Map<string, string> {
     const current = new Map<string, string>();
-    for (const path of this.discover()) try {
+    for (const path of paths) try {
       const stat = statSync(path);
       current.set(resolve(path), `${stat.ctimeMs}:${stat.size}`);
     } catch {}
@@ -424,7 +536,8 @@ class ClaudeAdapter extends JsonlAdapter {
       for (const [id, name] of value.ai) ai.set(id, name);
       for (const [id, name] of value.custom) custom.set(id, name);
     }
-    if (existsSync(this.root)) for (const path of new Bun.Glob(this.archive ? "**/sessions-index.json" : "*/sessions-index.json").scanSync({ cwd: this.root, absolute: true, dot: true })) {
+    // Claude writes sessions-index.json beside its project's session files, so reuse those directories instead of a second tree walk.
+    for (const path of new Set(paths.map((path) => join(dirname(path), "sessions-index.json")))) {
       if (!this.allowed(path)) continue;
       try {
         const data: unknown = JSON.parse(readFileSync(path, "utf8"));
@@ -480,6 +593,18 @@ class ClaudeAdapter extends JsonlAdapter {
 
 class CodexAdapter extends JsonlAdapter {
   readonly tool = "codex" as const;
+
+  static archiveParser(root: string, indexed: [string, ParsedMetadata | null][], subagents: [string, string][]): CodexAdapter {
+    const adapter = new CodexAdapter(root, "", "", null, true);
+    adapter.indexedMetadata = new Map(indexed);
+    adapter.archiveSubagents = new Map(subagents);
+    return adapter;
+  }
+
+  override parseJob(paths: string[]): ArchiveParseJob {
+    return { ...super.parseJob(paths), indexed: [...this.indexedMetadata], subagents: [...this.archiveSubagents] };
+  }
+
   private firstMessages = new Map<string, string>();
   private models = new Map<string, string>();
   private indexedMetadata = new Map<string, ParsedMetadata | null>();
@@ -495,7 +620,7 @@ class CodexAdapter extends JsonlAdapter {
   }
 
   parse(path: string): ParsedMetadata | null {
-    const indexedPath = this.archive ? realpathSync(path) : resolve(path);
+    const indexedPath = this.archive ? realPath(path) : resolve(path);
     if (!this.archive && this.indexedMetadata.has(indexedPath)) {
       const indexed = this.indexedMetadata.get(indexedPath);
       if (!indexed) return null;
@@ -548,7 +673,7 @@ class CodexAdapter extends JsonlAdapter {
   }
 
   metadataSignature(path: string): string {
-    const indexedPath = this.archive ? realpathSync(path) : resolve(path);
+    const indexedPath = this.archive ? realPath(path) : resolve(path);
     if (this.archiveSubagents.has(indexedPath)) return JSON.stringify(["subagent", this.archiveSubagents.get(indexedPath)]);
     return this.indexedMetadata.has(indexedPath)
       ? JSON.stringify(this.indexedMetadata.get(indexedPath))
@@ -616,7 +741,7 @@ class CodexAdapter extends JsonlAdapter {
         }
         const path = stringValue(row.rollout_path);
         if (!id || !path || this.archive && !this.allowed(path)) continue;
-        const indexedPath = this.archive ? realpathSync(path) : resolve(path);
+        const indexedPath = this.archive ? realPath(path) : resolve(path);
         const validFirst = first && !["<", "#", "⚠"].some((prefix) => first.startsWith(prefix));
         if (row.thread_source === "subagent") {
           if (this.archive) archiveSubagents.set(indexedPath, id);
@@ -748,8 +873,13 @@ export class SessionCatalog {
   private marksFile: string;
   private dataDirectory: string;
   private manualLineageFile: string;
+  private metadataFile: string;
+  private metadataState: "unloaded" | "clean" | "dirty" = "unloaded";
   private metadata = new Map<string, { signature: string; value: Metadata | null }>();
   private index: { expires: number; rows: Session[] } | undefined;
+  private archiveRows: Session[] | undefined;
+  /** Scans await file prefetches midway, so they run one at a time over the shared caches. */
+  private scan: Promise<unknown> = Promise.resolve();
   private locations = new Map<string, Located>();
   private now: () => Date;
   private rgPath: string | null | undefined;
@@ -777,16 +907,25 @@ export class SessionCatalog {
     this.explicitSourcesFile = options.sourcesFile !== undefined || (options.environment ?? process.env).AGENT_SESSIONS_SOURCES_FILE !== undefined;
     this.marksFile = join(dataDirectory, "stars.json");
     this.manualLineageFile = join(dataDirectory, "manual-lineages.json");
+    this.metadataFile = join(dataDirectory, "metadata-cache.json");
     this.lineageIndex = new LineageIndex(join(dataDirectory, "lineage.sqlite"));
     this.now = options.now ?? (() => new Date());
     this.rgPath = options.rgPath;
   }
 
-  async list(options: { fresh?: boolean; tool?: Tool } = {}): Promise<Session[]> {
-    if (!options.fresh && !options.tool && this.index && this.index.expires > Date.now()) return structuredClone(this.index.rows);
-    const rows = this.build();
+  /** scope "live" rescans only live roots and reuses archive rows from the last full scan; scope "archive" serves that cache unless fresh. */
+  async list(options: { fresh?: boolean; tool?: Tool; scope?: "live" | "archive" } = {}): Promise<Session[]> {
+    const { fresh, tool, scope } = options;
+    if (scope === "archive" && !fresh && this.archiveRows) return structuredClone(this.archiveRows);
+    if (!fresh && !tool && !scope && this.index && this.index.expires > Date.now()) return structuredClone(this.index.rows);
+    const live = scope === "live", scan = this.scan.then(() => withRealpathMemo(() => this.build(!live)));
+    this.scan = scan.catch(() => {});
+    const built = await scan;
+    if (!live) this.archiveRows = built.filter((row) => row.source_kind === "archive");
+    const rows = live ? [...built, ...this.archiveRows ?? []].sort(compareSessions) : built;
     this.index = { expires: Date.now() + INDEX_TTL_MS, rows };
-    return structuredClone(options.tool ? rows.filter((row) => row.tool === options.tool) : rows);
+    const scoped = scope ? rows.filter((row) => (row.source_kind === "archive") === (scope === "archive")) : rows;
+    return structuredClone(tool ? scoped.filter((row) => row.tool === tool) : scoped);
   }
 
   sourceDiagnostics(): SourceDiagnostic[] { return structuredClone(this.diagnostics); }
@@ -907,7 +1046,7 @@ export class SessionCatalog {
     const id = matches[0]!.id, marks = this.loadMarks(), mark = marks[id]!;
     mark.starred = false;
     if (meaningful(mark)) marks[id] = mark; else delete marks[id];
-    this.saveMarks(marks); this.index = undefined;
+    this.saveMarks(marks); this.index = this.archiveRows = undefined;
     return id;
   }
 
@@ -925,7 +1064,7 @@ export class SessionCatalog {
       marks[id] = mark;
     } else delete marks[id];
     this.saveMarks(marks);
-    this.index = undefined;
+    this.index = this.archiveRows = undefined;
   }
 
   async rename(id: string, name: string): Promise<void> {
@@ -978,27 +1117,29 @@ export class SessionCatalog {
     return `${file.source ? "archive" : "live"}:${new Bun.CryptoHasher("sha256").update(JSON.stringify(identity)).digest("hex")}`;
   }
 
-  private build(): Session[] {
-    this.discoverSources();
+  private async build(archive: boolean): Promise<Session[]> {
+    if (this.metadataState === "unloaded") this.loadMetadataCache();
+    if (archive) this.discoverSources();
+    else this.diagnostics = this.diagnostics.filter((report) => report.source_id !== "live");
     const marks = this.loadMarks();
     const names = new Map<Adapter, Map<string, string>>();
     const files: DiscoveredFile[] = [];
     const seenPaths = new Set<string>();
     const reports = new Map<Adapter, SourceDiagnostic>();
-    for (const binding of this.bindings) {
+    for (const binding of archive ? this.bindings : this.liveBindings) {
       const { adapter, source, rootId } = binding;
       const report: SourceDiagnostic = { source_id: source?.id ?? "live", root_id: rootId, level: "info", message: "", discovered: 0, valid: 0, skipped: 0 };
       reports.set(adapter, report);
       try {
         if (source && !statSync(adapter.root).isDirectory()) throw new Error(sourceCopy.errors.notDirectory);
-        names.set(adapter, adapter.loadNames());
         const paths = adapter.discover();
+        names.set(adapter, adapter.loadNames(paths));
         if (source) paths.sort();
         report.discovered = adapter.discoveredCount;
         report.skipped = adapter.discoveredCount - paths.length;
         for (const path of paths) {
           if (!adapter.allowed(path)) { report.skipped!++; continue; }
-          const real = realpathSync(path);
+          const real = realPath(path);
           if (source && seenPaths.has(real)) { report.skipped!++; continue; }
           const stat = statSync(real);
           if (!stat.isFile() || !source && stat.size < MIN_SIZE) { report.skipped!++; continue; }
@@ -1014,8 +1155,14 @@ export class SessionCatalog {
     const parsed: { file: DiscoveredFile; metadata: Metadata }[] = [];
     const liveFiles = new Map<string, DiscoveredFile>();
     const rootCounts = new Map<Adapter, Map<string, number>>();
-    for (const file of files) {
-      const metadata = this.cached(file);
+    const entries = files.map((file) => this.metadataEntry(file));
+    const misses = entries.filter(({ key, signature }) => this.metadata.get(key)?.signature !== signature);
+    const offloaded = misses.length >= WORKER_THRESHOLD ? misses.filter(({ file }) => file.source) : [];
+    const workers = offloaded.length ? this.parseInWorkers(offloaded) : undefined;
+    await this.parseInline(workers ? misses.filter(({ file }) => !file.source) : misses);
+    if (workers) await workers;
+    for (const entry of entries) {
+      const { file } = entry, metadata = this.cached(entry);
       const report = reports.get(file.adapter);
       if (!metadata) { if (report) report.skipped!++; continue; }
       if (report) report.valid!++;
@@ -1028,7 +1175,7 @@ export class SessionCatalog {
     }
     for (const report of reports.values()) if (!report.message)
       report.message = sourceCopy.counts(report.discovered!, report.valid!, report.skipped!);
-    const rows: Session[] = [], locations = new Map<string, Located>();
+    const rows: Session[] = [], locations = new Map(archive ? [] : [...this.locations].filter(([, location]) => location.source));
     const archiveRoots = this.bindings.filter((binding) => binding.source).map((binding) => binding.adapter.root);
     for (const { file, metadata } of parsed) {
       if (!file.source && liveFiles.get(metadata.id) !== file) continue;
@@ -1062,21 +1209,84 @@ export class SessionCatalog {
       });
     }
     this.locations = locations;
-    const present = new Set(files.map((file) => this.recordKey(file, "")));
-    for (const key of this.metadata.keys()) if (!present.has(key)) this.metadata.delete(key);
+    const present = new Set(entries.map(({ key }) => key));
+    for (const key of this.metadata.keys()) if (!present.has(key) && (archive || key.startsWith("live:"))) {
+      this.metadata.delete(key);
+      this.metadataState = "dirty";
+    }
+    // Live-only refreshes skip the write: they run often and the costly archive entries are already on disk.
+    if (archive && this.metadataState === "dirty") this.saveMetadataCache();
     return rows.sort(compareSessions);
   }
 
-  private cached(file: DiscoveredFile): Metadata | null {
-    const key = this.recordKey(file, "");
-    const signature = `${file.stat.ctimeMs}:${file.stat.mtimeMs}:${file.stat.size}:${file.adapter.metadataSignature(file.path)}`;
-    const previous = this.metadata.get(key);
-    if (previous?.signature === signature) return previous.value;
-    const parsed = file.adapter.parse(file.path);
-    const tail = parsed ? tailMetadata(file.path, file.adapter.tool) : undefined;
-    const value = parsed ? { ...parsed, model: parsed.model || tail!.model, thinking_level: parsed.thinking_level || tail!.thinking_level } : null;
+  private metadataEntry(file: DiscoveredFile): MetadataEntry {
+    return { file, key: this.recordKey(file, ""),
+      signature: `${file.stat.ctimeMs}:${file.stat.mtimeMs}:${file.stat.size}:${file.adapter.metadataSignature(file.path)}` };
+  }
+
+  private cached(entry: MetadataEntry): Metadata | null {
+    const previous = this.metadata.get(entry.key);
+    if (previous?.signature === entry.signature) return previous.value;
+    return this.store(entry, parseMetadata(entry.file.adapter, entry.file.path));
+  }
+
+  private store({ key, signature }: MetadataEntry, value: Metadata | null): Metadata | null {
     this.metadata.set(key, { signature, value });
+    this.metadataState = "dirty";
     return value;
+  }
+
+  private async parseInline(entries: MetadataEntry[]): Promise<void> {
+    for (let start = 0; start < entries.length; start += PREFETCH_BATCH) {
+      const batch = entries.slice(start, start + PREFETCH_BATCH);
+      prefetched = await prefetch(batch.map(({ file }) => file.path));
+      try { for (const entry of batch) this.cached(entry); } finally { prefetched = undefined; }
+    }
+  }
+
+  /** Spreads a cold archive scan across cores; falls back to parsing inline if workers are unavailable. */
+  private async parseInWorkers(entries: MetadataEntry[]): Promise<void> {
+    const groups = new Map<Adapter, MetadataEntry[]>(), chunks: MetadataEntry[][] = [];
+    for (const entry of entries) {
+      const group = groups.get(entry.file.adapter);
+      if (group) group.push(entry); else groups.set(entry.file.adapter, [entry]);
+    }
+    for (const group of groups.values())
+      for (let start = 0; start < group.length; start += WORKER_JOB_SIZE) chunks.push(group.slice(start, start + WORKER_JOB_SIZE));
+    let results: (Metadata | null)[][];
+    try {
+      results = await runWorkers(chunks.map((chunk) => chunk[0]!.file.adapter.parseJob(chunk.map(({ file }) => file.path))));
+    } catch {
+      return this.parseInline(entries);
+    }
+    chunks.forEach((chunk, index) => chunk.forEach((entry, position) => {
+      const value = results[index]![position]!;
+      const { adapter, path } = entry.file;
+      if (value && adapter instanceof ClaudeAdapter) value.upstream_name = adapter.archiveTitle(path, value.id);
+      this.store(entry, value);
+    }));
+  }
+
+  private loadMetadataCache(): void {
+    this.metadataState = "clean";
+    try {
+      const value: unknown = JSON.parse(readFileSync(this.metadataFile, "utf8"));
+      if (!isRecord(value) || value.version !== metadataCacheVersion() || !Array.isArray(value.entries)) return;
+      for (const entry of value.entries) {
+        if (!Array.isArray(entry) || typeof entry[0] !== "string" || typeof entry[1] !== "string") continue;
+        const metadata: unknown = entry[2];
+        if (metadata === null || isRecord(metadata) && ["id", "cwd", "first_msg", "upstream_name", "model", "thinking_level"].every((field) => typeof metadata[field] === "string"))
+          this.metadata.set(entry[0], { signature: entry[1], value: metadata as Metadata | null });
+      }
+    } catch {}
+  }
+
+  private saveMetadataCache(): void {
+    try {
+      const entries = [...this.metadata].map(([key, { signature, value }]) => [key, signature, value]);
+      atomicWrite(this.metadataFile, JSON.stringify({ version: metadataCacheVersion(), entries }));
+      this.metadataState = "clean";
+    } catch {}
   }
 
   private loadManualLineages(): ManualLineageEdge[] {
@@ -1121,7 +1331,8 @@ export class SessionCatalog {
   }
 
   private async exact(id: string): Promise<Session> {
-    const session = (this.index?.rows ?? await this.list()).find((row) => row.id === id);
+    const match = (rows: Session[]) => rows.find((row) => row.id === id);
+    const session = match(this.index?.rows ?? []) ?? match(await this.list({ fresh: true }));
     if (!session) throw new CatalogError("not_found", `没有 session 匹配 '${id}'`);
     return session;
   }

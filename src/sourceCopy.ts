@@ -7,8 +7,6 @@ export const sourceCopy = {
     fork: { label: "复制新建分支命令", success: "已复制新建分支命令" },
   } satisfies Record<PrimaryAction["kind"], { label: string; success: string }>,
   live: "本机",
-  allSources: "全部来源",
-  sourceFilter: "数据来源",
   scanInfo: "来源扫描信息",
   scanProblem: "部分来源未加载",
   copySourcePath: "复制源文件路径",

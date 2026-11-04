@@ -53,7 +53,9 @@ export function startServer(options: ServerOptions): Bun.Server<undefined> {
         if (request.method === "GET" && (url.pathname === "/" || url.pathname === "/index.html"))
           return new Response(html, { headers: { "content-type": "text/html; charset=utf-8" } });
         if (request.method === "GET" && url.pathname === "/api/sessions") {
-          const sessions = await catalog.list({ fresh: true });
+          const scope = url.searchParams.get("scope") ?? undefined;
+          if (scope !== undefined && scope !== "live" && scope !== "archive") throw new RequestError(400, "scope 必须是 live 或 archive");
+          const sessions = await catalog.list({ ...(scope ? { scope } : {}), fresh: scope !== "archive" || url.searchParams.get("fresh") === "1" });
           return json({ generatedAt: new Date().toISOString(), home, sessions: sessions.map((session) => withResumeCommand(session, platform)), diagnostics: catalog.sourceDiagnostics() });
         }
         if (request.method === "GET" && url.pathname === "/api/search") {

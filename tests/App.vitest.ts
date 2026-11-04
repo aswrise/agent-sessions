@@ -60,7 +60,29 @@ beforeEach(() => {
 afterEach(() => { vi.useRealTimers(); vi.unstubAllGlobals(); document.body.innerHTML = ""; });
 
 describe("dashboard", () => {
-  test("loads all archive sources, filters display only, and copies correctly labeled actions without renaming archives", async () => {
+  test("renders live sessions before archive rows arrive and refreshes only live sessions", async () => {
+    const { resume_command: _, ...archived } = makeRow(2);
+    const archive: SessionView = { ...archived, id: "archive:old", session_id: "old", source_kind: "archive", source_id: "cp", source_label: "Company", root_id: "claude", primary_action: { kind: "path", value: "/archive/old.jsonl" } };
+    let finishArchive: (() => void) | undefined;
+    fetchMock.mockImplementation(async (input: RequestInfo | URL) => {
+      const url = String(input), envelope = (sessions: SessionView[]) => response({ generatedAt: new Date(0).toISOString(), home: "/home/fixture", sessions });
+      if (url === "/api/sessions?scope=live") return envelope([makeRow(1), archive]);
+      if (url === "/api/sessions?scope=archive") return new Promise<Response>((resolve) => { finishArchive = () => resolve(envelope([archive])); });
+      return response({ ok: true });
+    });
+    const wrapper = mount(App, { attachTo: document.body });
+    await flushPromises();
+    expect(wrapper.findAll("tbody tr.row").map((row) => row.find(".name-text").text())).toEqual(["Session 1"]);
+    finishArchive!(); await flushPromises();
+    expect(wrapper.findAll("tbody tr.row")).toHaveLength(2);
+    await wrapper.get("#reload").trigger("click"); await flushPromises();
+    expect(wrapper.findAll("tbody tr.row")).toHaveLength(2);
+    const calls = fetchMock.mock.calls.map(([input]) => String(input));
+    expect([calls.filter((url) => url.endsWith("scope=live")).length, calls.filter((url) => url.endsWith("scope=archive")).length]).toEqual([2, 1]);
+    wrapper.unmount();
+  });
+
+  test("loads all archive sources and copies correctly labeled actions without renaming archives", async () => {
     const live = makeRow(1);
     const pathRow: SessionView = { ...makeRow(2), id: "archive:path", session_id: live.id, tool: live.tool, source_kind: "archive", source_id: "cp", source_label: "Company", root_id: "claude", primary_action: { kind: "path", value: "/archive/session.jsonl" } };
     delete pathRow.resume_command;
@@ -82,32 +104,28 @@ describe("dashboard", () => {
     const wrapper = mount(App, { attachTo: document.body });
     await flushPromises();
     expect(wrapper.findAll("tbody tr.row")).toHaveLength(3);
-    expect(wrapper.get<HTMLSelectElement>("#sourceFilter").element.value).toBe("");
     expect(wrapper.get(".source-diagnostics").attributes("open")).toBeDefined();
     expect(wrapper.get(".source-diagnostics").text()).toContain("source unavailable");
     expect(wrapper.text()).toContain("同 ID 共 2 份");
-    await wrapper.get("#sourceFilter").setValue("cp");
-    expect(wrapper.findAll("tbody tr.row")).toHaveLength(1);
-    expect(wrapper.get("tbody .nm").attributes("aria-disabled")).toBe("true");
-    await wrapper.get("tbody .nm").trigger("click");
+    const rowNamed = (name: string) => wrapper.findAll("tbody tr.row").find((row) => row.find(".name-text").text() === name)!;
+    expect(rowNamed("Session 2").get(".nm").attributes("aria-disabled")).toBe("true");
+    await rowNamed("Session 2").get(".nm").trigger("click");
     expect(wrapper.find("input[aria-label='名称']").exists()).toBe(false);
-    await wrapper.get("tbody tr.row").trigger("click");
+    await rowNamed("Session 2").trigger("click");
     expect(navigator.clipboard.writeText).toHaveBeenLastCalledWith(pathRow.primary_action!.value);
     expect(wrapper.get("#toast").text()).toBe("已复制归档路径");
     await wrapper.get("#searchModeDeep").trigger("click");
     await wrapper.get("#q").setValue("needle");
     await wrapper.get("#deepSearch").trigger("click");
     await flushPromises();
-    expect(wrapper.findAll("tbody tr.row")).toHaveLength(1);
+    expect(wrapper.findAll("tbody tr.row")).toHaveLength(3);
     await wrapper.get("#reload").trigger("click");
     await flushPromises();
-    expect(wrapper.get<HTMLSelectElement>("#sourceFilter").element.value).toBe("cp");
-    expect(wrapper.findAll("tbody tr.row")).toHaveLength(1);
-    await wrapper.get("#sourceFilter").setValue("review");
-    await wrapper.get("tbody tr.row").trigger("click");
+    expect(wrapper.findAll("tbody tr.row")).toHaveLength(3);
+    await rowNamed("Session 3").trigger("click");
     expect(navigator.clipboard.writeText).toHaveBeenLastCalledWith(forkRow.primary_action!.value);
     expect(wrapper.get("#toast").text()).toBe("已复制新建分支命令");
-    await wrapper.get("[aria-label='打开详情页']").trigger("click");
+    await rowNamed("Session 3").get("[aria-label='打开详情页']").trigger("click");
     await flushPromises();
     expect(location.search).toContain("archive%3Afork");
     const copyButton = wrapper.findAll("button").find((button) => button.text() === "复制新建分支命令")!;

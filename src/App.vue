@@ -61,10 +61,8 @@ const generatedAt = ref("");
 const home = ref("");
 const loading = ref(true);
 const refreshing = ref(false);
-const source = ref("");
 const diagnostics = ref<SourceDiagnostic[]>([]);
 const hasSourceErrors = computed(() => diagnostics.value.some((item) => item.level === "error"));
-const sourceItems = computed(() => [...new Map(rows.value.map((row) => [row.source_id ?? "live", row.source_label ?? sourceCopy.live])).entries()]);
 const copyGroups = computed(() => {
   const groups = new Map<string, SessionView[]>();
   for (const row of rows.value) {
@@ -237,7 +235,6 @@ const filtered = computed(() => {
     if (tab.value === "__star__" && !row.starred) return false;
     if (tab.value === "__chain__" && !chainInfo.value.has(row.id)) return false;
     if (isTool(tab.value) && row.tool !== tab.value) return false;
-    if (source.value && (row.source_id ?? "live") !== source.value) return false;
     if (model.value && row.model !== model.value) return false;
     if (path.value && row.cwd !== path.value) return false;
     if (status.value && row.status !== status.value) return false;
@@ -274,7 +271,7 @@ watch(keyword, (value) => {
   }
   searchTimer = setTimeout(() => { effectiveKeyword.value = value; }, 120);
 });
-watch([source, path, model, status, updatedFrom, updatedTo, createdFrom, createdTo, sizeMin, sizeMax], () => { page.value = 1; });
+watch([path, model, status, updatedFrom, updatedTo, createdFrom, createdTo, sizeMin, sizeMax], () => { page.value = 1; });
 watch(pages, (value) => { page.value = value ? Math.min(page.value, value) : 1; });
 
 function shortPath(value: string): string {
@@ -308,17 +305,21 @@ function showToast(message: string, failed = false): void {
   toastTimer = setTimeout(() => { error.value = ""; notice.value = ""; }, 1200);
 }
 
+const isArchive = (row: SessionView) => row.source_kind === "archive";
+let archiveRows: SessionView[] | undefined;
+let archiveLoad: Promise<void> | undefined;
+
 async function load(fresh = false): Promise<void> {
   const keepRows = fresh && rows.value.length > 0;
   if (keepRows) refreshing.value = true;
   else loading.value = true;
   error.value = "";
   try {
-    const response = await fetch(`/api/sessions${fresh ? "?fresh=1" : ""}`);
+    const response = await fetch("/api/sessions?scope=live");
     if (!response.ok) throw new Error("加载失败");
     const envelope = parseSessionsEnvelope(await response.json());
     if (fresh) { transcriptRevision++; previewCache.clear(); }
-    rows.value = envelope.sessions;
+    rows.value = [...envelope.sessions.filter((row) => !isArchive(row)), ...archiveRows ?? []];
     generatedAt.value = envelope.generatedAt;
     home.value = envelope.home;
     diagnostics.value = envelope.diagnostics ?? [];
@@ -327,6 +328,21 @@ async function load(fresh = false): Promise<void> {
   } finally {
     if (keepRows) refreshing.value = false;
     else loading.value = false;
+  }
+  archiveLoad ??= loadArchive();
+}
+
+// Archive snapshots rarely change, so they load once after the live list renders and survive refreshes.
+async function loadArchive(): Promise<void> {
+  try {
+    const response = await fetch("/api/sessions?scope=archive");
+    if (!response.ok) throw new Error();
+    const envelope = parseSessionsEnvelope(await response.json());
+    archiveRows = envelope.sessions.filter(isArchive);
+    rows.value = [...rows.value.filter((row) => !isArchive(row)), ...archiveRows];
+    diagnostics.value = envelope.diagnostics ?? [];
+  } catch {
+    archiveLoad = undefined;
   }
 }
 
@@ -509,7 +525,6 @@ async function copySourcePath(row: SessionView): Promise<void> {
 }
 
 function clearFilters(): void {
-  source.value = "";
   keyword.value = "";
   effectiveKeyword.value = "";
   path.value = "";
@@ -1029,10 +1044,6 @@ onBeforeUnmount(() => {
       <div class="tabs" role="group" aria-label="会话来源">
         <button v-for="item in tabs" :key="item.value" type="button" class="f" :class="{ on: tab === item.value }" :data-count="tabCounts[item.value]" :aria-pressed="tab === item.value" @click="setTab(item.value)">{{ item.label }}</button>
       </div>
-      <select v-model="source" id="sourceFilter" class="select-button" :aria-label="sourceCopy.sourceFilter">
-        <option value="">{{ sourceCopy.allSources }}</option>
-        <option v-for="[id, label] in sourceItems" :key="id" :value="id">{{ label }}</option>
-      </select>
       <button id="pathButton" type="button" class="select-button" aria-haspopup="listbox" :aria-expanded="menu?.key === 'path'" @click.stop="openPathMenu">
         <span class="select-label">{{ pathLabel }}</span><svg viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="m2 4 4 4 4-4" /></svg>
       </button>
