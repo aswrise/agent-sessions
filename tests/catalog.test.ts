@@ -179,6 +179,16 @@ exec '${realRg}' "$@"
     expect((await catalog.list({ fresh: true })).find(({ id }) => id === "claude-a")?.name).toBe("Changed after index");
   });
 
+  test("persists pins across Catalog restart and drops the mark once unpinned", async () => {
+    const { home, catalog } = setup();
+    const marks = join(home, ".local/share/session-snapshots/stars.json");
+    await catalog.updateMark("claude-a", { star: false, note: "", pin: true });
+    expect((await new SessionCatalog({ home }).list({ fresh: true })).find(({ id }) => id === "claude-a")?.pinned).toBe(true);
+    await catalog.updateMark("claude-a", { pin: false });
+    expect(JSON.parse(readFileSync(marks, "utf8"))["claude-a"]).toBeUndefined();
+    expect((await new SessionCatalog({ home }).list({ fresh: true })).find(({ id }) => id === "claude-a")?.pinned).toBeUndefined();
+  });
+
   test("keeps manual Lineage after refresh, cache deletion, and Catalog restart", async () => {
     const { home, catalog } = setup();
     await catalog.list({ fresh: true });

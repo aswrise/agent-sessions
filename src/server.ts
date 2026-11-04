@@ -108,6 +108,10 @@ export function startServer(options: ServerOptions): Bun.Server<undefined> {
             if (typeof value.archive !== "boolean") throw new RequestError(400, "archive 必须是 boolean");
             patch.archive = value.archive;
           }
+          if (value.pin !== undefined) {
+            if (typeof value.pin !== "boolean") throw new RequestError(400, "pin 必须是 boolean");
+            patch.pin = value.pin;
+          }
           if (value.status !== undefined) {
             if (!isStatus(value.status)) throw new RequestError(400, "status 无效");
             patch.status = value.status;

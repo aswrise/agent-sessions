@@ -51,6 +51,7 @@ type Mark = {
   note?: string;
   name?: string;
   archived?: boolean;
+  pinned?: boolean;
   status?: SessionStatus;
   added?: string;
 };
@@ -726,7 +727,7 @@ function isStarred(mark: Mark | undefined): boolean {
 }
 
 function meaningful(mark: Mark): boolean {
-  return Boolean(mark.starred || mark.note || mark.name || mark.archived || mark.status);
+  return Boolean(mark.starred || mark.note || mark.name || mark.archived || mark.pinned || mark.status);
 }
 
 function added(now: Date): string {
@@ -917,6 +918,7 @@ export class SessionCatalog {
     if (patch.star !== undefined) mark.starred = patch.star;
     if (patch.note !== undefined) mark.note = patch.note;
     if (patch.archive !== undefined) mark.archived = patch.archive;
+    if (patch.pin !== undefined) mark.pinned = patch.pin;
     if (patch.status !== undefined) mark.status = patch.status;
     if (meaningful(mark)) {
       mark.added ??= added(this.now());
@@ -1055,6 +1057,7 @@ export class SessionCatalog {
         starred: isStarred(mark),
         star_note: mark?.note ?? "",
         archived: Boolean(mark?.archived),
+        ...(mark?.pinned ? { pinned: true } : {}),
         status: mark?.status ?? "",
       });
     }
@@ -1102,6 +1105,7 @@ export class SessionCatalog {
         if (typeof raw.note === "string") mark.note = raw.note;
         if (typeof raw.name === "string") mark.name = raw.name;
         if (typeof raw.archived === "boolean") mark.archived = raw.archived;
+        if (typeof raw.pinned === "boolean") mark.pinned = raw.pinned;
         if (isStatus(raw.status)) mark.status = raw.status;
         if (typeof raw.added === "string") mark.added = raw.added;
         marks[id] = mark;

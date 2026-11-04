@@ -25,7 +25,7 @@ import {
 type Tab = "" | Tool | "__star__" | "__chain__" | "__arch__";
 type SearchMode = "normal" | "deep";
 type ViewMode = "sessions" | "lineage";
-type SortKey = keyof Pick<SessionView, "starred" | "mtime" | "model" | "name" | "status" | "cwd">;
+type SortKey = keyof Pick<SessionView, "starred" | "mtime" | "model" | "name" | "size_kb" | "cwd">;
 type MenuItem = { value: string; label: string };
 type MenuState = {
   key: string;
@@ -247,12 +247,12 @@ const filtered = computed(() => {
     if (searchMode.value === "deep" && deepSearched.value) return deepIds.value.has(row.id);
     return !query || `${row.id} ${row.session_id ?? ""} ${row.source_path} ${row.name} ${row.star_note} ${row.first_msg}`.toLowerCase().includes(query);
   });
-  if (!sortKey.value) return result.sort((left, right) => right.mtime - left.mtime);
-  return result.sort((left, right) => {
+  const sorted = !sortKey.value ? result.sort((left, right) => right.mtime - left.mtime) : result.sort((left, right) => {
     const a = left[sortKey.value as SortKey];
     const b = right[sortKey.value as SortKey];
     return (a < b ? -1 : a > b ? 1 : 0) * (sortAscending.value ? 1 : -1);
   });
+  return [...sorted.filter((row) => row.pinned), ...sorted.filter((row) => !row.pinned)];
 });
 const pages = computed(() => Math.ceil(filtered.value.length / PAGE_SIZE));
 const visible = computed(() => filtered.value.slice((page.value - 1) * PAGE_SIZE, page.value * PAGE_SIZE));
@@ -436,6 +436,11 @@ async function persist(row: SessionView, route: "/star" | "/rename", body: Recor
 async function toggleStar(row: SessionView): Promise<void> {
   const starred = !row.starred;
   await persist(row, "/star", { star: starred }, () => { row.starred = starred; }, starred ? "已标记" : "已取消");
+}
+
+async function togglePin(row: SessionView): Promise<void> {
+  const pinned = !row.pinned;
+  await persist(row, "/star", { pin: pinned }, () => { row.pinned = pinned; }, pinned ? "已置顶" : "已取消置顶");
 }
 
 async function toggleArchive(row: SessionView): Promise<void> {
@@ -910,6 +915,9 @@ function resize(index: number, event: PointerEvent): void {
     window.removeEventListener("pointermove", move);
     window.removeEventListener("pointerup", up);
     handle.classList.remove("on");
+    const swallow = (click: Event) => click.stopPropagation();
+    window.addEventListener("click", swallow, { capture: true, once: true });
+    setTimeout(() => window.removeEventListener("click", swallow, true), 0);
     localStorage.setItem("colw7", JSON.stringify(widths.value.map((width) => width || null)));
   };
   window.addEventListener("pointermove", move);
@@ -1079,7 +1087,7 @@ onBeforeUnmount(() => {
         <thead><tr>
           <th v-for="(column, index) in [
             { key: 'starred', label: '★', className: 'action-head' }, { key: 'mtime', label: '更新' }, { key: 'model', label: '模型' },
-            { key: 'name', label: '会话' }, { key: 'status', label: '状态' }, { key: 'cwd', label: '路径' },
+            { key: 'name', label: '会话' }, { key: 'size_kb', label: '大小' }, { key: 'cwd', label: '路径' },
           ]" :key="column.key" :class="['className' in column ? column.className : '', sortKey === column.key ? (sortAscending ? 's-asc' : 's-desc') : '']" @click="sort(column.key as SortKey)">
             {{ column.label }}<span class="rs" @pointerdown="resize(index, $event)" />
           </th>
@@ -1088,7 +1096,7 @@ onBeforeUnmount(() => {
         <tbody>
           <tr v-if="loading"><td colspan="7"><div class="empty">加载中...</div></td></tr>
           <tr v-else-if="!filtered.length"><td colspan="7"><div class="empty">没有匹配的 session，试试更短的关键词或切换筛选</div></td></tr>
-          <tr v-for="row in visible" v-else :key="row.id" class="row" :class="{ starred: row.starred, archived: row.archived, pending: pending.has(row.id) }" :title="copyLabel(row)" tabindex="0" @click="copy(row)" @keydown.enter="copy(row)">
+          <tr v-for="row in visible" v-else :key="row.id" class="row" :class="{ starred: row.starred, pinned: row.pinned, archived: row.archived, pending: pending.has(row.id) }" :title="copyLabel(row)" tabindex="0" @click="copy(row)" @keydown.enter="copy(row)">
             <td class="starcell"><button type="button" class="rowbtn starbtn" :disabled="pending.has(row.id)" :aria-label="row.starred ? '取消标记' : '标记重要'" :title="row.starred ? '取消标记' : '标记重要'" @click.stop="toggleStar(row)">{{ row.starred ? "★" : "☆" }}</button></td>
             <td class="dt" @mouseenter="showTextPreview($event, `${row.id}:mtime`, `更新 ${formatDate(row.mtime)}　创建 ${formatDate(row.birth)}　${formatSize(row.size_kb)}`)" @mouseleave="schedulePreviewHide">{{ formatDate(row.mtime) }}</td>
             <td class="modelcell" @mouseenter="showTextPreview($event, `${row.id}:model`, row.model || '无模型')" @mouseleave="schedulePreviewHide">
@@ -1109,7 +1117,7 @@ onBeforeUnmount(() => {
               </div>
               <div v-if="!compact" class="line2 msg" @mouseenter="showTranscriptPreview(row, $event)" @mouseleave="schedulePreviewHide">{{ messageText(row) }}</div>
             </td>
-            <td><button type="button" class="status statusbtn" aria-haspopup="listbox" :aria-expanded="menu?.key === `status:${row.id}`" :style="{ '--sc': statusMeta[row.status].color }" @click.stop="openRowStatus(row, $event)"><span :class="{ none: !row.status }">{{ statusMeta[row.status].label }}</span></button></td>
+            <td class="sz">{{ formatSize(row.size_kb) }}</td>
             <td class="p" @mouseenter="showTextPreview($event, `${row.id}:path`, shortPath(row.cwd))" @mouseleave="schedulePreviewHide">{{ shortPath(row.cwd) }}</td>
             <td class="opscell">
               <div class="ops">
@@ -1122,6 +1130,9 @@ onBeforeUnmount(() => {
                 </button>
                 <button type="button" class="iconbtn hoveronly" title="打开详情页" aria-label="打开详情页" @click.stop="openDetail(row.id)">
                   <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M1.5 8S3.9 3.6 8 3.6 14.5 8 14.5 8 12.1 12.4 8 12.4 1.5 8 1.5 8Z" /><circle cx="8" cy="8" r="2" /></svg>
+                </button>
+                <button type="button" class="iconbtn pinbtn" :class="{ hoveronly: !row.pinned }" :disabled="pending.has(row.id)" :title="row.pinned ? '取消置顶' : '置顶'" :aria-label="row.pinned ? '取消置顶' : '置顶'" @click.stop="togglePin(row)">
+                  <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round" aria-hidden="true"><path d="M5.4 2.2h5.2M6.4 2.2v3.6L4.2 8.6h7.6L9.6 5.8V2.2M8 8.6v5.2" /></svg>
                 </button>
                 <button type="button" class="iconbtn hoveronly" :disabled="pending.has(row.id)" :title="row.archived ? '解除归档' : '归档（在“已归档”视图可找回）'" :aria-label="row.archived ? '解除归档' : '归档'" @click.stop="toggleArchive(row)">
                   <svg v-if="row.archived" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M8 13.2V4.4M4.6 7.4 8 4 11.4 7.4M2.6 13.4h10.8" /></svg>
@@ -1287,7 +1298,7 @@ main{max-width:1760px;margin:0 auto;padding:0 32px 56px}
 #lineageOverview{display:grid;gap:14px}.lineage-toolbar{display:flex;align-items:center;justify-content:space-between;gap:20px;padding:16px 18px;border:1px solid var(--obsidian);border-radius:14px;background:var(--carbon)}.lineage-toolbar h2{margin:0;color:var(--paper);font-size:15px;font-weight:650}.lineage-toolbar p{margin:3px 0 0;color:var(--ash);font-size:11px}.lineage-zero{display:grid;justify-items:center;gap:8px;padding:72px 20px;border:1px dashed var(--graphite);border-radius:14px;color:var(--ash);text-align:center}.lineage-zero strong{color:var(--mist);font-size:14px}.lineage-zero span{max-width:520px;font-size:12px}.detail-lineage{margin-top:12px}.lineage-loading{margin-top:12px;padding:28px;border:1px solid var(--obsidian);border-radius:12px;background:var(--carbon);color:var(--ash);text-align:center}
 table{width:100%;min-width:1040px;border-collapse:collapse;table-layout:fixed}
 col.c-star{width:36px}col.c-date{width:92px}col.c-model{width:158px}
-col.c-stat{width:116px}col.c-path{width:190px}col.c-ops{width:128px}
+col.c-stat{width:72px}col.c-path{width:190px}col.c-ops{width:176px}
 .select-button{display:inline-flex;align-items:center;justify-content:space-between;gap:8px;max-width:240px;height:34px;
   padding:0 10px;border:1px solid var(--input-line);border-radius:9px;background:var(--input-bg);
   color:var(--fog);font:inherit;font-size:12px;cursor:pointer;white-space:nowrap}
@@ -1344,7 +1355,7 @@ table.compact td{height:40px}
   color:var(--ash);font-size:11px;cursor:text}
 .note-slot:empty::after{content:"+ 备注";color:var(--smoke);transition:opacity 120ms ease}
 td.opscell{padding-right:6px}
-.ops{display:flex;align-items:center;justify-content:flex-end;gap:1px}
+.ops{display:flex;align-items:center;justify-content:flex-end;gap:3px}
 .iconbtn{display:inline-grid;grid-auto-flow:column;place-items:center;gap:3px;min-width:28px;height:28px;padding:0 6px;
   border:0;border-radius:7px;background:transparent;color:var(--ash);font:inherit;cursor:pointer;
   transition:transform 120ms var(--ease-out),background-color 120ms ease,color 120ms ease,opacity 130ms ease}
@@ -1377,6 +1388,8 @@ tr.starred .starbtn{color:var(--lime)}
   border-radius:6px;background:var(--input-bg);color:var(--paper);font:inherit;outline:none;
   box-shadow:0 0 0 3px color-mix(in srgb,var(--lime) 12%,transparent)}
 tr.archived td{opacity:.6}
+tr.row.pinned td:first-child{box-shadow:inset 2px 0 0 color-mix(in srgb,var(--lime) 70%,transparent)}
+tr.pinned .pinbtn{color:var(--lime)}
 .detail-top{display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:18px;
   border:1px solid var(--obsidian);border-radius:14px;background:var(--carbon)}
 .detail-title{font-size:16px;font-weight:620;color:var(--paper);min-width:0;flex:1}
@@ -1390,6 +1403,7 @@ tr.archived td{opacity:.6}
   background:color-mix(in srgb,var(--lime) 10%,var(--carbon));border-color:color-mix(in srgb,var(--lime) 20%,var(--obsidian))}
 .role{font-size:10px;font-weight:650;text-transform:uppercase;letter-spacing:.07em;color:var(--ash);margin-bottom:7px}
 .body{word-break:break-word;color:var(--mist);line-height:1.65}
+.sz{font:11px ui-monospace,"Cascadia Code",Consolas,monospace;opacity:.6}
 .status{display:inline-grid;max-width:100%;padding:0;border:0;background:none;font:inherit;vertical-align:middle;cursor:pointer}
 .status span{display:inline-flex;align-items:center;gap:6px;min-width:0;height:22px;
   padding:0 7px;border:1px solid color-mix(in srgb,var(--sc) 28%,transparent);

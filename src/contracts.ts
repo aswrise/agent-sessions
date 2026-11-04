@@ -24,6 +24,7 @@ export interface Session {
   starred: boolean;
   star_note: string;
   archived: boolean;
+  pinned?: boolean;
   status: SessionStatus;
   session_id?: string;
   source_id?: string;
@@ -111,6 +112,7 @@ export interface MarkPatch {
   star?: boolean;
   note?: string;
   archive?: boolean;
+  pin?: boolean;
   status?: SessionStatus;
 }
 
@@ -139,7 +141,8 @@ export function isSessionView(value: unknown): value is SessionView {
     && (value.source_kind === undefined || value.source_kind === "archive")
     && numberFields(value, ["mtime", "birth", "size_kb"])
     && isTool(value.tool) && isStatus(value.status)
-    && typeof value.starred === "boolean" && typeof value.archived === "boolean";
+    && typeof value.starred === "boolean" && typeof value.archived === "boolean"
+    && (value.pinned === undefined || typeof value.pinned === "boolean");
 }
 
 export function parseSessionsEnvelope(value: unknown): SessionsEnvelope {

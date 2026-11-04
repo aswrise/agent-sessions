@@ -571,7 +571,29 @@ describe("dashboard", () => {
     wrapper.unmount();
   });
 
-  test("commits star, note, status, and archive only after success", async () => {
+  test("keeps pinned rows first under any sort and pins through /star", async () => {
+    const original = fetchMock.getMockImplementation() as (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
+    fetchMock.mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => String(input).startsWith("/api/sessions")
+      ? response({ generatedAt: new Date(0).toISOString(), home: "/home/fixture", sessions: Array.from({ length: 101 }, (_, index) => ({ ...makeRow(index), ...(index === 5 ? { pinned: true } : {}) })) })
+      : original(input, init));
+    const wrapper = mount(App);
+    await flushPromises();
+    const names = () => wrapper.findAll("tbody .name-text").map((name) => name.text());
+    expect(names().slice(0, 2)).toEqual(["Session 5", "Session 100"]);
+    expect(wrapper.get("tbody tr").classes()).toContain("pinned");
+    await wrapper.findAll("th").find((th) => th.text().startsWith("会话"))!.trigger("click");
+    expect(names()[0]).toBe("Session 5");
+
+    await wrapper.findAll("th").find((th) => th.text().startsWith("更新"))!.trigger("click");
+    await wrapper.findAll("tbody tr")[1]!.get("button[aria-label='置顶']").trigger("click");
+    await flushPromises();
+    expect(fetchMock).toHaveBeenCalledWith("/star", expect.objectContaining({ body: expect.stringContaining('"pin":true') }));
+    expect(names().slice(0, 3)).toEqual(["Session 100", "Session 5", "Session 99"]);
+    expect(wrapper.findAll("tbody tr")[0]!.find("button[aria-label='取消置顶']").exists()).toBe(true);
+    wrapper.unmount();
+  });
+
+  test("commits star, note, and archive only after success", async () => {
     const wrapper = mount(App);
     await flushPromises();
     const row = wrapper.get("tbody tr");
@@ -595,10 +617,6 @@ describe("dashboard", () => {
     expect(wrapper.get("[role='alert']").text()).toBe("改名失败");
     expect(row.get(".name-text").text()).toBe("Session 100");
 
-    await row.get(".statusbtn").trigger("click");
-    await wrapper.findAll(".menu-option").find((option) => option.text().startsWith("done"))!.trigger("click");
-    await flushPromises();
-    expect(row.get(".statusbtn").text()).toBe("done");
     expect(fetchMock).toHaveBeenCalledWith("/star", expect.objectContaining({ method: "POST" }));
     await row.get("[aria-label='归档']").trigger("click");
     await flushPromises();
@@ -676,6 +694,12 @@ describe("dashboard", () => {
     window.dispatchEvent(new PointerEvent("pointermove", { clientX: 130 }));
     window.dispatchEvent(new PointerEvent("pointerup"));
     expect(JSON.parse(localStorage.getItem("colw7") || "[]")[0]).toBeGreaterThanOrEqual(36);
+    const sortedBefore = wrapper.findAll("th.s-asc, th.s-desc").length;
+    await wrapper.findAll("thead th")[3]!.trigger("click");
+    expect(wrapper.findAll("th.s-asc, th.s-desc").length).toBe(sortedBefore);
+    await vi.advanceTimersByTimeAsync(1);
+    await wrapper.findAll("thead th")[3]!.trigger("click");
+    expect(wrapper.findAll("th.s-asc, th.s-desc").length).toBe(1);
     wrapper.unmount();
   });
 

@@ -61,13 +61,16 @@ describe("Bun HTTP seam", () => {
     expect((await fetch(base + "/star", { method: "POST", body: "{" })).status).toBe(400);
     expect((await fetch(base + "/star", { method: "POST", body: JSON.stringify({ star: true }) })).status).toBe(400);
     expect((await fetch(base + "/star", { method: "POST", body: JSON.stringify({ id: "codex-b", status: "waiting" }) })).status).toBe(400);
+    const badPin = await fetch(base + "/star", { method: "POST", body: JSON.stringify({ id: "codex-b", pin: "yes" }) });
+    expect(badPin.status).toBe(400);
+    expect(await badPin.json()).toEqual({ error: "pin 必须是 boolean" });
     expect((await fetch(base + "/star", { method: "POST", body: JSON.stringify({ id: "missing", star: true }) })).status).toBe(404);
-    expect((await fetch(base + "/star", { method: "POST", body: JSON.stringify({ id: "codex-b", star: true, note: "kept", archive: true, status: "done" }) })).status).toBe(200);
+    expect((await fetch(base + "/star", { method: "POST", body: JSON.stringify({ id: "codex-b", star: true, note: "kept", archive: true, pin: true, status: "done" }) })).status).toBe(200);
     expect((await fetch(base + "/rename", { method: "POST", body: JSON.stringify({ id: "claude-a", name: "HTTP name" }) })).status).toBe(200);
     expect((await fetch(base + "/api/star", { method: "POST", body: JSON.stringify({ id: "codex-b", star: true }) })).status).toBe(404);
     const rows = (await (await fetch(base + "/api/sessions?fresh=1")).json()).sessions;
     expect(rows.find(({ id }: { id: string }) => id === "codex-b"))
-      .toMatchObject({ starred: true, star_note: "kept", archived: true, status: "done", name: "Codex explicit" });
+      .toMatchObject({ starred: true, star_note: "kept", archived: true, pinned: true, status: "done", name: "Codex explicit" });
     expect(rows.find(({ id }: { id: string }) => id === "claude-a")).toMatchObject({ name: "HTTP name" });
   });
 
