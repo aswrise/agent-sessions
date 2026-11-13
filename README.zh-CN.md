@@ -227,7 +227,7 @@ Agent Sessions 直接读取本地文件，不会上传 Transcript 数据。
 
 ## 从源码构建
 
-安装 Bun 1.3.14 和 `rg` 后执行：
+安装 Bun 1.4.4 和 `rg` 后执行：
 
 ```bash
 bun install --frozen-lockfile

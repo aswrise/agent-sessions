@@ -4,7 +4,7 @@ Status: accepted
 
 ## Decision
 
-Use Bun 1.3.14 for the CLI, HTTP server, tests, build scripts, and standalone
+Use Bun 1.4.4 for the CLI, HTTP server, tests, build scripts, and standalone
 compilation. Use Vue 3 with Vite for the dashboard. Keep one deep
 `SessionCatalog` module with three internal Claude/Codex/pi adapters; CLI, HTTP,
 and Vue do not read tool storage formats directly.

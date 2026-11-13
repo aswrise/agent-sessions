@@ -252,7 +252,7 @@ you. `lineage.sqlite` can always be rebuilt.
 
 ## Build from source
 
-Install Bun 1.3.14 and `rg`, then run:
+Install Bun 1.4.4 and `rg`, then run:
 
 ```bash
 bun install --frozen-lockfile
