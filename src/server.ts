@@ -1,3 +1,6 @@
+import { readFile, stat } from "node:fs/promises";
+import { extname, isAbsolute, resolve } from "node:path";
+import MarkdownIt from "markdown-it";
 import { CatalogError, SessionCatalog } from "./catalog.ts";
 import { isStatus, type MarkPatch } from "./contracts.ts";
 import { withResumeCommand } from "./resume.ts";
@@ -15,6 +18,9 @@ type ServerOptions = {
 class RequestError extends Error {
   constructor(public status: number, message: string) { super(message); }
 }
+
+const links = new MarkdownIt();
+const previewExtensions = new Set([".md", ".markdown", ".txt", ".sql", ".html", ".htm", ".json", ".xml", ".yaml", ".yml", ".csv", ".log", ".sh", ".py", ".js", ".ts", ".java", ".properties"]);
 
 const json = (value: unknown, status = 200) => Response.json(value, { status });
 const isRecord = (value: unknown): value is Record<string, unknown> =>
@@ -70,6 +76,35 @@ export function startServer(options: ServerOptions): Bun.Server<undefined> {
           const id = url.searchParams.get("id");
           if (!id) throw new RequestError(400, "缺少 id");
           return json(withResumeCommand(await catalog.detail(id), platform));
+        }
+        if (request.method === "GET" && url.pathname === "/api/file-preview") {
+          if (request.headers.get("sec-fetch-site") === "cross-site") throw new RequestError(403, "不允许跨站读取文件");
+          const id = url.searchParams.get("id"), href = url.searchParams.get("href");
+          if (!id || !href) throw new RequestError(400, "缺少会话或文件路径");
+          const session = await catalog.detail(id);
+          const linked = session.messages.some((message) => links.parse(message.text, {}).some((token) =>
+            token.children?.some((child) => child.type === "link_open" && child.attrGet("href") === href)));
+          if (!linked) throw new RequestError(403, "文件链接不在当前会话中");
+          let path: string;
+          try { path = decodeURIComponent(href.split("#", 1)[0] ?? "").replace(/:\d+(?::\d+)?$/, ""); }
+          catch { throw new RequestError(400, "文件路径无效"); }
+          if (/^[a-z][a-z0-9+.-]*:/i.test(path) || path.startsWith("//")) throw new RequestError(400, "仅支持本地文件");
+          const extension = extname(path).toLowerCase();
+          if (!previewExtensions.has(extension)) throw new RequestError(400, "不支持预览此文件类型");
+          if (!isAbsolute(path) && (!session.cwd || session.cwd === "?" || !isAbsolute(session.cwd)))
+            throw new RequestError(400, "会话工作目录不可用");
+          const file = isAbsolute(path) ? path : resolve(session.cwd, path);
+          try {
+            const info = await stat(file);
+            if (!info.isFile()) throw new RequestError(400, "路径不是文件");
+            if (info.size > 2 * 1024 * 1024) throw new RequestError(400, "文件超过 2 MB，无法预览");
+            const content = await readFile(file, "utf8");
+            if (content.includes("\0")) throw new RequestError(400, "无法预览二进制文件");
+            return json({ path: file, extension, content });
+          } catch (error) {
+            if (error instanceof RequestError) throw error;
+            throw new RequestError(404, "文件不存在或无法读取");
+          }
         }
         if (request.method === "GET" && url.pathname === "/api/lineage") {
           const id = url.searchParams.get("id");

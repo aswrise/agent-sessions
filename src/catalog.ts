@@ -778,11 +778,50 @@ class CodexAdapter extends JsonlAdapter {
   }
 
   transcript(id: string, path?: string): TranscriptMessage[] {
-    return this.messages(id, (record) => {
-      if (this.archive && record.type === "message") return record;
-      if (record.type !== "response_item" || !isRecord(record.payload) || record.payload.type !== "message") return;
-      return record.payload;
-    }, path, this.archive ? '"message"' : '"response_item"');
+    const current = path ?? this.findFile(id);
+    if (!current) throw new CatalogError("not_found", `找不到 codex session 文件: ${id}`);
+    const segments: { path: string; end?: number }[] = [];
+    const seen = new Set<string>();
+    let segment: { path: string; end?: number } = { path: current };
+    let candidates: string[] | undefined;
+    while (true) {
+      if (!this.allowed(segment.path) || seen.has(segment.path))
+        throw new CatalogError("invalid", `Codex 会话历史链无效: ${segment.path}`);
+      seen.add(segment.path);
+      segments.push(segment);
+      const meta = parseRecord(readHeadLines(segment.path, 1).next().value ?? "");
+      const payload = meta && isRecord(meta.payload) ? meta.payload : undefined;
+      const base = payload?.history_base;
+      if (base === undefined || base === null) break;
+      if (!isRecord(base) || typeof base.thread_id !== "string" || !base.thread_id
+        || typeof base.end_byte_offset !== "number" || !Number.isSafeInteger(base.end_byte_offset) || base.end_byte_offset < 0)
+        throw new CatalogError("invalid", `Codex 会话历史边界无效: ${segment.path}`);
+      candidates ??= this.discover();
+      const matches = candidates.filter((candidate) => {
+        const name = basename(candidate);
+        return name.endsWith(`-${base.thread_id}.jsonl`) || name.endsWith(`_${base.thread_id}.jsonl`);
+      });
+      if (matches.length !== 1)
+        throw new CatalogError("not_found", `Codex 会话历史文件缺失或不唯一: ${base.thread_id}`);
+      segment = { path: matches[0]!, end: base.end_byte_offset };
+    }
+    const output: TranscriptMessage[] = [];
+    for (const part of segments.reverse()) {
+      const data = readFileSync(part.path);
+      if (part.end !== undefined && (part.end > data.length || (part.end > 0 && data[part.end - 1] !== 10)))
+        throw new CatalogError("invalid", `Codex 会话历史边界超出文件或不完整: ${part.path}`);
+      for (const line of data.subarray(0, part.end).toString("utf8").split(/\r?\n/)) {
+        const record = parseRecord(line);
+        if (!record) continue;
+        const message = this.archive && record.type === "message" ? record
+          : record.type === "response_item" && isRecord(record.payload) && record.payload.type === "message" ? record.payload : undefined;
+        if (!message) continue;
+        const role = stringValue(message.role), text = contentText(message.content);
+        if ((role === "user" || role === "assistant") && text && !skipTranscript(role, text))
+          output.push({ role, text, timestamp: stringValue(record.timestamp) });
+      }
+    }
+    return output;
   }
 
   async rename(id: string, name: string): Promise<void> {

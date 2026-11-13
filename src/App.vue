@@ -104,6 +104,53 @@ const pending = ref(new Set<string>());
 const copiedPathId = ref("");
 const detail = ref<TranscriptView>();
 const detailLoading = ref(false);
+type FilePreview = { path: string; extension: string; content: string };
+const filePreview = ref<FilePreview>();
+const filePreviewLoading = ref(false);
+const filePreviewError = ref("");
+const filePreviewOpen = ref(false);
+let filePreviewRequest = 0;
+
+async function previewLocalLink(event: MouseEvent): Promise<void> {
+  const target = event.target;
+  if (!(target instanceof Element) || !detail.value || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+  const link = target.closest("a");
+  const href = link?.getAttribute("href") ?? "";
+  if (!href || /^(?:[a-z][a-z0-9+.-]*:|\/\/|#)/i.test(href)
+    || !/\.(?:md|markdown|txt|sql|html?|json|xml|ya?ml|csv|log|sh|py|js|ts|java|properties)(?::\d+(?::\d+)?)?(?:#.*)?$/i.test(href)) return;
+  event.preventDefault();
+  const request = ++filePreviewRequest;
+  filePreviewOpen.value = true;
+  filePreview.value = undefined;
+  filePreviewError.value = "";
+  filePreviewLoading.value = true;
+  try {
+    const params = new URLSearchParams({ id: detail.value.id, href });
+    const response = await fetch(`/api/file-preview?${params}`);
+    const result: unknown = await response.json();
+    if (request !== filePreviewRequest) return;
+    if (!response.ok) {
+      filePreviewError.value = typeof result === "object" && result !== null && "error" in result && typeof result.error === "string" ? result.error : "加载失败";
+    } else if (typeof result === "object" && result !== null && "path" in result && typeof result.path === "string"
+      && "extension" in result && typeof result.extension === "string" && "content" in result && typeof result.content === "string") {
+      filePreview.value = { path: result.path, extension: result.extension, content: result.content };
+    } else filePreviewError.value = "文件预览响应无效";
+  } catch {
+    if (request === filePreviewRequest) filePreviewError.value = "加载失败";
+  } finally {
+    if (request === filePreviewRequest) filePreviewLoading.value = false;
+  }
+}
+
+function htmlPreview(content: string): string {
+  return `<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src data:">${content}`;
+}
+
+function closeFilePreview(): void {
+  filePreviewRequest++;
+  filePreviewOpen.value = false;
+}
+
 const detailError = ref("");
 const lineage = ref<LineageView>();
 const lineageLoading = ref(false);
@@ -975,7 +1022,8 @@ function keydown(event: KeyboardEvent): void {
     resetDeepSearch();
     page.value = 1;
     (document.activeElement as HTMLElement).blur();
-  } else if (event.key === "Escape" && (detail.value || detailError.value)) showList();
+  } else if (event.key === "Escape" && filePreviewOpen.value) closeFilePreview();
+  else if (event.key === "Escape" && (detail.value || detailError.value)) showList();
 }
 
 function documentClick(event: MouseEvent): void {
@@ -1200,7 +1248,7 @@ onBeforeUnmount(() => {
         <section v-else-if="lineage" class="detail-lineage" aria-label="Session 关系链">
           <LineageGraph :view="lineage" :focus-id="detail.id" @select="openDetail" />
         </section>
-        <div class="msglist">
+        <div class="msglist" @click="previewLocalLink">
           <div v-if="!detail.messages.length" class="empty">没有可展示的 user / assistant 文本消息</div>
           <article v-for="(message, index) in detail.messages" :key="index" class="bubble" :class="message.role">
             <div class="role">{{ message.role }}</div><div class="body markdown" v-html="markdown.render(message.text)" />
@@ -1209,6 +1257,19 @@ onBeforeUnmount(() => {
       </template>
     </section>
   </main>
+
+  <div v-if="filePreviewOpen" class="file-preview-backdrop" @click.self="closeFilePreview">
+    <section class="file-preview" role="dialog" aria-modal="true" aria-label="本地文件预览">
+      <header class="file-preview-header"><strong>{{ filePreview?.path || "本地文件预览" }}</strong><button type="button" class="f act" @click="closeFilePreview">关闭</button></header>
+      <div v-if="filePreviewLoading" class="file-preview-content">加载中...</div>
+      <div v-else-if="filePreviewError" class="file-preview-content" role="alert">{{ filePreviewError }}</div>
+      <template v-else-if="filePreview">
+        <iframe v-if="['.html', '.htm'].includes(filePreview.extension)" class="file-preview-frame" title="HTML 文件预览" sandbox="" :srcdoc="htmlPreview(filePreview.content)" />
+        <div v-else-if="['.md', '.markdown'].includes(filePreview.extension)" class="file-preview-content markdown" v-html="markdown.render(filePreview.content)" />
+        <pre v-else class="file-preview-content file-preview-text">{{ filePreview.content }}</pre>
+      </template>
+    </section>
+  </div>
 
   <div v-if="menu" ref="menuElement" class="menu show" role="listbox" tabindex="-1" :style="menu.style" @click.stop @keydown="menuKeydown">
     <button v-for="item in menu.items" :key="item.value" type="button" class="menu-option" role="option" :aria-selected="item.value === menu.value" @click="chooseMenu(item)"><span>{{ item.label }}</span><span class="check">✓</span></button>
@@ -1503,4 +1564,8 @@ tr.pinned .pinbtn{color:var(--lime)}
 }
 @media (prefers-reduced-transparency:reduce){.chrome,.menu,#tip,#lineage-preview{background:var(--carbon);backdrop-filter:none}}
 @media (prefers-contrast:more){.chrome,.menu,#tip,#lineage-preview,#list,.detail-top,.bubble{border-color:var(--fog)}}
+</style>
+
+<style>
+.file-preview-backdrop{position:fixed;inset:0;z-index:1000;background:rgba(0,0,0,.55);display:flex;align-items:center;justify-content:center;padding:24px}.file-preview{display:flex;flex-direction:column;width:min(1100px,100%);height:min(850px,90vh);background:var(--material);color:var(--paper);border:1px solid var(--graphite);border-radius:12px;overflow:hidden}.file-preview-header{display:flex;align-items:center;gap:16px;padding:14px 18px;border-bottom:1px solid var(--graphite)}.file-preview-header strong{flex:1;overflow-wrap:anywhere}.file-preview-content{flex:1;overflow:auto;padding:20px;margin:0}.file-preview-text{white-space:pre-wrap;overflow-wrap:anywhere;font:13px/1.6 ui-monospace,monospace}.file-preview-frame{flex:1;width:100%;border:0;background:white}
 </style>
