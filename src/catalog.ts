@@ -879,6 +879,7 @@ class CodexAdapter extends JsonlAdapter {
   private models = new Map<string, string>();
   private indexedMetadata = new Map<string, ParsedMetadata | null>();
   private archiveSubagents = new Map<string, string>();
+  private historyFiles: string[] | undefined;
   private names = new Map<string, string>();
   private namesSignature = "";
   private namesLoaded = false;
@@ -1120,11 +1121,13 @@ class CodexAdapter extends JsonlAdapter {
       if (!isRecord(base) || typeof base.thread_id !== "string" || !base.thread_id
         || typeof base.end_byte_offset !== "number" || !Number.isSafeInteger(base.end_byte_offset) || base.end_byte_offset < 0)
         throw new CatalogError("invalid", `Codex 会话历史边界无效: ${segment.path}`);
-      candidates ??= this.discover();
-      const matches = candidates.filter((candidate) => {
+      const named = (files: string[]) => files.filter((candidate) => {
         const name = basename(candidate);
         return name.endsWith(`-${base.thread_id}.jsonl`) || name.endsWith(`_${base.thread_id}.jsonl`);
       });
+      // Search resolves every continued row's chain; one walk serves them all unless a segment is newer than it.
+      let matches = named(candidates ??= this.historyFiles ??= this.discover());
+      if (!matches.length) matches = named(candidates = this.historyFiles = this.discover());
       if (matches.length !== 1)
         throw new CatalogError("not_found", `Codex 会话历史文件缺失或不唯一: ${base.thread_id}`);
       segment = { path: matches[0]!, end: base.end_byte_offset };
