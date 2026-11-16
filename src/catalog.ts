@@ -233,6 +233,18 @@ function aroundRanges(threads: Thread[], hits: number[][], context: number): Ran
   return threads.flatMap(({ events }, thread) => mergeWindows(hits[thread]!, context, events.length - 1).map((range) => ({ thread, ...range })));
 }
 
+/** Up to `limit` ranges in their original order, reserving the first range of each term so no term drops out. */
+function pickRanges(ranges: Range[], threads: Thread[], terms: Term[], limit: number): Range[] {
+  const termsOf = ranges.map(({ thread, hits }) => new Set(hits.flatMap((ordinal) => matchedTerms(threads[thread]!.events[ordinal]!.text, terms))));
+  const picked = new Set<number>();
+  for (let term = 0; term < terms.length && picked.size < limit; term++) {
+    const first = termsOf.findIndex((found) => found.has(term));
+    if (first >= 0) picked.add(first);
+  }
+  for (let position = 0; position < ranges.length && picked.size < limit; position++) picked.add(position);
+  return ranges.filter((_, position) => picked.has(position));
+}
+
 /** `at.thread` names a child thread by id or unique id prefix; omitted means main. */
 function atRange(threads: Thread[], at: { thread?: string; from: number; to: number }, context: number): Range {
   const name = at.thread ?? "main";
@@ -1457,7 +1469,7 @@ export class SessionCatalog {
     if ("around" in spec && !terms.length) throw new CatalogError("invalid", "缺少要定位的词");
     const hits = threads.map(({ events }) => events.flatMap((event, ordinal) => !event.injected && matchedTerms(event.text, terms).length ? [ordinal] : []));
     const ranges = "around" in spec ? aroundRanges(threads, hits, spec.context ?? 2) : [atRange(threads, spec.at, spec.context ?? 0)];
-    const shown = "around" in spec ? ranges.slice(0, spec.windows ?? 8) : ranges;
+    const shown = "around" in spec ? pickRanges(ranges, threads, terms, spec.windows ?? 8) : ranges;
     return {
       ...session,
       threads: threads.map(({ thread, label, events }, position) => ({ thread, label, events: events.length, hits: hits[position]! })),

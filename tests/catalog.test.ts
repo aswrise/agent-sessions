@@ -556,6 +556,20 @@ describe("SessionCatalog search robustness", () => {
     expect((await catalog.find({ terms: ["unprojected-needle"] })).coverage).toMatchObject({ candidate_files: 1, partial_files: 0, unclassified_files: 1 });
   });
 
+  test("keeps a window for every term when the window limit cuts the rest", async () => {
+    const { home, catalog } = setup();
+    const say = (text: string) => ({ type: "response_item", timestamp: "t1", payload: { type: "message", role: "assistant", content: [{ type: "output_text", text }] } });
+    const gap = Array.from({ length: 6 }, () => say("unrelated"));
+    appendFileSync(join(home, ".codex/sessions/2026/07/14/rollout-codex-b.jsonl"), lines([
+      say("pick-alpha one"), ...gap, say("pick-alpha two"), ...gap, say("pick-alpha three"), ...gap, say("pick-beta last"),
+    ]));
+    const excerpt = await catalog.excerpt("codex-b", { around: ["pick-alpha", "pick-beta"], context: 0, windows: 2 });
+    const text = excerpt.windows.flatMap(({ events }) => events.map(({ text: value }) => value)).join("\n");
+    expect(text).toContain("pick-alpha one");
+    expect(text).toContain("pick-beta last");
+    expect(excerpt.omitted_windows).toBe(2);
+  });
+
   test("centres tool output clips and snippets on the hit in the output, not the echoed command", async () => {
     const { home, catalog } = setup();
     appendFileSync(join(home, ".codex/sessions/2026/07/14/rollout-codex-b.jsonl"), lines([
