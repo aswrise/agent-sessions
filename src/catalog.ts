@@ -114,8 +114,10 @@ type ChildFile =
   | { kind: "agent"; path: string; thread: string; parentOriginalId?: string }
   | { kind: "tool_result_file"; path: string; thread: string; parentOriginalId: string };
 type ChildEntry = ChildFile & { adapter: Adapter; mtime: number };
-type ChildIndex = { children: Map<string, ChildEntry[]>; orphans: ChildEntry[] };
-type Children = { files: ChildFile[]; unreadable: string[] };
+type Unreadable = { path: string; reason: string };
+/** `unreadable` are files whose owner cannot be told because they cannot be read. */
+type ChildIndex = { children: Map<string, ChildEntry[]>; orphans: ChildEntry[]; unreadable: (Unreadable & { tool: Tool })[] };
+type Children = { files: ChildFile[]; unreadable: Unreadable[] };
 
 export interface CatalogOptions {
   home?: string;
@@ -194,12 +196,12 @@ function readSession(path: string): Buffer {
 }
 
 /** Files under `root` whose relative path parts pass `keep`; an unreadable directory is skipped and reported in `unreadable`. */
-function walk(root: string, keep: (parts: string[]) => boolean, unreadable: string[]): string[] {
+function walk(root: string, keep: (parts: string[]) => boolean, unreadable: Unreadable[]): string[] {
   const output: string[] = [];
   const visit = (directory: string, parts: string[]) => {
     let entries: Dirent[];
     try { entries = readdirSync(directory, { withFileTypes: true }); }
-    catch (error) { unreadable.push(`${directory}: ${error instanceof Error ? error.message : String(error)}`); return; }
+    catch (error) { unreadable.push({ path: directory, reason: error instanceof Error ? error.message : String(error) }); return; }
     for (const entry of entries) {
       const path = join(directory, entry.name), next = [...parts, entry.name];
       if (entry.isDirectory()) visit(path, next);
@@ -211,14 +213,14 @@ function walk(root: string, keep: (parts: string[]) => boolean, unreadable: stri
 }
 
 /** The first `length` bytes of each file, read concurrently; a failed read lands in `unreadable`. */
-async function heads(paths: string[], length: number, unreadable: string[]): Promise<Map<string, string>> {
+async function heads(paths: string[], length: number, unreadable: Unreadable[]): Promise<Map<string, string>> {
   const result = new Map<string, string>();
   let next = 0;
   await Promise.all(Array.from({ length: Math.min(PREFETCH_CONCURRENCY, paths.length) }, async () => {
     while (next < paths.length) {
       const path = paths[next++]!;
       try { result.set(path, await Bun.file(path).slice(0, length).text()); }
-      catch (error) { unreadable.push(`${path}: ${error instanceof Error ? error.message : String(error)}`); }
+      catch (error) { unreadable.push({ path, reason: error instanceof Error ? error.message : String(error) }); }
     }
   }));
   return result;
@@ -253,6 +255,12 @@ function renderWindow({ thread, label, events }: Thread, { from, to, hits }: Ran
 function historyBase(payload: Json | undefined): { history_base?: string } {
   const base = payload?.history_base;
   return isRecord(base) && typeof base.thread_id === "string" && base.thread_id ? { history_base: base.thread_id } : {};
+}
+
+// for...of closes readHeadLines' file through return(); a bare .next() would leave it open.
+function headLine(path: string): string {
+  for (const line of readHeadLines(path, 1)) return line;
+  return "";
 }
 
 function headCwd(path: string): string {
@@ -342,7 +350,7 @@ function contentText(content: unknown): string {
 export type RawEvent = { kind: EventKind; text: string; tool?: string; timestamp: string; injected?: true };
 type Projected = Omit<RawEvent, "timestamp">;
 
-/** The only Transcript definition: readable user and assistant text, injected context left out. */
+/** Readable user and assistant text, injected context left out. */
 function transcriptOf(events: RawEvent[]): TranscriptMessage[] {
   return events.flatMap(({ kind, text, timestamp, injected }) =>
     (kind === "user" || kind === "assistant") && !injected ? [{ role: kind, text, timestamp }] : []);
@@ -824,7 +832,7 @@ class ClaudeAdapter extends JsonlAdapter {
   }
 
   override async children(): Promise<Children> {
-    const unreadable: string[] = [];
+    const unreadable: Unreadable[] = [];
     // Live layout: <project>/agent-*.jsonl (legacy), <project>/<session>/subagents/**/agent-*.jsonl, <project>/<session>/tool-results/*.txt.
     const agent = (parts: string[]) => parts.at(-1)!.startsWith("agent-") && parts.at(-1)!.endsWith(".jsonl")
       && (this.archive || parts.length === 2 || parts[2] === "subagents");
@@ -836,7 +844,7 @@ class ClaudeAdapter extends JsonlAdapter {
       if (path.endsWith(".txt")) return { kind: "tool_result_file", path, thread: basename(path), parentOriginalId: parentDirectory(parts, "tool-results") };
       const thread = basename(path, ".jsonl").slice("agent-".length);
       if (parts.includes("subagents")) return { kind: "agent", path, thread, parentOriginalId: parentDirectory(parts, "subagents") };
-      const parent = stringValue(parseRecord(readHeadLines(path, 1).next().value ?? "")?.sessionId);
+      const parent = stringValue(parseRecord(headLine(path))?.sessionId);
       return { kind: "agent", path, thread, ...(parent ? { parentOriginalId: parent } : {}) };
     });
     return { files, unreadable };
@@ -895,7 +903,7 @@ class CodexAdapter extends JsonlAdapter {
     if (!this.archive && this.indexedMetadata.has(indexedPath)) {
       const indexed = this.indexedMetadata.get(indexedPath);
       if (!indexed) return null;
-      const meta = parseRecord(readHeadLines(path, 1).next().value ?? "");
+      const meta = parseRecord(headLine(path));
       const payload = meta && isRecord(meta.payload) ? meta.payload : undefined;
       const birth = isoToEpoch(payload?.timestamp) ?? isoToEpoch(meta?.timestamp);
       const cwd = stringValue(payload?.cwd);
@@ -1082,7 +1090,7 @@ class CodexAdapter extends JsonlAdapter {
   }
 
   override async children(): Promise<Children> {
-    const unreadable: string[] = [];
+    const unreadable: Unreadable[] = [];
     const paths = walk(this.root, (parts) => parts.at(-1)!.endsWith(".jsonl") && (this.archive || parts.length === 4 && parts[3]!.startsWith("rollout-")), unreadable)
       .filter((path) => this.allowed(path));
     // A child's session_meta names itself and its parent in the first few hundred bytes, before base_instructions.
@@ -1114,7 +1122,7 @@ class CodexAdapter extends JsonlAdapter {
         throw new CatalogError("invalid", `Codex 会话历史链无效: ${segment.path}`);
       seen.add(segment.path);
       segments.push(segment);
-      const meta = parseRecord(readHeadLines(segment.path, 1).next().value ?? "");
+      const meta = parseRecord(headLine(segment.path));
       const payload = meta && isRecord(meta.payload) ? meta.payload : undefined;
       const base = payload?.history_base;
       if (base === undefined || base === null) return segments;
@@ -1391,7 +1399,11 @@ export class SessionCatalog {
     const threadsOf = (owner: Owner): ScanThread[] => owner.kind === "orphan" ? [childThread(owner.child)]
       : [{ paths: owner.main, load: () => this.mainEvents(owner.row) }, ...owner.children.map(childThread)];
     const paths = owners.flatMap((owner) => threadsOf(owner).flatMap((thread) => thread.paths));
-    coverage.scanned_files = paths.length;
+    // Time and cwd live inside the file, so an unreadable one cannot be ruled out by those filters.
+    const unowned = index.unreadable.filter(({ tool }) => toolAllowed(tool)).map(({ path }) => path);
+    coverage.scanned_files = paths.length + unowned.length;
+    coverage.candidate_files = coverage.unreadable_files = unowned.length;
+    coverage.unreadable.push(...unowned);
     const { found, unreadable } = await grepTerms(rg, terms, paths);
     const touched = (path: string) => unreadable.has(path) || found.some((hits) => hits.has(path));
     const results: SearchResult[] = [];
@@ -1557,7 +1569,7 @@ export class SessionCatalog {
       rowIds.set(location.adapter, ids);
       rowPaths.add(resolve(location.path));
     }
-    const index: ChildIndex = { children: new Map(), orphans: [] };
+    const index: ChildIndex = { children: new Map(), orphans: [], unreadable: [] };
     this.childDiagnostics = [];
     for (const { adapter, source, rootId } of this.bindings) {
       const { files, unreadable } = await adapter.children();
@@ -1567,7 +1579,7 @@ export class SessionCatalog {
         if (rowPaths.has(resolve(file.path))) continue;
         let mtime: number;
         try { mtime = statSync(file.path).mtimeMs / 1000; }
-        catch (error) { unreadable.push(`${file.path}: ${error instanceof Error ? error.message : String(error)}`); continue; }
+        catch (error) { unreadable.push({ path: file.path, reason: error instanceof Error ? error.message : String(error) }); continue; }
         let parent = file.parentOriginalId, owner: string | undefined;
         for (const seen = new Set<string>(); parent && !seen.has(parent); parent = parents.get(parent)) {
           seen.add(parent);
@@ -1578,8 +1590,10 @@ export class SessionCatalog {
         if (!owner) index.orphans.push(entry);
         else index.children.set(owner, [...index.children.get(owner) ?? [], entry]);
       }
-      for (const reason of unreadable)
-        this.childDiagnostics.push({ source_id: source?.id ?? "live", root_id: rootId, level: "error", message: sourceCopy.errors.childUnreadable(reason) });
+      for (const { path, reason } of unreadable) {
+        index.unreadable.push({ path, reason, tool: adapter.tool });
+        this.childDiagnostics.push({ source_id: source?.id ?? "live", root_id: rootId, level: "error", message: sourceCopy.errors.childUnreadable(`${path}: ${reason}`) });
+      }
     }
     return index;
   }

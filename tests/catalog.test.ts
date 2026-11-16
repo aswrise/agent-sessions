@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { Database } from "bun:sqlite";
-import { appendFileSync, chmodSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { appendFileSync, chmodSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { basename, join } from "node:path";
 import { afterEach, describe, expect, test } from "bun:test";
 import { CatalogError, SessionCatalog } from "../src/catalog.ts";
@@ -525,6 +525,23 @@ describe("SessionCatalog search robustness", () => {
     expect(split.coverage.candidate_files).toBe(split.coverage.partial_files + 2);
     const excerpt = await catalog.excerpt("seg-new", { around: ["segment-old-needle"] });
     expect(excerpt.windows.map(({ thread, hits }) => ({ thread, hits }))).toEqual([{ thread: "main", hits: [0] }]);
+  });
+
+  test("repeated searches over continued Codex rollouts keep the open file count flat", async () => {
+    const { home, catalog } = setup();
+    const directory = join(home, ".codex/sessions/2026/07/15");
+    mkdirSync(directory, { recursive: true });
+    const older = lines([{ timestamp: "2026-07-15T01:00:00Z", payload: { id: "fd-old", cwd: "/tmp/fd", timestamp: "2026-07-15T01:00:00Z" } }]);
+    writeFileSync(join(directory, "rollout-2026-07-15T01-00-00-fd-old.jsonl"), older + padding);
+    writeFileSync(join(directory, "rollout-2026-07-15T02-00-00-fd-new.jsonl"), lines([
+      { timestamp: "2026-07-15T02:00:00Z", payload: { id: "fd-new", cwd: "/tmp/fd", timestamp: "2026-07-15T02:00:00Z", history_base: { thread_id: "fd-old", end_ordinal_exclusive: 0, end_byte_offset: Buffer.byteLength(older) } } },
+      { type: "response_item", timestamp: "2026-07-15T02:01:00Z", payload: { type: "message", role: "user", content: [{ type: "input_text", text: "fd-needle" }] } },
+    ]) + padding);
+    const open = () => readdirSync("/dev/fd").length;
+    await catalog.find({ terms: ["fd-needle"] });
+    const before = open();
+    for (let round = 0; round < 40; round++) await catalog.find({ terms: ["fd-needle"] });
+    expect(open() - before).toBeLessThan(5);
   });
 
   test("separates owners that hold only some terms in readable events from raw hits with no readable event", async () => {
