@@ -205,8 +205,8 @@ interface Adapter {
   events(id: string, path?: string): RawEvent[];
   /** A child thread file's ordered events, without main-file filters. */
   childEvents(path: string): RawEvent[];
-  /** Child thread files under this root with their direct parent's original id; not subject to MIN_SIZE. */
-  children(): ChildFile[];
+  /** Child thread files under this root with their direct parent's original id; not subject to MIN_SIZE. `rows` are paths known to be main files. */
+  children(rows: Set<string>): ChildFile[];
   /** Display label of a child; may read a sidecar file, so callers ask only for children they show. */
   childLabel(file: ChildFile): string;
   rename(id: string, name: string, path?: string): Promise<void>;
@@ -568,7 +568,7 @@ abstract class JsonlAdapter implements Adapter {
 
   parseJob(paths: string[]): ArchiveParseJob { return { tool: this.tool, root: this.root, paths }; }
 
-  children(): ChildFile[] { return []; }
+  children(_rows: Set<string>): ChildFile[] { return []; }
 
   childLabel(file: ChildFile): string { return file.label || file.thread; }
 
@@ -750,13 +750,16 @@ class ClaudeAdapter extends JsonlAdapter {
     return this.eventsOf(readFileSync(this.mainFile(id, path), "utf8"), (record) => !record.isSidechain);
   }
 
-  override children(): ChildFile[] {
+  override children(_rows: Set<string>): ChildFile[] {
     const deep = this.archive ? "**" : "*/*";
     const parentDirectory = (path: string, marker: string) => {
       const parts = relative(this.root, path).split(sep);
       return parts[parts.lastIndexOf(marker) - 1] ?? "";
     };
-    const agentFiles = this.archive ? this.glob("**/agent-*.jsonl") : [...this.glob("*/agent-*.jsonl"), ...this.glob("*/*/subagents/**/agent-*.jsonl")];
+    // An archive discover() already walked every JSONL file, agent files included.
+    const agentFiles = this.archive && this.discovered
+      ? this.discovered.filter((path) => basename(path).startsWith("agent-") && this.allowed(path))
+      : this.archive ? this.glob("**/agent-*.jsonl") : [...this.glob("*/agent-*.jsonl"), ...this.glob("*/*/subagents/**/agent-*.jsonl")];
     const agents = agentFiles.map((path): ChildFile => {
       const thread = basename(path, ".jsonl").slice("agent-".length);
       if (relative(this.root, path).split(sep).includes("subagents"))
@@ -1003,8 +1006,9 @@ class CodexAdapter extends JsonlAdapter {
     return [];
   }
 
-  override children(): ChildFile[] {
+  override children(rows: Set<string>): ChildFile[] {
     return (this.discovered ?? this.discover()).flatMap((path): ChildFile[] => {
+      if (rows.has(resolve(path))) return [];
       const indexed = this.archiveSubagents.get(realPath(path));
       // A child's session_meta names itself and its parent in the first few hundred bytes, before base_instructions.
       const head = headText(path, 4096);
@@ -1470,7 +1474,7 @@ export class SessionCatalog {
     const index: ChildIndex = { children: new Map(), orphans: [] };
     for (const { adapter } of this.bindings) {
       let files: ChildFile[];
-      try { files = adapter.children(); } catch { continue; }
+      try { files = adapter.children(rowPaths); } catch { continue; }
       const parents = new Map(files.flatMap((file) => file.kind === "agent" ? [[file.thread, file.parentOriginalId] as const] : []));
       const ids = rowIds.get(adapter);
       for (const file of files) {
