@@ -75,7 +75,12 @@ export interface SessionsEnvelope {
   diagnostics?: SourceDiagnostic[];
 }
 
-export type MetaField = "name" | "star_note" | "first_msg" | "id" | "session_id" | "source_path";
+export const META_FIELDS = ["name", "star_note", "first_msg", "id", "session_id", "source_path"] as const;
+export type MetaField = (typeof META_FIELDS)[number];
+/** A hit in one of these means the Session was about the term, not that its id or path happens to contain it. */
+export const TIER1_META: readonly MetaField[] = ["name", "star_note", "first_msg"];
+
+export const emptyCounts = (): Record<MatchKind, number> => ({ user: 0, assistant: 0, thinking: 0, tool_call: 0, tool_output: 0, meta: 0 });
 
 /** `thread` is "main" or a child thread id. */
 export type SearchHit =
@@ -91,25 +96,38 @@ export interface MatchSummary {
   best: SearchHit[];
 }
 
+/**
+ * Every candidate file lands in exactly one bucket: attributed to a result, or one of the counts below.
+ * A candidate is a file with a raw hit, or an unreadable file, whose owner could still hold every term.
+ */
 export interface SearchCoverage {
   scanned_files: number;
-  /** Files with a raw hit whose owner has every term somewhere; each one is attributed or counted below. */
   candidate_files: number;
+  /** Raw hit, but no readable event in the file holds a term (padding, unprojected records). */
   unclassified_files: number;
+  /** Some terms in readable events, but no readable event of the owner holds the rest. */
+  partial_files: number;
   injected_only_files: number;
+  /** ripgrep or the parser could not read the file; listed in `unreadable`. */
+  unreadable_files: number;
   orphan_files: number;
+  unreadable: string[];
+  /** Most hits first. */
   orphans: { path: string; label: string; hits: number }[];
 }
 
-export interface SearchHitView extends SessionView {
+export interface SearchResult extends Session {
+  /** The best hit's snippet; the dash deep-search list renders it. */
   snippet: string;
-  match?: MatchSummary;
+  match: MatchSummary;
 }
+
+export type SearchResultView = SearchResult & { resume_command?: string };
 
 export interface SearchEnvelope {
   total: number;
-  results: SearchHitView[];
-  coverage?: SearchCoverage;
+  results: SearchResultView[];
+  coverage: SearchCoverage;
 }
 
 type LineageEdgeBase = {
@@ -200,7 +218,8 @@ export function parseSessionsEnvelope(value: unknown): SessionsEnvelope {
 export function parseSearchEnvelope(value: unknown): SearchEnvelope {
   if (!isRecord(value) || !Number.isInteger(value.total) || (value.total as number) < 0
       || !Array.isArray(value.results) || !value.results.every((result) => isRecord(result)
-        && isSessionView(result) && typeof result.snippet === "string"))
+        && isSessionView(result) && typeof result.snippet === "string" && isRecord(result.match) && [1, 2, 3].includes(result.match.tier as number))
+      || !isRecord(value.coverage))
     throw new Error("Session 搜索响应无效");
   return value as unknown as SearchEnvelope;
 }

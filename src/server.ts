@@ -2,7 +2,7 @@ import { readFile, stat } from "node:fs/promises";
 import { extname, isAbsolute, resolve } from "node:path";
 import MarkdownIt from "markdown-it";
 import { CatalogError, SessionCatalog } from "./catalog.ts";
-import { isStatus, type MarkPatch } from "./contracts.ts";
+import { isStatus, type MarkPatch, type SearchEnvelope } from "./contracts.ts";
 import { withResumeCommand } from "./resume.ts";
 import { homeDirectory } from "./paths.ts";
 
@@ -70,7 +70,8 @@ export function startServer(options: ServerOptions): Bun.Server<undefined> {
           const rawLimit = url.searchParams.get("limit"), limit = rawLimit === null ? Number.MAX_SAFE_INTEGER : Number(rawLimit);
           if (!Number.isSafeInteger(limit) || limit < 1) throw new RequestError(400, "limit 必须是正整数");
           const result = await catalog.find({ terms: [query] }, limit);
-          return json({ ...result, results: result.results.map((session) => withResumeCommand(session, platform)) });
+          const envelope: SearchEnvelope = { ...result, results: result.results.map((session) => withResumeCommand(session, platform)) };
+          return json(envelope);
         }
         if (request.method === "GET" && url.pathname === "/api/session") {
           const id = url.searchParams.get("id");

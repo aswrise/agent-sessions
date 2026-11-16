@@ -2,7 +2,7 @@
 import { readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { CatalogError, SessionCatalog, type Excerpt, type ExcerptSpec, type SessionQuery } from "./catalog.ts";
-import { isTool, type MatchSummary, type SearchCoverage, type SearchHit, type Session, type Tool } from "./contracts.ts";
+import { isTool, type MatchKind, type SearchCoverage, type SearchHit, type SearchResult, type Session, type Tool } from "./contracts.ts";
 import { primaryAction, withResumeCommand } from "./resume.ts";
 import { serveResident, startDashboard, stopDashboard } from "./lifecycle.ts";
 import { homeDirectory, userDataDirectory } from "./paths.ts";
@@ -31,6 +31,7 @@ find:  every term must occur in the Session (meta fields, tool calls and output,
        rank ★ (title, note, first message or user text hit) first, then
        assistant-only, then the rest. The calling Claude Code Session
        (CLAUDE_CODE_SESSION_ID) is left out unless --self.
+       A bare --since/--until date is a local day; --until includes that day.
 show:  with terms, prints only windows around hits; --at reads a range by
        ordinal, in a child thread with <thread>:. --chars 0 keeps text whole.
 -v     print every source diagnostic to stderr (default: errors only)
@@ -52,9 +53,7 @@ function printEntry(row: Session, snippet?: string): void {
   console.log(`    ↳ ${primaryAction(row).value}\n`);
 }
 
-let verbose = false;
-
-function reportSources(catalog: SessionCatalog): void {
+function reportSources(catalog: SessionCatalog, verbose: boolean): void {
   for (const diagnostic of catalog.sourceDiagnostics()) if (verbose || diagnostic.level === "error")
     console.error(`[${diagnostic.source_id}${diagnostic.root_id ? `/${diagnostic.root_id}` : ""}] ${diagnostic.message}`);
 }
@@ -75,9 +74,9 @@ function option(args: string[], name: string): string | undefined {
   return value;
 }
 
-function integer(args: string[], name: string, fallback: number, minimum = 1): number {
+function integer(args: string[], name: string, minimum = 1): number | undefined {
   const raw = option(args, name);
-  if (raw === undefined) return fallback;
+  if (raw === undefined) return undefined;
   const value = Number(raw);
   if (!Number.isInteger(value) || value < minimum) throw new Error(`${name} 必须是${minimum ? "正" : "非负"}整数`);
   return value;
@@ -90,6 +89,11 @@ function epoch(args: string[], name: string): number | undefined {
   if (raw === undefined) return undefined;
   const relative = /^(\d+)([mhdw])$/.exec(raw);
   if (relative) return Date.now() / 1000 - Number(relative[1]) * UNITS[relative[2]!]!;
+  const day = /^(\d{4})-(\d{2})-(\d{2})$/.exec(raw);
+  if (day) {
+    const start = new Date(Number(day[1]), Number(day[2]) - 1, Number(day[3]) + (name === "--until" ? 1 : 0)).getTime() / 1000;
+    return name === "--until" ? start - 0.001 : start;
+  }
   const parsed = Date.parse(raw);
   if (Number.isNaN(parsed)) throw new Error(`${name} 无法解析: ${raw}`);
   return parsed / 1000;
@@ -105,15 +109,7 @@ function line(text: string, limit: number): string {
   return value.length > limit ? value.slice(0, limit) + "…" : value;
 }
 
-/** Shortest prefix (at least 8 characters) that `resolve` maps back to this id alone. */
-function prefixes(ids: string[]): (id: string) => string {
-  const sorted = [...new Set(ids)].sort();
-  const common = (left = "", right = "") => { let index = 0; while (index < left.length && left[index] === right[index]) index++; return index; };
-  const lengths = new Map(sorted.map((id, index) => [id, Math.max(8, common(id, sorted[index - 1]) + 1, common(id, sorted[index + 1]) + 1)]));
-  return (id) => id.slice(0, lengths.get(id) ?? id.length);
-}
-
-const KIND_LABELS: Record<string, string> = { user: "u", assistant: "a", thinking: "th", tool_call: "call", tool_output: "out", meta: "meta" };
+const KIND_LABELS: Record<MatchKind, string> = { user: "u", assistant: "a", thinking: "th", tool_call: "call", tool_output: "out", meta: "meta" };
 
 function hitLabel(hit: SearchHit): string {
   if (hit.kind === "meta") return `meta:${hit.field}`;
@@ -121,20 +117,27 @@ function hitLabel(hit: SearchHit): string {
 }
 
 function coverageLine(coverage: SearchCoverage): string {
-  return `扫描 ${coverage.scanned_files} 个文件，候选 ${coverage.candidate_files}，未归类 ${coverage.unclassified_files}，仅注入 ${coverage.injected_only_files}，孤儿 ${coverage.orphan_files}`;
+  return `扫描 ${coverage.scanned_files} 个文件，候选 ${coverage.candidate_files}，未归类 ${coverage.unclassified_files}，部分 ${coverage.partial_files}，仅注入 ${coverage.injected_only_files}，不可读 ${coverage.unreadable_files}，孤儿 ${coverage.orphan_files}`;
 }
 
-function printMatch(row: Session & { match: MatchSummary }, prefix: string): void {
+/** Shown paths per coverage list; the --json output carries all of them. */
+const LISTED = 5;
+
+function header(row: Session, id: string): string {
+  return `${id} ${row.tool} ${stamp(row.mtime)} ${tildePath(row.cwd)}  ${line(row.name || row.first_msg, 80)}`;
+}
+
+function printMatch(row: SearchResult): void {
   const { match } = row;
-  console.log(`${match.tier === 1 ? "★" : " "} ${prefix} ${row.tool} ${stamp(row.mtime)} ${tildePath(row.cwd)}  ${line(row.name || row.first_msg, 80)}`);
+  console.log(`${match.tier === 1 ? "★" : " "} ${header(row, row.id.slice(0, 8))}`);
   const sub = match.threads.reduce((sum, thread) => sum + thread.hits, 0);
-  const counts = [...Object.entries(match.counts).filter(([, value]) => value).map(([kind, value]) => `${KIND_LABELS[kind]}${value}`), ...(sub ? [`sub${sub}`] : [])];
+  const counts = [...(Object.entries(match.counts) as [MatchKind, number][]).filter(([, value]) => value).map(([kind, value]) => `${KIND_LABELS[kind]}${value}`), ...(sub ? [`sub${sub}`] : [])];
   const best = match.best[0];
   console.log(`    ${counts.join(" ")}${best ? `  ${hitLabel(best)}  ${line(best.snippet, 120)}` : ""}`);
 }
 
 function printExcerpt(excerpt: Excerpt): void {
-  console.log(`${excerpt.id} ${excerpt.tool} ${stamp(excerpt.mtime)} ${tildePath(excerpt.cwd)}  ${line(excerpt.name || excerpt.first_msg, 80)}`);
+  console.log(header(excerpt, excerpt.id));
   console.log(`↳ ${primaryAction(excerpt).value}`);
   const hit = excerpt.threads.filter(({ hits }) => hits.length).map(({ thread, hits }) => `${thread} ${hits.join(" ")}`);
   if (hit.length) console.log(`hits: ${hit.join(" | ")}`);
@@ -178,14 +181,14 @@ export async function main(argv = process.argv.slice(2), options: { html?: strin
       await serveResident({ port: Number(internal(args, "--port")), nonce: internal(args, "--nonce"), stateFile: internal(args, "--state"), ...(html === undefined ? {} : { html }) });
       return 0;
     }
-    verbose = flag(args, "-v") || flag(args, "--verbose");
+    const verbose = flag(args, "-v") || flag(args, "--verbose");
     const json = flag(args, "--json"), rebuild = flag(args, "--rebuild"), command = args.shift();
-    const n = integer(args, "-n", command === "show" ? 8 : 20), catalog = new SessionCatalog({ home: home() });
+    const n = integer(args, "-n"), catalog = new SessionCatalog({ home: home() });
     if (command === "list") {
       const rawTool = args[0]; if (rawTool && !isTool(rawTool)) throw new Error(`未知工具: ${rawTool}`);
       const tool: Tool | undefined = rawTool && isTool(rawTool) ? rawTool : undefined;
-      const rows = (await catalog.list({ fresh: true, ...(tool ? { tool } : {}) })).filter((row) => !row.archived).slice(0, n);
-      reportSources(catalog);
+      const rows = (await catalog.list({ fresh: true, ...(tool ? { tool } : {}) })).filter((row) => !row.archived).slice(0, n ?? 20);
+      reportSources(catalog, verbose);
       if (json) console.log(JSON.stringify({ sessions: rows.map((row) => withResumeCommand(row)), diagnostics: catalog.sourceDiagnostics() }, null, 2));
       else rows.forEach((row) => printEntry(row));
       return 0;
@@ -198,35 +201,33 @@ export async function main(argv = process.argv.slice(2), options: { html?: strin
       const query: SessionQuery = { terms: args, ...(since === undefined ? {} : { since }), ...(until === undefined ? {} : { until }),
         ...(parsedTools ? { tools: parsedTools } : {}), ...(cwd ? { cwd: resolve(cwd) } : {}), ...(caller && !self ? { exclude: [caller] } : {}) };
       const { total, results, coverage } = await catalog.find(query, n);
-      reportSources(catalog);
+      reportSources(catalog, verbose);
       if (json) { console.log(JSON.stringify({ total, results: results.map((row) => withResumeCommand(row)), coverage }, null, 2)); return 0; }
       if (!results.length) console.log(`没有匹配的 session（${coverageLine(coverage)}）`);
       else {
         console.log(`共 ${total} 个匹配 session，显示 ${results.length} 个（${coverageLine(coverage)}）`);
-        const prefix = prefixes((await catalog.list()).map(({ id }) => id));
-        results.forEach((row) => printMatch(row, prefix(row.id)));
+        results.forEach(printMatch);
       }
-      for (const orphan of coverage.orphans) console.log(`孤儿 ${orphan.hits} 处 ${line(orphan.label, 40)}  ${orphan.path}`);
+      for (const orphan of coverage.orphans.slice(0, LISTED)) console.log(`孤儿 ${orphan.hits} 处 ${line(orphan.label, 40)}  ${orphan.path}`);
+      for (const path of coverage.unreadable.slice(0, LISTED)) console.log(`不可读 ${path}`);
       return 0;
     }
     if (command === "show") {
-      const context = option(args, "-C"), chars = integer(args, "--chars", 300, 0), at = option(args, "--at");
-      const contextValue = context === undefined ? undefined : Number(context);
-      if (contextValue !== undefined && (!Number.isInteger(contextValue) || contextValue < 0)) throw new Error("-C 必须是非负整数");
+      const context = integer(args, "-C", 0), chars = integer(args, "--chars", 0), at = option(args, "--at");
+      const shape = { ...(context === undefined ? {} : { context }), ...(chars === undefined ? {} : { chars }) };
       const target = args.shift();
       if (!target) throw new Error("show 需要 id 前缀");
       const row = await catalog.resolve(target);
       if (at || args.length) {
-        const spec: ExcerptSpec = at ? { at: atSpec(at), chars, ...(contextValue === undefined ? {} : { context: contextValue }) }
-          : { around: args, chars, windows: n, ...(contextValue === undefined ? {} : { context: contextValue }) };
+        const spec: ExcerptSpec = at ? { at: atSpec(at), ...shape } : { around: args, ...shape, ...(n === undefined ? {} : { windows: n }) };
         const excerpt = await catalog.excerpt(row.id, spec);
-        reportSources(catalog);
+        reportSources(catalog, verbose);
         if (json) console.log(JSON.stringify(withResumeCommand(excerpt), null, 2));
         else printExcerpt(excerpt);
         return 0;
       }
       const transcript = await catalog.detail(row.id);
-      reportSources(catalog);
+      reportSources(catalog, verbose);
       if (json) console.log(JSON.stringify(withResumeCommand(transcript), null, 2));
       else {
         printEntry(transcript);
@@ -236,7 +237,7 @@ export async function main(argv = process.argv.slice(2), options: { html?: strin
     }
     if (command === "index" && !args.length) {
       const result = await catalog.refreshLineage(rebuild);
-      reportSources(catalog);
+      reportSources(catalog, verbose);
       if (json) console.log(JSON.stringify(result, null, 2));
       else console.log(`已分析 ${result.sessions} 个 session（本次扫描 ${result.scanned} 个），发现 ${result.edges} 条关系，耗时 ${result.elapsed_ms}ms`);
       return 0;
@@ -244,7 +245,7 @@ export async function main(argv = process.argv.slice(2), options: { html?: strin
     if (command === "lineage" && args.length === 1) {
       const row = await catalog.resolve(args[0]!);
       const lineage = await catalog.lineage(row.id);
-      reportSources(catalog);
+      reportSources(catalog, verbose);
       const value = { ...lineage, sessions: lineage.sessions.map((session) => withResumeCommand(session)) };
       if (json) console.log(JSON.stringify(value, null, 2));
       else if (!lineage.edges.length) console.log(`${row.id} 暂未发现上下游 session`);

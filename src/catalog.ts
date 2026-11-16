@@ -12,21 +12,22 @@ import {
   readSync,
   realpathSync,
   renameSync,
+  readdirSync,
   rmSync,
   statSync,
   writeFileSync,
 } from "node:fs";
-import type { Stats } from "node:fs";
+import type { Dirent, Stats } from "node:fs";
 import { open } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import packageJson from "../package.json" with { type: "json" };
-import { isStatus, type EventKind, type LineageEdge, type MatchKind, type MatchSummary, type SearchCoverage, type SearchHit, type SessionEvent, type LineageRefresh, type ManualLineageEdge, type MarkPatch, type Session, type SessionStatus, type SourceDiagnostic, type Tool, type Transcript, type TranscriptMessage } from "./contracts.ts";
+import { isStatus, type EventKind, type LineageEdge, type SearchCoverage, type SearchResult, type SessionEvent, type LineageRefresh, type ManualLineageEdge, type MarkPatch, type Session, type SessionStatus, type SourceDiagnostic, type Tool, type Transcript, type TranscriptMessage } from "./contracts.ts";
 import { LineageIndex } from "./lineage.ts";
 import { homeDirectory, userDataDirectory } from "./paths.ts";
 import { archiveAction } from "./resume.ts";
 import { readSources, realContained, realPath, withRealpathMemo, type ArchiveSource } from "./sources.ts";
 import { sourceCopy } from "./sourceCopy.ts";
-import { BestHits, clip, matchedTerms, mergeWindows, metaHits, parseTerms, rgPatterns, tally, type Term, type ThreadTally } from "./search.ts";
+import { clip, matchedTerms, mergeWindows, metaHits, parseTerms, rgPatterns, summarize, tally, verdicts, type Tally, type Term } from "./search.ts";
 
 const MIN_SIZE = 2048;
 const MAX_HEAD_LINES = 400;
@@ -90,11 +91,13 @@ type Metadata = {
   upstream_name: string;
   model: string;
   thinking_level: string;
+  /** Codex: the thread this rollout continues (`history_base`), so search also scans the older segments. */
+  history_base?: string;
 };
 type ParsedMetadata = Omit<Metadata, "model" | "thinking_level"> & { model?: string; thinking_level?: string };
 type Binding = { adapter: Adapter; source?: ArchiveSource; rootId: string };
 type DiscoveredFile = Binding & { path: string; stat: Stats };
-type Located = DiscoveredFile & { originalId: string };
+type Located = DiscoveredFile & { originalId: string; history?: true };
 type MetadataEntry = { file: DiscoveredFile; key: string; signature: string };
 type Mark = {
   starred?: boolean;
@@ -108,10 +111,11 @@ type Mark = {
 type Marks = Record<string, Mark>;
 /** A `tool_result_file` is plain text whose event ordinals are line indexes. */
 type ChildFile =
-  | { kind: "agent"; path: string; thread: string; label: string; parentOriginalId?: string }
-  | { kind: "tool_result_file"; path: string; thread: string; label: string; parentOriginalId: string };
+  | { kind: "agent"; path: string; thread: string; parentOriginalId?: string }
+  | { kind: "tool_result_file"; path: string; thread: string; parentOriginalId: string };
 type ChildEntry = ChildFile & { adapter: Adapter; mtime: number };
 type ChildIndex = { children: Map<string, ChildEntry[]>; orphans: ChildEntry[] };
+type Children = { files: ChildFile[]; unreadable: string[] };
 
 export interface CatalogOptions {
   home?: string;
@@ -142,17 +146,24 @@ export type ExcerptSpec =
 export type ExcerptWindow = { thread: string; label: string; from: number; to: number; hits: number[]; events: SessionEvent[] };
 export type Excerpt = Session & { threads: { thread: string; label: string; events: number; hits: number[] }[]; windows: ExcerptWindow[]; omitted_windows: number };
 
-type ScanFile = { path: string; child?: ChildEntry };
-type Owner = { row?: Session; orphan?: ChildEntry; meta?: ReturnType<typeof metaHits>; files: ScanFile[] };
+type ScanThread = { paths: string[]; child?: ChildEntry | undefined; load: () => RawEvent[] };
+/** `tally` is absent when the thread could not be read. */
+type ReadThread = { files: string[]; child?: ChildEntry | undefined; tally?: Tally };
+type Owner =
+  | { kind: "row"; row: Session; meta: ReturnType<typeof metaHits>; main: string[]; children: ChildEntry[] }
+  | { kind: "orphan"; child: ChildEntry };
 
 const RG_BATCH = 128;
+const RG_CONCURRENCY = 8;
 /** Context events around a hit are clipped harder than the hit itself; they only orient the reader. */
 const CONTEXT_CHARS = 120;
-const RG_CONCURRENCY = 8;
 
-/** One `rg -l` per term and batch, at most RG_CONCURRENCY at a time; returns the matching paths per term. */
-async function grepTerms(rg: string, terms: Term[], paths: string[]): Promise<Set<string>[]> {
-  const found = terms.map(() => new Set<string>());
+/**
+ * One `rg -l` per term and batch, at most RG_CONCURRENCY at a time. Returns the matching paths per term
+ * and the paths ripgrep could not read; any other ripgrep failure fails the search.
+ */
+async function grepTerms(rg: string, terms: Term[], paths: string[]): Promise<{ found: Set<string>[]; unreadable: Set<string> }> {
+  const found = terms.map(() => new Set<string>()), unreadable = new Set<string>();
   const jobs = terms.flatMap((term, index) => Array.from({ length: Math.ceil(paths.length / RG_BATCH) },
     (_, batch) => ({ index, patterns: rgPatterns(term), paths: paths.slice(batch * RG_BATCH, (batch + 1) * RG_BATCH) })));
   let next = 0;
@@ -160,21 +171,88 @@ async function grepTerms(rg: string, terms: Term[], paths: string[]): Promise<Se
     while (next < jobs.length) {
       const job = jobs[next++]!;
       if (!job.patterns.length) continue;
-      const child = Bun.spawn([rg, "-i", "-F", "-l", "--null", "--no-messages", "--no-ignore", "--hidden",
+      const child = Bun.spawn([rg, "-i", "-F", "-l", "--null", "--no-ignore", "--hidden",
         ...job.patterns.flatMap((pattern) => ["-e", pattern]), "--", ...job.paths], { stdout: "pipe", stderr: "pipe" });
       const [stdout, stderr, exitCode] = await Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited]);
-      if (exitCode > 1) throw new CatalogError("search_failed", stderr.trim() || "ripgrep 搜索失败");
       for (const path of stdout.split("\0")) if (path) found[job.index]!.add(path);
+      if (exitCode < 2) continue;
+      // ripgrep reports a file it cannot open as "rg: <path>: <reason>" and keeps searching the rest.
+      for (const line of stderr.split("\n").filter(Boolean)) {
+        const path = job.paths.find((candidate) => line.startsWith(`rg: ${candidate}: `));
+        if (!path) throw new CatalogError("search_failed", stderr.trim());
+        unreadable.add(path);
+      }
     }
   }));
-  return found;
+  return { found, unreadable };
 }
 
-function childEventsOf(child: ChildEntry): RawEvent[] {
-  if (child.kind === "agent") return child.adapter.childEvents(child.path);
-  const lines = readFileSync(child.path, "utf8").split(/\r?\n/);
-  if (lines.at(-1) === "") lines.pop();
-  return lines.map((text) => ({ kind: "tool_output", text, timestamp: "" }));
+/** Reads a Session file; an I/O failure becomes CatalogError("unreadable") so search can count the file instead of failing. */
+function readSession(path: string): Buffer {
+  try { return readFileSync(path); }
+  catch (error) { throw new CatalogError("unreadable", `${path}: ${error instanceof Error ? error.message : String(error)}`); }
+}
+
+/** Files under `root` whose relative path parts pass `keep`; an unreadable directory is skipped and reported in `unreadable`. */
+function walk(root: string, keep: (parts: string[]) => boolean, unreadable: string[]): string[] {
+  const output: string[] = [];
+  const visit = (directory: string, parts: string[]) => {
+    let entries: Dirent[];
+    try { entries = readdirSync(directory, { withFileTypes: true }); }
+    catch (error) { unreadable.push(`${directory}: ${error instanceof Error ? error.message : String(error)}`); return; }
+    for (const entry of entries) {
+      const path = join(directory, entry.name), next = [...parts, entry.name];
+      if (entry.isDirectory()) visit(path, next);
+      else if (entry.isFile() && keep(next)) output.push(path);
+    }
+  };
+  if (existsSync(root)) visit(root, []);
+  return output;
+}
+
+/** The first `length` bytes of each file, read concurrently; a failed read lands in `unreadable`. */
+async function heads(paths: string[], length: number, unreadable: string[]): Promise<Map<string, string>> {
+  const result = new Map<string, string>();
+  let next = 0;
+  await Promise.all(Array.from({ length: Math.min(PREFETCH_CONCURRENCY, paths.length) }, async () => {
+    while (next < paths.length) {
+      const path = paths[next++]!;
+      try { result.set(path, await Bun.file(path).slice(0, length).text()); }
+      catch (error) { unreadable.push(`${path}: ${error instanceof Error ? error.message : String(error)}`); }
+    }
+  }));
+  return result;
+}
+
+type Thread = { thread: string; label: string; events: RawEvent[] };
+type Range = { thread: number; from: number; to: number; hits: number[] };
+
+function aroundRanges(threads: Thread[], hits: number[][], context: number): Range[] {
+  return threads.flatMap(({ events }, thread) => mergeWindows(hits[thread]!, context, events.length - 1).map((range) => ({ thread, ...range })));
+}
+
+/** `at.thread` names a child thread by id or unique id prefix; omitted means main. */
+function atRange(threads: Thread[], at: { thread?: string; from: number; to: number }, context: number): Range {
+  const name = at.thread ?? "main";
+  const exact = threads.flatMap((item, position) => item.thread === name ? [position] : []);
+  const matches = exact.length ? exact : threads.flatMap((item, position) => item.thread.startsWith(name) ? [position] : []);
+  if (matches.length !== 1) throw new CatalogError("invalid", `找不到唯一的子线程: ${name}`);
+  const thread = matches[0]!, last = threads[thread]!.events.length - 1;
+  if (!Number.isSafeInteger(at.from) || !Number.isSafeInteger(at.to) || at.from < 0 || at.to < at.from || at.from > last)
+    throw new CatalogError("invalid", `序号超出范围 0-${last}: ${at.from}-${at.to}`);
+  return { thread, from: Math.max(0, at.from - context), to: Math.min(last, at.to + context), hits: [] };
+}
+
+function renderWindow({ thread, label, events }: Thread, { from, to, hits }: Range, terms: Term[], chars: number): ExcerptWindow {
+  return { thread, label, from, to, hits, events: events.slice(from, to + 1).map((event, offset): SessionEvent => {
+    const limit = terms.length && !hits.includes(from + offset) ? Math.min(chars, CONTEXT_CHARS) : chars;
+    return { ordinal: from + offset, kind: event.kind, ...clip(event.text, terms, limit, event.kind), ...(event.tool ? { tool: event.tool } : {}), timestamp: event.timestamp };
+  }) };
+}
+
+function historyBase(payload: Json | undefined): { history_base?: string } {
+  const base = payload?.history_base;
+  return isRecord(base) && typeof base.thread_id === "string" && base.thread_id ? { history_base: base.thread_id } : {};
 }
 
 function headCwd(path: string): string {
@@ -186,7 +264,7 @@ function headCwd(path: string): string {
 }
 
 export class CatalogError extends Error {
-  constructor(public code: "not_found" | "ambiguous" | "invalid" | "missing_rg" | "search_failed", message: string) {
+  constructor(public code: "not_found" | "ambiguous" | "invalid" | "missing_rg" | "search_failed" | "unreadable", message: string) {
     super(message);
     this.name = "CatalogError";
   }
@@ -205,12 +283,14 @@ interface Adapter {
   project(record: Json): Projected[];
   /** A main thread file's ordered events; Codex joins history_base segments oldest first. */
   events(id: string, path?: string): RawEvent[];
+  /** Older files a main thread file continues from (Codex history_base), newest first. */
+  history(path: string): string[];
   /** A child thread file's ordered events, without main-file filters. */
-  childEvents(path: string): RawEvent[];
-  /** Child thread files under this root with their direct parent's original id; not subject to MIN_SIZE. `rows` are paths known to be main files. */
-  children(rows: Set<string>): ChildFile[];
+  childEvents(file: ChildFile): RawEvent[];
+  /** Child thread files under this root with their direct parent's original id; not subject to MIN_SIZE. */
+  children(): Promise<Children>;
   /** Display label of a child; may read a sidecar file, so callers ask only for children they show. */
-  childLabel(file: ChildFile): string;
+  label(file: ChildFile): string;
   rename(id: string, name: string, path?: string): Promise<void>;
   findFile(id: string): string | undefined;
   allowed(path: string): boolean;
@@ -259,7 +339,7 @@ function contentText(content: unknown): string {
   }).join("\n").trim();
 }
 
-type RawEvent = { kind: EventKind; text: string; tool?: string; timestamp: string; injected?: true };
+export type RawEvent = { kind: EventKind; text: string; tool?: string; timestamp: string; injected?: true };
 type Projected = Omit<RawEvent, "timestamp">;
 
 /** The only Transcript definition: readable user and assistant text, injected context left out. */
@@ -281,7 +361,7 @@ const flatten = (value: unknown): string => leaves(value).join("\n");
 function textEvent(role: string, content: unknown): Projected[] {
   if (role !== "user" && role !== "assistant") return [];
   const text = contentText(content);
-  return text ? [{ kind: role, text, ...(skipTranscript(role, text) ? { injected: true as const } : {}) }] : [];
+  return text ? [{ kind: role, text, ...(isInjected(role, text) ? { injected: true as const } : {}) }] : [];
 }
 
 function partEvents(content: unknown, kind: "thinking" | "tool_call", type: string, text: (part: Json) => string, tool?: (part: Json) => string): Projected[] {
@@ -299,7 +379,7 @@ function outputText(output: unknown): string {
   return typeof output === "string" ? output : Array.isArray(output) ? contentText(output) : flatten(output);
 }
 
-function skipTranscript(role: string, text: string): boolean {
+function isInjected(role: string, text: string): boolean {
   return role === "user" && [
     "# AGENTS.md instructions",
     "<environment_context",
@@ -360,16 +440,6 @@ function* readHeadLines(path: string, limit: number): Generator<string> {
   } finally {
     if (fd !== undefined) closeSync(fd);
   }
-}
-
-function headText(path: string, length: number): string {
-  let fd: number | undefined;
-  try {
-    fd = openSync(path, "r");
-    const buffer = Buffer.allocUnsafe(length);
-    return buffer.toString("utf8", 0, readSync(fd, buffer, 0, length, 0));
-  } catch { return ""; }
-  finally { if (fd !== undefined) closeSync(fd); }
 }
 
 function latest(paths: string[]): string | undefined {
@@ -570,21 +640,15 @@ abstract class JsonlAdapter implements Adapter {
 
   parseJob(paths: string[]): ArchiveParseJob { return { tool: this.tool, root: this.root, paths }; }
 
-  children(_rows: Set<string>): ChildFile[] { return []; }
+  async children(): Promise<Children> { return { files: [], unreadable: [] }; }
 
-  childLabel(file: ChildFile): string { return file.label || file.thread; }
+  label(file: ChildFile): string { return file.thread; }
 
-  /** The last discover() result, reused so children() does not walk the root twice. */
-  protected discovered: string[] | undefined;
-
-  protected glob(pattern: string): string[] {
-    return existsSync(this.root) ? [...new Bun.Glob(pattern).scanSync({ cwd: this.root, absolute: true, dot: true })].filter((path) => this.allowed(path)) : [];
-  }
+  history(_path: string): string[] { return []; }
 
   protected files(pattern: string): string[] {
     const files = existsSync(this.root) ? [...new Bun.Glob(pattern).scanSync({ cwd: this.root, absolute: true, dot: true })] : [];
     this.discoveredCount = files.length;
-    this.discovered = files;
     return this.realPaths ? files.filter((path) => this.allowed(path)) : files;
   }
 
@@ -622,11 +686,11 @@ abstract class JsonlAdapter implements Adapter {
   }
 
   events(id: string, path?: string): RawEvent[] {
-    return this.eventsOf(readFileSync(this.mainFile(id, path), "utf8"));
+    return this.eventsOf(readSession(this.mainFile(id, path)).toString("utf8"));
   }
 
-  childEvents(path: string): RawEvent[] {
-    return this.eventsOf(readFileSync(path, "utf8"));
+  childEvents(file: ChildFile): RawEvent[] {
+    return this.eventsOf(readSession(file.path).toString("utf8"));
   }
 }
 
@@ -749,38 +813,45 @@ class ClaudeAdapter extends JsonlAdapter {
 
   // Subagent files are sidechain throughout; only a main file drops sidechain records.
   override events(id: string, path?: string): RawEvent[] {
-    return this.eventsOf(readFileSync(this.mainFile(id, path), "utf8"), (record) => !record.isSidechain);
+    return this.eventsOf(readSession(this.mainFile(id, path)).toString("utf8"), (record) => !record.isSidechain);
   }
 
-  override children(_rows: Set<string>): ChildFile[] {
-    const deep = this.archive ? "**" : "*/*";
-    const parentDirectory = (path: string, marker: string) => {
+  override childEvents(file: ChildFile): RawEvent[] {
+    if (file.kind === "agent") return super.childEvents(file);
+    const lines = readSession(file.path).toString("utf8").split(/\r?\n/);
+    if (lines.at(-1) === "") lines.pop();
+    return lines.map((text) => ({ kind: "tool_output", text, timestamp: "" }));
+  }
+
+  override async children(): Promise<Children> {
+    const unreadable: string[] = [];
+    // Live layout: <project>/agent-*.jsonl (legacy), <project>/<session>/subagents/**/agent-*.jsonl, <project>/<session>/tool-results/*.txt.
+    const agent = (parts: string[]) => parts.at(-1)!.startsWith("agent-") && parts.at(-1)!.endsWith(".jsonl")
+      && (this.archive || parts.length === 2 || parts[2] === "subagents");
+    const result = (parts: string[]) => parts.at(-1)!.endsWith(".txt") && parts.at(-2) === "tool-results" && (this.archive || parts.length === 4);
+    const paths = walk(this.root, (parts) => agent(parts) || result(parts), unreadable).filter((path) => this.allowed(path));
+    const parentDirectory = (parts: string[], marker: string) => parts[parts.lastIndexOf(marker) - 1] ?? "";
+    const files = paths.map((path): ChildFile => {
       const parts = relative(this.root, path).split(sep);
-      return parts[parts.lastIndexOf(marker) - 1] ?? "";
-    };
-    // An archive discover() already walked every JSONL file, agent files included.
-    const agentFiles = this.archive && this.discovered
-      ? this.discovered.filter((path) => basename(path).startsWith("agent-") && this.allowed(path))
-      : this.archive ? this.glob("**/agent-*.jsonl") : [...this.glob("*/agent-*.jsonl"), ...this.glob("*/*/subagents/**/agent-*.jsonl")];
-    const agents = agentFiles.map((path): ChildFile => {
+      if (path.endsWith(".txt")) return { kind: "tool_result_file", path, thread: basename(path), parentOriginalId: parentDirectory(parts, "tool-results") };
       const thread = basename(path, ".jsonl").slice("agent-".length);
-      if (relative(this.root, path).split(sep).includes("subagents"))
-        return { kind: "agent", path, thread, label: "", parentOriginalId: parentDirectory(path, "subagents") };
+      if (parts.includes("subagents")) return { kind: "agent", path, thread, parentOriginalId: parentDirectory(parts, "subagents") };
       const parent = stringValue(parseRecord(readHeadLines(path, 1).next().value ?? "")?.sessionId);
-      return { kind: "agent", path, thread, label: thread, ...(parent ? { parentOriginalId: parent } : {}) };
+      return { kind: "agent", path, thread, ...(parent ? { parentOriginalId: parent } : {}) };
     });
-    const results = this.glob(`${deep}/tool-results/*.txt`).map((path): ChildFile =>
-      ({ kind: "tool_result_file", path, thread: basename(path), label: basename(path), parentOriginalId: parentDirectory(path, "tool-results") }));
-    return [...agents, ...results];
+    return { files, unreadable };
   }
 
-  override childLabel(file: ChildFile): string {
-    if (file.label) return file.label;
+  override label(file: ChildFile): string {
+    const sidecar = file.path.replace(/\.jsonl$/, ".meta.json");
+    if (file.kind !== "agent" || !existsSync(sidecar)) return file.thread;
     try {
-      const meta: unknown = JSON.parse(readFileSync(file.path.replace(/\.jsonl$/, ".meta.json"), "utf8"));
-      if (isRecord(meta)) return stringValue(meta.description) || stringValue(meta.agentType) || file.thread;
-    } catch {}
-    return file.thread;
+      const meta: unknown = JSON.parse(readSession(sidecar).toString("utf8"));
+      return isRecord(meta) && (stringValue(meta.description) || stringValue(meta.agentType)) || file.thread;
+    } catch (error) {
+      if (error instanceof CatalogError || error instanceof SyntaxError) return file.thread;
+      throw error;
+    }
   }
 
   async rename(id: string, name: string, locatedPath?: string): Promise<void> {
@@ -827,7 +898,7 @@ class CodexAdapter extends JsonlAdapter {
       const payload = meta && isRecord(meta.payload) ? meta.payload : undefined;
       const birth = isoToEpoch(payload?.timestamp) ?? isoToEpoch(meta?.timestamp);
       const cwd = stringValue(payload?.cwd);
-      return { ...indexed, ...(cwd ? { cwd } : {}), ...(birth === undefined ? {} : { birth }) };
+      return { ...indexed, ...(cwd ? { cwd } : {}), ...(birth === undefined ? {} : { birth }), ...historyBase(payload) };
     }
     const lines = readHeadLines(path, MAX_HEAD_LINES + 1);
     const meta = parseRecord(lines.next().value ?? "");
@@ -868,6 +939,7 @@ class CodexAdapter extends JsonlAdapter {
       birth: isoToEpoch(payload.timestamp) ?? isoToEpoch(meta.timestamp),
       upstream_name: this.archive ? indexed?.upstream_name ?? "" : "",
       ...(model ? { model } : {}),
+      ...historyBase(payload),
     };
   }
 
@@ -1008,25 +1080,33 @@ class CodexAdapter extends JsonlAdapter {
     return [];
   }
 
-  override children(rows: Set<string>): ChildFile[] {
-    return (this.discovered ?? this.discover()).flatMap((path): ChildFile[] => {
-      if (rows.has(resolve(path))) return [];
-      const indexed = this.archiveSubagents.get(realPath(path));
-      // A child's session_meta names itself and its parent in the first few hundred bytes, before base_instructions.
-      const head = headText(path, 4096);
-      if (!indexed && !/"thread_source":"subagent"|"parent_thread_id"|"subagent":\{/.test(head)) return [];
-      const field = (name: string) => head.match(new RegExp(`"${name}":"([^"]*)"`))?.[1] ?? "";
-      const parent = field("parent_thread_id"), thread = field("id") || indexed || basename(path, ".jsonl");
-      const label = field("agent_nickname") || field("agent_path") || thread;
-      return [{ kind: "agent", path, thread, label, ...(parent ? { parentOriginalId: parent } : {}) }];
+  override async children(): Promise<Children> {
+    const unreadable: string[] = [];
+    const paths = walk(this.root, (parts) => parts.at(-1)!.endsWith(".jsonl") && (this.archive || parts.length === 4 && parts[3]!.startsWith("rollout-")), unreadable)
+      .filter((path) => this.allowed(path));
+    // A child's session_meta names itself and its parent in the first few hundred bytes, before base_instructions.
+    const head = await heads(paths, 4096, unreadable);
+    const files = paths.flatMap((path): ChildFile[] => {
+      const text = head.get(path) ?? "", indexed = this.archiveSubagents.get(realPath(path));
+      if (!indexed && !/"thread_source":"subagent"|"parent_thread_id"|"subagent":\{/.test(text)) return [];
+      const field = (name: string) => text.match(new RegExp(`"${name}":"([^"]*)"`))?.[1] ?? "";
+      const parent = field("parent_thread_id");
+      return [{ kind: "agent", path, thread: field("id") || indexed || basename(path, ".jsonl"), ...(parent ? { parentOriginalId: parent } : {}) }];
     });
+    return { files, unreadable };
   }
 
-  override events(id: string, path?: string): RawEvent[] {
-    const current = this.mainFile(id, path);
+  override label(file: ChildFile): string {
+    const text = readSession(file.path).subarray(0, 4096).toString("utf8");
+    const field = (name: string) => text.match(new RegExp(`"${name}":"([^"]*)"`))?.[1] ?? "";
+    return field("agent_nickname") || field("agent_path") || file.thread;
+  }
+
+  /** The history_base chain of a rollout, newest first, each with the byte length it contributes. */
+  private segments(path: string): { path: string; end?: number }[] {
     const segments: { path: string; end?: number }[] = [];
     const seen = new Set<string>();
-    let segment: { path: string; end?: number } = { path: current };
+    let segment: { path: string; end?: number } = { path };
     let candidates: string[] | undefined;
     while (true) {
       if (!this.allowed(segment.path) || seen.has(segment.path))
@@ -1036,7 +1116,7 @@ class CodexAdapter extends JsonlAdapter {
       const meta = parseRecord(readHeadLines(segment.path, 1).next().value ?? "");
       const payload = meta && isRecord(meta.payload) ? meta.payload : undefined;
       const base = payload?.history_base;
-      if (base === undefined || base === null) break;
+      if (base === undefined || base === null) return segments;
       if (!isRecord(base) || typeof base.thread_id !== "string" || !base.thread_id
         || typeof base.end_byte_offset !== "number" || !Number.isSafeInteger(base.end_byte_offset) || base.end_byte_offset < 0)
         throw new CatalogError("invalid", `Codex 会话历史边界无效: ${segment.path}`);
@@ -1049,8 +1129,15 @@ class CodexAdapter extends JsonlAdapter {
         throw new CatalogError("not_found", `Codex 会话历史文件缺失或不唯一: ${base.thread_id}`);
       segment = { path: matches[0]!, end: base.end_byte_offset };
     }
-    return segments.reverse().flatMap((part) => {
-      const data = readFileSync(part.path);
+  }
+
+  override history(path: string): string[] {
+    return this.segments(path).slice(1).map((segment) => segment.path);
+  }
+
+  override events(id: string, path?: string): RawEvent[] {
+    return this.segments(this.mainFile(id, path)).reverse().flatMap((part) => {
+      const data = readSession(part.path);
       if (part.end !== undefined && (part.end > data.length || (part.end > 0 && data[part.end - 1] !== 10)))
         throw new CatalogError("invalid", `Codex 会话历史边界超出文件或不完整: ${part.path}`);
       return this.eventsOf(data.subarray(0, part.end).toString("utf8"));
@@ -1152,6 +1239,8 @@ export class SessionCatalog {
   private platform: NodeJS.Platform;
   private codexPath: string | null;
   private diagnostics: SourceDiagnostic[] = [];
+  /** Child directories the last childIndex() could not read; replaced on every call. */
+  private childDiagnostics: SourceDiagnostic[] = [];
   private marksFile: string;
   private dataDirectory: string;
   private manualLineageFile: string;
@@ -1210,7 +1299,7 @@ export class SessionCatalog {
     return structuredClone(tool ? scoped.filter((row) => row.tool === tool) : scoped);
   }
 
-  sourceDiagnostics(): SourceDiagnostic[] { return structuredClone(this.diagnostics); }
+  sourceDiagnostics(): SourceDiagnostic[] { return structuredClone([...this.diagnostics, ...this.childDiagnostics]); }
 
   async detail(id: string): Promise<Transcript> {
     const session = await this.exact(id);
@@ -1275,13 +1364,13 @@ export class SessionCatalog {
 
   /**
    * Sessions whose meta fields, main thread and child threads together contain every term (case-insensitive literal).
-   * Every file with a raw hit whose owner has every term is attributed to a result or counted in coverage.
+   * Every candidate file is attributed to a result or counted in coverage; an unreadable file is counted, never fatal.
    */
-  async find(query: SessionQuery, limit = 20): Promise<{ total: number; results: (Session & { snippet: string; match: MatchSummary })[]; coverage: SearchCoverage }> {
+  async find(query: SessionQuery, limit = 20): Promise<{ total: number; results: SearchResult[]; coverage: SearchCoverage }> {
     const rg = this.rgPath === undefined ? Bun.which("rg") : this.rgPath;
     if (!rg) throw new CatalogError("missing_rg", "需要 ripgrep (rg)，请安装并加入 PATH");
     const terms = parseTerms(query.terms);
-    const coverage: SearchCoverage = { scanned_files: 0, candidate_files: 0, unclassified_files: 0, injected_only_files: 0, orphan_files: 0, orphans: [] };
+    const coverage: SearchCoverage = { scanned_files: 0, candidate_files: 0, unclassified_files: 0, partial_files: 0, injected_only_files: 0, unreadable_files: 0, orphan_files: 0, unreadable: [], orphans: [] };
     if (!terms.length) return { total: 0, results: [], coverage };
     const all = await this.list({ fresh: true });
     const index = await withRealpathMemo(() => this.childIndex());
@@ -1291,49 +1380,51 @@ export class SessionCatalog {
     const toolAllowed = (tool: Tool) => !query.tools?.length || query.tools.includes(tool);
     const owners: Owner[] = [];
     for (const row of all) if (inRange(row.birth, row.mtime) && toolAllowed(row.tool) && underCwd(row.cwd) && !query.exclude?.includes(row.id))
-      owners.push({ row, meta: metaHits(row, terms), files: [{ path: row.source_path }, ...(index.children.get(row.id) ?? []).map((child) => ({ path: child.path, child }))] });
+      owners.push({ kind: "row", row, meta: metaHits(row, terms), main: this.mainFiles(row), children: index.children.get(row.id) ?? [] });
     for (const child of index.orphans) if (inRange(child.mtime, child.mtime) && toolAllowed(child.adapter.tool) && underCwd(headCwd(child.path)))
-      owners.push({ orphan: child, files: [{ path: child.path, child }] });
-    const paths = owners.flatMap((owner) => owner.files.map((file) => file.path));
+      owners.push({ kind: "orphan", child });
+    // A thread is the unit of reading: a main thread may span several Codex segment files.
+    const childThread = (child: ChildEntry): ScanThread => ({ paths: [child.path], child, load: () => child.adapter.childEvents(child) });
+    const threadsOf = (owner: Owner): ScanThread[] => owner.kind === "orphan" ? [childThread(owner.child)]
+      : [{ paths: owner.main, load: () => this.mainEvents(owner.row) }, ...owner.children.map(childThread)];
+    const paths = owners.flatMap((owner) => threadsOf(owner).flatMap((thread) => thread.paths));
     coverage.scanned_files = paths.length;
-    const raw = await grepTerms(rg, terms, paths);
-    const results: (Session & { snippet: string; match: MatchSummary })[] = [];
+    const { found, unreadable } = await grepTerms(rg, terms, paths);
+    const touched = (path: string) => unreadable.has(path) || found.some((hits) => hits.has(path));
+    const results: SearchResult[] = [];
     for (const owner of owners) {
-      if (!terms.every((_, term) => owner.meta?.seen.has(term) || owner.files.some((file) => raw[term]!.has(file.path)))) continue;
-      const candidates = owner.files.filter((file) => terms.some((_, term) => raw[term]!.has(file.path)));
-      coverage.candidate_files += candidates.length;
-      const best = new BestHits(), seen = new Set(owner.meta?.seen), injected = new Set<number>();
-      owner.meta?.hits.forEach((hit) => best.add(hit, matchedTerms(hit.snippet, terms).length));
-      let main: ThreadTally | undefined;
-      const threads: MatchSummary["threads"] = [];
-      for (const file of candidates) {
-        let events: RawEvent[];
-        try { events = file.child ? childEventsOf(file.child) : this.mainEvents(owner.row!); }
-        catch (error) { if (error instanceof CatalogError || isRecord(error) && "code" in error) continue; throw error; }
-        const thread = file.child?.thread ?? "main", counts = tally(events, terms, thread, best);
-        counts.seen.forEach((term) => seen.add(term));
-        counts.injected.forEach((term) => injected.add(term));
-        if (!file.child) main = counts;
-        else if (counts.hits) threads.push({ thread, label: file.child.adapter.childLabel(file.child), hits: counts.hits });
-      }
-      const complete = (found: Set<number>) => terms.every((_, term) => found.has(term));
-      if (!complete(seen)) {
-        if (complete(new Set([...seen, ...injected]))) coverage.injected_only_files += candidates.length;
-        else coverage.unclassified_files += candidates.length;
+      const threads = threadsOf(owner), meta = owner.kind === "row" ? owner.meta : { seen: new Set<number>(), best: [] };
+      // An unreadable file may hold any term, so it keeps its owner in play.
+      const possible = (term: number) => meta.seen.has(term) || threads.some(({ paths: files }) => files.some((path) => unreadable.has(path) || found[term]!.has(path)));
+      if (!terms.every((_, term) => possible(term))) continue;
+      const read = threads.flatMap(({ paths: all, child, load }): ReadThread[] => {
+        const files = all.filter(touched);
+        if (!files.length) return [];
+        if (files.some((path) => unreadable.has(path))) return [{ files, child }];
+        try { return [{ files, child, tally: tally(load(), terms, child?.thread ?? "main") }]; }
+        catch (error) { if (error instanceof CatalogError) return [{ files, child }]; throw error; }
+      });
+      const outcome = verdicts(terms.length, meta.seen, read.map((thread) => thread.tally));
+      read.forEach((thread, position) => {
+        coverage.candidate_files += thread.files.length;
+        const verdict = outcome[position]!;
+        if (verdict === "unreadable") { coverage.unreadable_files += thread.files.length; coverage.unreadable.push(...thread.files); }
+        else if (verdict === "injected_only") coverage.injected_only_files += thread.files.length;
+        else if (verdict === "partial") coverage.partial_files += thread.files.length;
+        else if (verdict === "unclassified") coverage.unclassified_files += thread.files.length;
+        else if (owner.kind === "orphan") coverage.orphan_files += thread.files.length;
+      });
+      if (meta.seen.size < terms.length && !outcome.includes("match")) continue;
+      const hit = read.flatMap(({ child, tally: counts }) => counts ? [{ child, tally: counts }] : []);
+      if (owner.kind === "orphan") {
+        coverage.orphans.push({ path: owner.child.path, label: owner.child.adapter.label(owner.child), hits: hit[0]?.tally.hits ?? 0 });
         continue;
       }
-      if (owner.orphan) {
-        coverage.orphan_files++;
-        coverage.orphans.push({ path: owner.orphan.path, label: owner.orphan.adapter.childLabel(owner.orphan), hits: threads[0]?.hits ?? 0 });
-        continue;
-      }
-      const row = owner.row!, metaFields = owner.meta!.hits.map((hit) => hit.kind === "meta" ? hit.field : "");
-      const counts: Record<MatchKind, number> = { user: 0, assistant: 0, thinking: 0, tool_call: 0, tool_output: 0, ...main?.counts, meta: metaFields.length };
-      const tier = metaFields.some((field) => ["name", "star_note", "first_msg"].includes(field)) || counts.user ? 1 : counts.assistant ? 2 : 3;
-      const hits = best.hits;
-      results.push({ ...row, snippet: hits[0]?.snippet ?? "", match: { tier, counts, threads, best: hits } });
+      const match = summarize(meta, hit.find((thread) => !thread.child)?.tally,
+        hit.flatMap(({ child, tally: counts }) => child ? [{ thread: child.thread, label: child.adapter.label(child), tally: counts }] : []));
+      results.push({ ...owner.row, snippet: match.best[0]?.snippet ?? "", match });
     }
-    coverage.orphans = coverage.orphans.sort((left, right) => right.hits - left.hits).slice(0, 5);
+    coverage.orphans.sort((left, right) => right.hits - left.hits);
     results.sort((left, right) => left.match.tier - right.match.tier || compareSessions(left, right));
     return { total: results.length, results: results.slice(0, limit), coverage };
   }
@@ -1345,36 +1436,17 @@ export class SessionCatalog {
     const threads = [
       { thread: "main", label: "main", events: this.mainEvents(session) },
       ...(index.children.get(id) ?? []).sort((left, right) => left.path.localeCompare(right.path))
-        .map((child) => ({ thread: child.thread, label: child.adapter.childLabel(child), events: childEventsOf(child) })),
+        .map((child) => ({ thread: child.thread, label: child.adapter.label(child), events: child.adapter.childEvents(child) })),
     ];
     const terms = "around" in spec ? parseTerms(spec.around) : [];
     if ("around" in spec && !terms.length) throw new CatalogError("invalid", "缺少要定位的词");
-    const chars = spec.chars ?? 300;
     const hits = threads.map(({ events }) => events.flatMap((event, ordinal) => !event.injected && matchedTerms(event.text, terms).length ? [ordinal] : []));
-    let ranges: { thread: number; from: number; to: number; hits: number[] }[];
-    if ("around" in spec) {
-      ranges = threads.flatMap(({ events }, thread) => mergeWindows(hits[thread]!, spec.context ?? 2, events.length - 1).map((range) => ({ thread, ...range })));
-    } else {
-      const { at } = spec, name = at.thread ?? "main";
-      const matches = threads.flatMap((item, position) => item.thread === name ? [position] : []);
-      const prefixed = matches.length ? matches : threads.flatMap((item, position) => item.thread.startsWith(name) ? [position] : []);
-      if (prefixed.length !== 1) throw new CatalogError("invalid", `找不到唯一的子线程: ${name}`);
-      const thread = prefixed[0]!, last = threads[thread]!.events.length - 1, context = spec.context ?? 0;
-      if (!Number.isSafeInteger(at.from) || !Number.isSafeInteger(at.to) || at.from < 0 || at.to < at.from || at.from > last)
-        throw new CatalogError("invalid", `序号超出范围 0-${last}: ${at.from}-${at.to}`);
-      ranges = [{ thread, from: Math.max(0, at.from - context), to: Math.min(last, at.to + context), hits: [] }];
-    }
+    const ranges = "around" in spec ? aroundRanges(threads, hits, spec.context ?? 2) : [atRange(threads, spec.at, spec.context ?? 0)];
     const shown = "around" in spec ? ranges.slice(0, spec.windows ?? 8) : ranges;
     return {
       ...session,
       threads: threads.map(({ thread, label, events }, position) => ({ thread, label, events: events.length, hits: hits[position]! })),
-      windows: shown.map(({ thread, from, to, hits: windowHits }) => {
-        const { thread: name, label, events } = threads[thread]!;
-        return { thread: name, label, from, to, hits: windowHits, events: events.slice(from, to + 1).map((event, offset): SessionEvent => {
-          const clipped = clip(event.text, terms, terms.length && !windowHits.includes(from + offset) ? Math.min(chars, CONTEXT_CHARS) : chars);
-          return { ordinal: from + offset, kind: event.kind, ...clipped, ...(event.tool ? { tool: event.tool } : {}), timestamp: event.timestamp };
-        }) };
-      }),
+      windows: shown.map((range) => renderWindow(threads[range.thread]!, range, terms, spec.chars ?? 300)),
       omitted_windows: ranges.length - shown.length,
     };
   }
@@ -1382,6 +1454,15 @@ export class SessionCatalog {
   private mainEvents(row: Session): RawEvent[] {
     const location = this.location(row.id);
     return location.adapter.events(location.originalId, location.path);
+  }
+
+  /** The files a row's main thread is read from: its own file and, for a continued Codex rollout, the older segments. */
+  private mainFiles(row: Session): string[] {
+    const location = this.locations.get(row.id);
+    if (!location?.history) return [row.source_path];
+    try { return [row.source_path, ...location.adapter.history(location.path)]; }
+    // A broken chain fails mainEvents() too, which counts the row's file as unreadable.
+    catch (error) { if (error instanceof CatalogError) return [row.source_path]; throw error; }
   }
 
   async resolve(prefix: string): Promise<Session> {
@@ -1465,7 +1546,7 @@ export class SessionCatalog {
   }
 
   /** Attributes every child file of the last scan to a row, walking child-of-child chains; the rest are orphans. */
-  private childIndex(): ChildIndex {
+  private async childIndex(): Promise<ChildIndex> {
     const rowIds = new Map<Adapter, Map<string, string>>(), rowPaths = new Set<string>();
     for (const [id, location] of this.locations) {
       const ids = rowIds.get(location.adapter) ?? new Map<string, string>();
@@ -1474,15 +1555,16 @@ export class SessionCatalog {
       rowPaths.add(resolve(location.path));
     }
     const index: ChildIndex = { children: new Map(), orphans: [] };
-    for (const { adapter } of this.bindings) {
-      let files: ChildFile[];
-      try { files = adapter.children(rowPaths); } catch { continue; }
+    this.childDiagnostics = [];
+    for (const { adapter, source, rootId } of this.bindings) {
+      const { files, unreadable } = await adapter.children();
       const parents = new Map(files.flatMap((file) => file.kind === "agent" ? [[file.thread, file.parentOriginalId] as const] : []));
       const ids = rowIds.get(adapter);
       for (const file of files) {
         if (rowPaths.has(resolve(file.path))) continue;
         let mtime: number;
-        try { mtime = statSync(file.path).mtimeMs / 1000; } catch { continue; }
+        try { mtime = statSync(file.path).mtimeMs / 1000; }
+        catch (error) { unreadable.push(`${file.path}: ${error instanceof Error ? error.message : String(error)}`); continue; }
         let parent = file.parentOriginalId, owner: string | undefined;
         for (const seen = new Set<string>(); parent && !seen.has(parent); parent = parents.get(parent)) {
           seen.add(parent);
@@ -1493,6 +1575,8 @@ export class SessionCatalog {
         if (!owner) index.orphans.push(entry);
         else index.children.set(owner, [...index.children.get(owner) ?? [], entry]);
       }
+      for (const reason of unreadable)
+        this.childDiagnostics.push({ source_id: source?.id ?? "live", root_id: rootId, level: "error", message: sourceCopy.errors.childUnreadable(reason) });
     }
     return index;
   }
@@ -1571,7 +1655,7 @@ export class SessionCatalog {
     for (const { file, metadata } of parsed) {
       if (!file.source && liveFiles.get(metadata.id) !== file) continue;
       const id = file.source ? this.recordKey(file, metadata.id) : metadata.id;
-      locations.set(id, { ...file, originalId: metadata.id });
+      locations.set(id, { ...file, originalId: metadata.id, ...(metadata.history_base ? { history: true as const } : {}) });
       const mark = marks[id];
       const rootName = file.source && rootCounts.get(file.adapter)!.get(metadata.id)! > 1 ? "" : names.get(file.adapter)?.get(metadata.id);
       const upstream = metadata.upstream_name || rootName || "";

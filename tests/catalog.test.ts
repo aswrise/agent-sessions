@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { Database } from "bun:sqlite";
-import { appendFileSync, chmodSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { appendFileSync, chmodSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { basename, join } from "node:path";
 import { afterEach, describe, expect, test } from "bun:test";
 import { CatalogError, SessionCatalog } from "../src/catalog.ts";
@@ -433,5 +433,120 @@ done
     writeFileSync(marks, JSON.stringify(value));
     expect(await catalog.unstar("orphan")).toBe("orphan");
     expect((await catalog.listStars()).map(({ id }) => id)).not.toContain("orphan");
+  });
+});
+
+describe("SessionCatalog search robustness", () => {
+  const lines = (records: unknown[]) => records.map((record) => JSON.stringify(record)).join("\n") + "\n";
+  const padding = lines([{ padding: "x".repeat(2200) }]);
+
+  test("detail keeps tool calls, tool output, and thinking out of the Transcript for every tool", async () => {
+    const { home, catalog } = setup();
+    appendFileSync(join(home, ".claude/projects/-tmp-alpha/claude-a.jsonl"), lines([
+      { type: "assistant", timestamp: "t1", message: { role: "assistant", content: [{ type: "thinking", thinking: "claude-thinking-secret" }, { type: "tool_use", id: "u1", name: "Bash", input: { command: "claude-call-secret" } }] } },
+      { type: "user", timestamp: "t2", message: { role: "user", content: [{ type: "tool_result", tool_use_id: "u1", content: [{ type: "text", text: "claude-output-secret" }] }] }, toolUseResult: { stdout: "claude-output-secret" } },
+    ]));
+    appendFileSync(join(home, ".codex/sessions/2026/07/14/rollout-codex-b.jsonl"), lines([
+      { type: "response_item", timestamp: "t1", payload: { type: "function_call", name: "shell", arguments: "{\"cmd\":\"codex-call-secret\"}", call_id: "c" } },
+      { type: "response_item", timestamp: "t2", payload: { type: "function_call_output", call_id: "c", output: "codex-output-secret" } },
+      { type: "event_msg", timestamp: "t3", payload: { type: "item_completed", item: { type: "CommandExecution", command: ["zsh", "-lc", "codex-command-secret"], aggregated_output: "codex-aggregated-secret" } } },
+    ]));
+    appendFileSync(join(home, ".pi/agent/sessions/-tmp-gamma/pi-c.jsonl"), lines([
+      { type: "message", timestamp: "t1", message: { role: "assistant", content: [{ type: "thinking", thinking: "pi-thinking-secret" }, { type: "toolCall", id: "p", name: "bash", arguments: { command: "pi-call-secret" } }] } },
+      { type: "message", timestamp: "t2", message: { role: "toolResult", toolCallId: "p", toolName: "bash", content: [{ type: "text", text: "pi-output-secret" }] } },
+    ]));
+    for (const id of ["claude-a", "codex-b", "pi-c"]) {
+      const { messages } = await catalog.detail(id);
+      expect(messages.length).toBeGreaterThan(0);
+      expect(messages.filter(({ text }) => text.includes("secret"))).toEqual([]);
+    }
+    // The same records stay searchable.
+    expect((await catalog.find({ terms: ["pi-output-secret"] })).results.map(({ id }) => id)).toEqual(["pi-c"]);
+  });
+
+  test("scans every file when a search spans more than one ripgrep batch", async () => {
+    const { home, catalog } = setup();
+    const directory = join(home, ".claude/projects/-tmp-alpha/claude-a/tool-results");
+    for (let index = 0; index < 140; index++) writeFileSync(join(directory, `r${String(index).padStart(3, "0")}.txt`), `filler\nbatch-needle ${index}\n`);
+    const { results, coverage } = await catalog.find({ terms: ["batch-needle"] });
+    expect(results.map(({ id }) => id)).toEqual(["claude-a"]);
+    expect(results[0]!.match.threads.length).toBe(140);
+    expect(coverage).toMatchObject({ scanned_files: 148, candidate_files: 140, unreadable_files: 0 });
+  });
+
+  test("survives a child chain that loops back on itself", async () => {
+    const { home, catalog } = setup();
+    const directory = join(home, ".codex/sessions/2026/07/14");
+    for (const [id, parent] of [["loop-a", "loop-b"], ["loop-b", "loop-a"]])
+      writeFileSync(join(directory, `rollout-2026-07-14T07-00-00-${id}.jsonl`), lines([
+        { timestamp: "2026-07-14T07:00:00Z", payload: { id, cwd: "/tmp/loop", thread_source: "subagent", source: { subagent: { thread_spawn: { parent_thread_id: parent } } }, parent_thread_id: parent, agent_nickname: id } },
+        { type: "response_item", payload: { type: "message", role: "user", content: [{ type: "input_text", text: "loop-needle" }] } },
+      ]));
+    const { results, coverage } = await catalog.find({ terms: ["loop-needle"] });
+    expect(results).toEqual([]);
+    expect(coverage.orphans.map(({ label }) => label).sort()).toEqual(["loop-a", "loop-b"]);
+  });
+
+  test("keeps results and reports an unreadable child directory or file instead of failing", async () => {
+    const { home, catalog } = setup();
+    const subagents = join(home, ".claude/projects/-tmp-alpha/claude-a/subagents"), offloaded = join(home, ".claude/projects/-tmp-alpha/claude-a/tool-results/toolu_big.txt");
+    chmodSync(subagents, 0o000);
+    chmodSync(offloaded, 0o000);
+    try {
+      const kept = await catalog.find({ terms: ["fixture-user-claude"] });
+      expect(kept.results.map(({ id }) => id)).toEqual(["claude-a"]);
+      expect(catalog.sourceDiagnostics().filter(({ level, message }) => level === "error" && message.includes(subagents))).toHaveLength(1);
+
+      const blocked = await catalog.find({ terms: ["fixture-offloaded-result"] });
+      expect(blocked.results).toEqual([]);
+      expect(blocked.coverage).toMatchObject({ unreadable_files: 1, unreadable: [offloaded] });
+      expect(blocked.coverage.candidate_files).toBe(1);
+    } finally {
+      chmodSync(subagents, 0o755);
+      chmodSync(offloaded, 0o644);
+    }
+  });
+
+  test("ANDs terms across the history_base segments of a continued Codex rollout", async () => {
+    const { home, catalog } = setup();
+    const directory = join(home, ".codex/sessions/2026/07/15");
+    mkdirSync(directory, { recursive: true });
+    const older = lines([
+      { timestamp: "2026-07-15T01:00:00Z", payload: { id: "seg-old", cwd: "/tmp/seg", timestamp: "2026-07-15T01:00:00Z" } },
+      { type: "response_item", timestamp: "2026-07-15T01:01:00Z", payload: { type: "message", role: "user", content: [{ type: "input_text", text: "segment-old-needle" }] } },
+    ]);
+    writeFileSync(join(directory, "rollout-2026-07-15T01-00-00-seg-old.jsonl"), older + padding);
+    writeFileSync(join(directory, "rollout-2026-07-15T02-00-00-seg-new.jsonl"), lines([
+      { timestamp: "2026-07-15T02:00:00Z", payload: { id: "seg-new", cwd: "/tmp/seg", timestamp: "2026-07-15T02:00:00Z", history_base: { thread_id: "seg-old", end_ordinal_exclusive: 1, end_byte_offset: Buffer.byteLength(older) } } },
+      { type: "response_item", timestamp: "2026-07-15T02:01:00Z", payload: { type: "message", role: "user", content: [{ type: "input_text", text: "segment-new-needle" }] } },
+    ]) + padding);
+    const split = await catalog.find({ terms: ["segment-old-needle", "segment-new-needle"] });
+    expect(split.results.map(({ id }) => id)).toEqual(["seg-new"]);
+    expect(split.coverage.candidate_files).toBe(split.coverage.partial_files + 2);
+    const excerpt = await catalog.excerpt("seg-new", { around: ["segment-old-needle"] });
+    expect(excerpt.windows.map(({ thread, hits }) => ({ thread, hits }))).toEqual([{ thread: "main", hits: [0] }]);
+  });
+
+  test("separates owners that hold only some terms in readable events from raw hits with no readable event", async () => {
+    const { home, catalog } = setup();
+    appendFileSync(join(home, ".codex/sessions/2026/07/14/rollout-codex-b.jsonl"), lines([
+      { type: "event_msg", timestamp: "t1", payload: { type: "item_completed", item: { type: "AgentMessage", text: "unprojected-needle" } } },
+    ]));
+    const { results, coverage } = await catalog.find({ terms: ["fixture-user-codex", "unprojected-needle"] });
+    expect(results).toEqual([]);
+    expect(coverage).toMatchObject({ candidate_files: 1, partial_files: 1, unclassified_files: 0 });
+    expect((await catalog.find({ terms: ["unprojected-needle"] })).coverage).toMatchObject({ candidate_files: 1, partial_files: 0, unclassified_files: 1 });
+  });
+
+  test("centres tool output clips and snippets on the hit in the output, not the echoed command", async () => {
+    const { home, catalog } = setup();
+    appendFileSync(join(home, ".codex/sessions/2026/07/14/rollout-codex-b.jsonl"), lines([
+      { type: "event_msg", timestamp: "t1", payload: { type: "item_completed", item: { type: "CommandExecution", command: ["zsh", "-lc", "launchctl print clip-needle"], aggregated_output: "y".repeat(2000) + " clip-needle found-here " + "z".repeat(40) } } },
+    ]));
+    const { results } = await catalog.find({ terms: ["clip-needle"] });
+    expect(results[0]!.match.best[0]!.snippet).toContain("found-here");
+    const [window] = (await catalog.excerpt("codex-b", { around: ["clip-needle"], context: 0 })).windows;
+    expect(window!.events[0]!.text).toContain("found-here");
+    expect(window!.events[0]!.text.length).toBeLessThanOrEqual(302);
   });
 });

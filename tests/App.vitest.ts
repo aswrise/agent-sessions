@@ -1,7 +1,7 @@
 import { flushPromises, mount } from "@vue/test-utils";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import App from "../src/App.vue";
-import type { SessionView, TranscriptView } from "../src/contracts.ts";
+import { emptyCounts, type SessionView, type TranscriptView } from "../src/contracts.ts";
 import { layoutLineages, LINEAGE_GRAPH_LAYOUT } from "../src/lineageLayout.ts";
 
 const makeRow = (index: number): SessionView => ({
@@ -22,6 +22,7 @@ const makeRow = (index: number): SessionView => ({
   resume_command: `resume ${index}`,
 });
 
+const searchMatch = { tier: 1, counts: emptyCounts(), threads: [], best: [] };
 const response = (value: unknown, status = 200) => new Response(JSON.stringify(value), { status, headers: { "content-type": "application/json" } });
 const lineageEdge = (upstream_id: string, downstream_id: string, path = "/tmp/handoff.md") => ({
   relation: "artifact" as const, upstream_id, downstream_id, path, produced_at: 1, referenced_at: 2,
@@ -35,7 +36,7 @@ beforeEach(() => {
   fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input);
     if (url.startsWith("/api/sessions")) return response({ generatedAt: new Date(0).toISOString(), home: "/home/fixture", sessions: Array.from({ length: 101 }, (_, index) => makeRow(index)) });
-    if (url.startsWith("/api/search")) return response({ total: 1, results: [{ ...makeRow(42), snippet: "deep transcript needle" }] });
+    if (url.startsWith("/api/search")) return response({ total: 1, results: [{ ...makeRow(42), snippet: "deep transcript needle", match: searchMatch }], coverage: {} });
     if (url === "/api/lineage/index") return response({ sessions: 101, scanned: 101, unchanged: 0, removed: 0, writes: 2, references: 2, edges: 1, elapsed_ms: 12 });
     if (url.startsWith("/api/lineage")) return response({ sessions: [
       { ...makeRow(99), name: "codex接管pi的submit混乱设计", birth: new Date(2026, 6, 15, 17, 40).getTime() / 1000 },
@@ -98,7 +99,7 @@ describe("dashboard", () => {
         const id = new URL(url, "http://local").searchParams.get("id");
         return response({ ...sessions.find((row) => row.id === id), messages: [] });
       }
-      if (url.startsWith("/api/search")) return response({ total: 3, results: sessions.map((row) => ({ ...row, snippet: "needle" })) });
+      if (url.startsWith("/api/search")) return response({ total: 3, results: sessions.map((row) => ({ ...row, snippet: "needle", match: searchMatch })), coverage: {} });
       return response({ ok: true });
     });
     const wrapper = mount(App, { attachTo: document.body });

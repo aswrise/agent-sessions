@@ -122,7 +122,9 @@ describe("find recall property", () => {
         const has = (owner: GeneratedOwner, placements: Placement[]) => terms.every((term) =>
           owner.files.some((file) => placements.some((placement) => file.placed.get(term)?.has(placement))));
         const rawOwner = (owner: GeneratedOwner) => terms.every((term) => owner.files.some((file) => rawContains(file.path, term)));
-        const candidates = (owner: GeneratedOwner) => owner.files.filter((file) => terms.some((term) => rawContains(file.path, term))).length;
+        const candidateFiles = (owner: GeneratedOwner) => owner.files.filter((file) => terms.some((term) => rawContains(file.path, term)));
+        const candidates = (owner: GeneratedOwner) => candidateFiles(owner).length;
+        const projectsAny = (file: GeneratedOwner["files"][number]) => terms.some((term) => file.placed.get(term)?.has("projected"));
         const label = `seed ${seed} terms ${JSON.stringify(terms)}`;
 
         const expected = owners.filter((owner) => !owner.orphan && has(owner, ["projected"])).map((owner) => owner.id).sort();
@@ -131,14 +133,18 @@ describe("find recall property", () => {
         expect({
           orphan_files: coverage.orphan_files,
           injected_only_files: coverage.injected_only_files,
+          partial_files: coverage.partial_files,
           unclassified_files: coverage.unclassified_files,
+          unreadable_files: coverage.unreadable_files,
         }, label).toEqual({
           orphan_files: owners.filter((owner) => owner.orphan && has(owner, ["projected"])).length,
           injected_only_files: failed.filter((owner) => has(owner, ["projected", "injected"])).reduce((sum, owner) => sum + candidates(owner), 0),
-          unclassified_files: failed.filter((owner) => !has(owner, ["projected", "injected"])).reduce((sum, owner) => sum + candidates(owner), 0),
+          partial_files: failed.filter((owner) => !has(owner, ["projected", "injected"])).reduce((sum, owner) => sum + candidateFiles(owner).filter(projectsAny).length, 0),
+          unclassified_files: failed.filter((owner) => !has(owner, ["projected", "injected"])).reduce((sum, owner) => sum + candidateFiles(owner).filter((file) => !projectsAny(file)).length, 0),
+          unreadable_files: 0,
         });
         const attributed = owners.filter((owner) => results.some(({ id }) => id === owner.id)).reduce((sum, owner) => sum + candidates(owner), 0);
-        expect(coverage.candidate_files, label).toBe(attributed + coverage.orphan_files + coverage.injected_only_files + coverage.unclassified_files);
+        expect(coverage.candidate_files, label).toBe(attributed + coverage.orphan_files + coverage.injected_only_files + coverage.partial_files + coverage.unclassified_files);
         for (const owner of owners) for (const file of owner.files) if (terms.every((term) => rawContains(file.path, term)))
           expect(results.some(({ id }) => id === owner.id) || failed.includes(owner) || owner.orphan, label).toBe(true);
         for (const result of results)

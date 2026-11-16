@@ -1,4 +1,4 @@
-import { mkdirSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, test } from "bun:test";
@@ -59,6 +59,27 @@ describe("CLI process seam", () => {
     expect(JSON.parse(at.stdout).windows).toEqual([expect.objectContaining({ thread: "sub1", from: 1, to: 1,
       events: [expect.objectContaining({ ordinal: 1, kind: "tool_call", tool: "Bash" })] })]);
     expect(run(fixture.home, ["show", "claude", "--at", "nope:1"]).exitCode).toBe(1);
+  });
+
+  test("reads bare --since and --until dates as whole local days", async () => {
+    const fixture = fixtureHome(); cleanups.push(fixture.cleanup);
+    // codex-b starts at 2026-07-14T02:00Z, 10:00 on 07-14 in Shanghai and 22:00 on 07-13 in New York.
+    const ids = (zone: string, args: string[]) => run(fixture.home, ["find", "fixture-user-codex", ...args], undefined, { TZ: zone }).stdout
+      .split("\n").filter((line) => /^[★ ] \S/.test(line)).map((line) => line.split(" ")[1]);
+    expect(ids("Asia/Shanghai", ["--until", "2026-07-14"])).toEqual(["codex-b"]);
+    expect(ids("Asia/Shanghai", ["--until", "2026-07-13"])).toEqual([]);
+    expect(ids("America/New_York", ["--until", "2026-07-13"])).toEqual(["codex-b"]);
+  });
+
+  test("lists files it could not read after the results", async () => {
+    const fixture = fixtureHome(); cleanups.push(fixture.cleanup);
+    const offloaded = join(fixture.home, ".claude/projects/-tmp-alpha/claude-a/tool-results/toolu_big.txt");
+    chmodSync(offloaded, 0o000);
+    try {
+      const found = run(fixture.home, ["find", "fixture-offloaded-result"]);
+      expect(found.exitCode).toBe(0);
+      expect(found.stdout.split("\n")).toContain(`不可读 ${offloaded}`);
+    } finally { chmodSync(offloaded, 0o644); }
   });
 
   test("keeps stderr free of source statistics unless -v, and prints help anywhere", async () => {

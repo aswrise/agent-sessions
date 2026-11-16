@@ -34,6 +34,7 @@ export const sourceCopy = {
     readonly: "归档来源只读，不能修改原生名称",
     fileUnavailable: (id: string) => `Session 文件不可访问: ${id}`,
     inaccessible: (reason: string) => `来源不可访问: ${reason}`,
+    childUnreadable: (reason: string) => `子线程文件不可读，已跳过: ${reason}`,
   },
   counts: (discovered: number, valid: number, skipped: number) => `发现 ${discovered} 个文件，有效 ${valid} 个，跳过 ${skipped} 个（格式、子会话、链接越界、重复文件或兼容大小限制）`,
 };
