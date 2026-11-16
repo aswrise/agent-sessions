@@ -192,3 +192,11 @@ sessions show <id前缀> --at [<thread>:]<n>[-<m>] [-C 0] [--chars 300] [--json]
 与上一版（e41c427）的 `--self` 结果集对比，四个词都只增不减：launchctl 多 `01a1cfae`，ModuleNotFoundError 多 `01a1c889`，installed.json 多 `01a1c970`，herdr_task 不变。多出来的都是词只在较早分段里的续写 rollout。旧 find 在同一批词上是 1、1、1、2 个结果，stderr 各 3809 字节。
 
 `find launchctl --since 14d` 耗时 0.71s。`show 0cfeba3f launchctl` 输出 1146 字节，整段 `show` 7588 字符。
+
+### 召回校验与端到端验证后的修正
+
+- 归属不明的不可读文件（读不到首行而无法判断父线程的 Codex 子线程、读不了的子目录）计入 `coverage.unreadable`，按工具过滤，不受时间与 cwd 过滤（这两项信息在文件里）。由 `.claude/skills/find-recall` 的深度运行发现。
+- 首行读取统一走 `headLine()`。`readHeadLines(...).next()` 不会触发生成器的 `finally`，文件句柄留着不关；`find` 每次解析分段链都会漏，常驻 dash 约 1750 次搜索后 `posix_spawn` 失败。
+- `excerpt` 在窗口数截断前为每个词保留第一个含它的窗口；裁剪为事件里每个命中词各留一段，用 `…` 连接；相邻命中合并的窗口最多 24 个事件。
+- `--at` 的终点超出范围时收紧到最后一个事件，起点超出范围报错。
+- `/verify` agent-sessions 目标的 `check.mjs` 断言 `list` 把同 ID 副本折叠为带 `copies` 的一行，当前代码没有这项折叠，基线 b516350 同样失败，与本分支无关。
