@@ -570,6 +570,28 @@ describe("SessionCatalog search robustness", () => {
     expect(excerpt.omitted_windows).toBe(2);
   });
 
+  test("a clipped event keeps a span for every term it holds", async () => {
+    const { home, catalog } = setup();
+    appendFileSync(join(home, ".codex/sessions/2026/07/14/rollout-codex-b.jsonl"), lines([
+      { type: "response_item", timestamp: "t1", payload: { type: "message", role: "assistant", content: [{ type: "output_text", text: `span-left ${"x".repeat(3000)} span-right` }] } },
+    ]));
+    const excerpt = await catalog.excerpt("codex-b", { around: ["span-left", "span-right"], context: 0, chars: 200 });
+    const event = excerpt.windows[0]!.events[0]!;
+    expect(event.text).toContain("span-left");
+    expect(event.text).toContain("span-right");
+    expect(event.text.length).toBeLessThan(260);
+  });
+
+  test("a long run of adjacent hits splits into bounded windows", async () => {
+    const { home, catalog } = setup();
+    appendFileSync(join(home, ".codex/sessions/2026/07/14/rollout-codex-b.jsonl"), lines(Array.from({ length: 60 }, (_, index) => (
+      { type: "response_item", timestamp: "t1", payload: { type: "message", role: "assistant", content: [{ type: "output_text", text: `run-needle ${index}` }] } }))));
+    const excerpt = await catalog.excerpt("codex-b", { around: ["run-needle"], windows: 100 });
+    expect(excerpt.windows.length).toBeGreaterThan(1);
+    for (const { from, to } of excerpt.windows) expect(to - from + 1).toBeLessThanOrEqual(24);
+    expect(excerpt.windows.flatMap(({ hits }) => hits)).toHaveLength(60);
+  });
+
   test("centres tool output clips and snippets on the hit in the output, not the echoed command", async () => {
     const { home, catalog } = setup();
     appendFileSync(join(home, ".codex/sessions/2026/07/14/rollout-codex-b.jsonl"), lines([

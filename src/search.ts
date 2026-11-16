@@ -115,21 +115,35 @@ export function summarize(meta: ReturnType<typeof metaHits>, main: Tally | undef
   };
 }
 
-/** Merges `[hit - context, hit + context]` ranges inside `[0, last]`. */
+/** A run of adjacent hits splits into windows of at most this many events, so one window never swallows a long stretch. */
+const WINDOW_SPAN = 24;
+
+/** Merges `[hit - context, hit + context]` ranges inside `[0, last]`, each at most WINDOW_SPAN events. */
 export function mergeWindows(hits: number[], context: number, last: number): { from: number; to: number; hits: number[] }[] {
   const windows: { from: number; to: number; hits: number[] }[] = [];
   for (const hit of [...hits].sort((left, right) => left - right)) {
     const from = Math.max(0, hit - context), to = Math.min(last, hit + context), previous = windows.at(-1);
-    if (previous && from <= previous.to + 1) { previous.to = Math.max(previous.to, to); previous.hits.push(hit); }
+    if (previous && from <= previous.to + 1 && to - previous.from < WINDOW_SPAN) { previous.to = Math.max(previous.to, to); previous.hits.push(hit); }
     else windows.push({ from, to, hits: [hit] });
   }
   return windows;
 }
 
-/** Cuts text to `chars` around its focus hit, or from the start; `chars` 0 keeps it whole. */
+/** Cuts text to about `chars`, sharing them among the matched terms so each keeps a span; no hit keeps the start. `chars` 0 keeps it whole. */
 export function clip(text: string, terms: Term[], chars: number, kind?: EventKind): { text: string; length?: number } {
   if (!chars || text.length <= chars) return { text };
-  const hit = focus(text, terms, kind), center = hit ? hit.index + Math.floor(hit.length / 2) : 0;
-  const start = Math.max(0, Math.min(text.length - chars, center - Math.floor(chars / 2))), end = start + chars;
-  return { text: `${start ? "…" : ""}${text.slice(start, end)}${end < text.length ? "…" : ""}`, length: text.length };
+  const hits = terms.flatMap((term) => focus(text, [term], kind) ?? []);
+  const share = Math.floor(chars / Math.max(1, hits.length));
+  const spans = (hits.length ? hits : [{ index: 0, length: 0 }]).map(({ index, length }) => {
+    const start = Math.max(0, Math.min(text.length - share, index + Math.floor(length / 2) - Math.floor(share / 2)));
+    return { start, end: start + share };
+  }).sort((left, right) => left.start - right.start);
+  const merged: { start: number; end: number }[] = [];
+  for (const span of spans) {
+    const previous = merged.at(-1);
+    if (previous && span.start <= previous.end) previous.end = Math.max(previous.end, span.end);
+    else merged.push({ ...span });
+  }
+  const body = merged.map(({ start, end }) => text.slice(start, end)).join("…");
+  return { text: `${merged[0]!.start ? "…" : ""}${body}${merged.at(-1)!.end < text.length ? "…" : ""}`, length: text.length };
 }
