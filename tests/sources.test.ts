@@ -55,7 +55,7 @@ describe("configured archive sources", () => {
     const defaultFile = join(userDataDirectory(f.home), "sources.json");
     write(defaultFile, { version: 1, sources: [source("default", archive)] });
     expect((await new SessionCatalog({ home: f.home, dataDirectory: f.dataDirectory }).list()).find((row) => row.session_id === "old-id")?.source_id).toBe("default");
-    expect((await new SessionCatalog({ home: f.home, dataDirectory: f.dataDirectory }).find("OLD-ID")).results.map((row) => row.session_id)).toContain("old-id");
+    expect((await new SessionCatalog({ home: f.home, dataDirectory: f.dataDirectory }).find({ terms: ["OLD-ID"] })).results.map((row) => row.session_id)).toContain("old-id");
     f.configure([source("option", archive)]);
     const envFile = join(f.root, "environment.json"); write(envFile, { version: 1, sources: [source("environment", archive)] });
     const environment = { AGENT_SESSIONS_SOURCES_FILE: envFile };
@@ -74,7 +74,7 @@ describe("configured archive sources", () => {
     const c = join(f.root, "c"); pi(join(c, "four.jsonl"), "four");
     f.configure([source("cp", a), source("per", b), source("review", c)]);
     expect((await list()).sessions.map((row) => row.session_id).sort()).toEqual(["four", "one", "three", "two"]);
-    expect((await f.catalog.find("deep", 100)).total).toBe(4);
+    expect((await f.catalog.find({ terms: ["deep"] }, 100)).total).toBe(4);
   });
 
   test("rescans only live roots for scope=live and serves cached archive rows until fresh or a mark change", async () => {
@@ -147,7 +147,7 @@ describe("configured archive sources", () => {
     for (const row of rows) {
       const text = row.source_id === "cp" ? "a-secret" : row.source_id === "per" ? "b-secret" : "live-secret";
       expect((await f.catalog.detail(row.id)).messages.at(-1)?.text).toBe(text);
-      expect((await f.catalog.find(text)).results.map((hit) => hit.id)).toEqual([row.id]);
+      expect((await f.catalog.find({ terms: [text] })).results.map((hit) => hit.id)).toEqual([row.id]);
       await f.catalog.updateMark(row.id, { star: true, note: text, status: "review" });
     }
     const refreshed = await f.catalog.list({ fresh: true });
@@ -199,7 +199,7 @@ describe("configured archive sources", () => {
     const rows = await f.catalog.list();
     expect(rows.map((row) => row.id).sort()).toEqual(["guardian-review", "string-source"]);
     expect(rows.every((row) => row.source_kind === undefined && row.session_id === undefined)).toBe(true);
-    expect((await f.catalog.find("guardian-review transcript")).results.map((row) => row.id)).toEqual(["guardian-review"]);
+    expect((await f.catalog.find({ terms: ["guardian-review transcript"] })).results.map((row) => row.id)).toEqual(["guardian-review"]);
     expect((await f.catalog.detail("guardian-review")).messages[0]?.text).toBe("guardian-review transcript");
   });
 
@@ -259,7 +259,7 @@ describe("configured archive sources", () => {
     const rows = await f.catalog.list();
     expect(rows.map((row) => row.session_id).sort()).toEqual(["same", "tiny"]);
     expect(rows.find((row) => row.session_id === "same")?.name).toBe("");
-    expect((await f.catalog.find("escape")).total).toBe(0);
+    expect((await f.catalog.find({ terms: ["escape"] })).total).toBe(0);
   });
 
   test.skipIf(process.platform === "win32")("resolves realpaths through symlinked ancestors and rechecks escaping symlinks on each scan", async () => {
@@ -287,7 +287,7 @@ describe("configured archive sources", () => {
     f.configure([source("old", old)]);
     const before = { hash: digest(path), mtime: statSync(path).mtimeMs };
     const row = (await f.catalog.list())[0]!;
-    await f.catalog.detail(row.id); await f.catalog.find("deep"); await f.catalog.refreshLineage();
+    await f.catalog.detail(row.id); await f.catalog.find({ terms: ["deep"] }); await f.catalog.refreshLineage();
     await f.catalog.updateMark(row.id, { star: true, note: "safe", status: "done" });
     await expect(f.catalog.rename(row.id, "changed")).rejects.toThrow("只读");
     const server = startServer({ catalog: f.catalog, home: f.home, port: 0 }); cleanups.push(() => server.stop(true));
@@ -313,7 +313,7 @@ describe("configured archive sources", () => {
     const row = (await f.catalog.list())[0]!;
     expect(row.name).toBe("Archive WAL title");
     expect((await f.catalog.detail(row.id)).messages.at(-1)?.text).toBe("archive transcript");
-    await f.catalog.find("archive transcript"); await f.catalog.updateMark(row.id, { note: "independent" });
+    await f.catalog.find({ terms: ["archive transcript"] }); await f.catalog.updateMark(row.id, { note: "independent" });
     await expect(f.catalog.rename(row.id, "no")).rejects.toThrow("只读");
     expect(fingerprint()).toEqual(before);
     expect([...new Bun.Glob(".codex-metadata-*").scanSync({ cwd: f.dataDirectory, onlyFiles: false, dot: true })]).toEqual([]);
@@ -351,9 +351,9 @@ describe("configured archive sources", () => {
     f.configure([source("old", old, "codex")]);
     const rows = await f.catalog.list();
     expect(rows.map((row) => row.source_path).sort()).toEqual([reused, sibling].sort());
-    expect((await f.catalog.find("child-only-secret")).total).toBe(0);
-    expect((await f.catalog.find("sibling-secret")).results.map((row) => row.source_path)).toEqual([sibling]);
-    expect((await f.catalog.find("reused-secret")).results.map((row) => row.source_path)).toEqual([reused]);
+    expect((await f.catalog.find({ terms: ["child-only-secret"] })).total).toBe(0);
+    expect((await f.catalog.find({ terms: ["sibling-secret"] })).results.map((row) => row.source_path)).toEqual([sibling]);
+    expect((await f.catalog.find({ terms: ["reused-secret"] })).results.map((row) => row.source_path)).toEqual([reused]);
   });
 
   test("keeps source-scoped automatic lineage and retains manual relations and marks while a root is offline", async () => {
@@ -448,7 +448,7 @@ describe("configured archive sources", () => {
     expect((await f.catalog.detail(rows[0]!.id)).messages.map(({ role, text }) => ({ role, text }))).toEqual([
       { role: "user", text: "legacy question" }, { role: "assistant", text: "legacy answer needle" },
     ]);
-    expect((await f.catalog.find("legacy answer needle")).results.map(row => row.id)).toEqual([rows[0]!.id]);
+    expect((await f.catalog.find({ terms: ["legacy answer needle"] })).results.map(row => row.id)).toEqual([rows[0]!.id]);
   });
 
   test("reads Claude transcript exports with direct content and no historical cwd", async () => {
@@ -466,7 +466,7 @@ describe("configured archive sources", () => {
     expect((await f.catalog.detail(rows[0]!.id)).messages.map(({ role, text }) => ({ role, text }))).toEqual([
       { role: "user", text: "export question" }, { role: "assistant", text: "export answer needle" },
     ]);
-    expect((await f.catalog.find("export answer needle")).results.map(row => row.id)).toEqual([rows[0]!.id]);
+    expect((await f.catalog.find({ terms: ["export answer needle"] })).results.map(row => row.id)).toEqual([rows[0]!.id]);
   });
 
   test("CLI lists and searches all archives by default and preserves result limit semantics", async () => {

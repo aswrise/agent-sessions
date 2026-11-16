@@ -94,7 +94,7 @@ export async function main(argv = process.argv.slice(2), options: { html?: strin
       return 0;
     }
     if (command === "find" && args.length) {
-      const { total, results } = await catalog.find(args.join(" "), n);
+      const { total, results } = await catalog.find({ terms: [args.join(" ")] }, n);
       reportSources(catalog);
       if (json) { console.log(JSON.stringify({ total, results: results.map((row) => withResumeCommand(row)) }, null, 2)); return 0; }
       if (!results.length) { console.log("没有匹配的 session"); return 0; }

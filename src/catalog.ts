@@ -20,12 +20,13 @@ import type { Stats } from "node:fs";
 import { open } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import packageJson from "../package.json" with { type: "json" };
-import { isStatus, type EventKind, type LineageEdge, type LineageRefresh, type ManualLineageEdge, type MarkPatch, type Session, type SessionStatus, type SourceDiagnostic, type Tool, type Transcript, type TranscriptMessage } from "./contracts.ts";
+import { isStatus, type EventKind, type LineageEdge, type MatchKind, type MatchSummary, type SearchCoverage, type SearchHit, type SessionEvent, type LineageRefresh, type ManualLineageEdge, type MarkPatch, type Session, type SessionStatus, type SourceDiagnostic, type Tool, type Transcript, type TranscriptMessage } from "./contracts.ts";
 import { LineageIndex } from "./lineage.ts";
 import { homeDirectory, userDataDirectory } from "./paths.ts";
 import { archiveAction } from "./resume.ts";
 import { readSources, realContained, realPath, withRealpathMemo, type ArchiveSource } from "./sources.ts";
 import { sourceCopy } from "./sourceCopy.ts";
+import { BestHits, clip, matchedTerms, mergeWindows, metaHits, parseTerms, rgPatterns, tally, type Term, type ThreadTally } from "./search.ts";
 
 const MIN_SIZE = 2048;
 const MAX_HEAD_LINES = 400;
@@ -121,6 +122,59 @@ export interface CatalogOptions {
   codexPath?: string | null;
   now?: () => Date;
   sourcesFile?: string;
+}
+
+export interface SessionQuery {
+  /** AND; each term is a case-insensitive literal substring. */
+  terms: string[];
+  /** Epoch seconds; a Session passes when [birth, mtime] overlaps [since, until]. */
+  since?: number;
+  until?: number;
+  tools?: Tool[];
+  /** Absolute path; a Session passes when its cwd is this path or below it. */
+  cwd?: string;
+  exclude?: string[];
+}
+
+type ScanFile = { path: string; child?: ChildEntry };
+type Owner = { row?: Session; orphan?: ChildEntry; meta?: ReturnType<typeof metaHits>; files: ScanFile[] };
+
+const RG_BATCH = 128;
+const RG_CONCURRENCY = 8;
+
+/** One `rg -l` per term and batch, at most RG_CONCURRENCY at a time; returns the matching paths per term. */
+async function grepTerms(rg: string, terms: Term[], paths: string[]): Promise<Set<string>[]> {
+  const found = terms.map(() => new Set<string>());
+  const jobs = terms.flatMap((term, index) => Array.from({ length: Math.ceil(paths.length / RG_BATCH) },
+    (_, batch) => ({ index, patterns: rgPatterns(term), paths: paths.slice(batch * RG_BATCH, (batch + 1) * RG_BATCH) })));
+  let next = 0;
+  await Promise.all(Array.from({ length: Math.min(RG_CONCURRENCY, jobs.length) }, async () => {
+    while (next < jobs.length) {
+      const job = jobs[next++]!;
+      if (!job.patterns.length) continue;
+      const child = Bun.spawn([rg, "-i", "-F", "-l", "--null", "--no-messages", "--no-ignore", "--hidden",
+        ...job.patterns.flatMap((pattern) => ["-e", pattern]), "--", ...job.paths], { stdout: "pipe", stderr: "pipe" });
+      const [stdout, stderr, exitCode] = await Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited]);
+      if (exitCode > 1) throw new CatalogError("search_failed", stderr.trim() || "ripgrep 搜索失败");
+      for (const path of stdout.split("\0")) if (path) found[job.index]!.add(path);
+    }
+  }));
+  return found;
+}
+
+function childEventsOf(child: ChildEntry): RawEvent[] {
+  if (child.kind === "agent") return child.adapter.childEvents(child.path);
+  const lines = readFileSync(child.path, "utf8").split(/\r?\n/);
+  if (lines.at(-1) === "") lines.pop();
+  return lines.map((text) => ({ kind: "tool_output", text, timestamp: "" }));
+}
+
+function headCwd(path: string): string {
+  for (const line of readHeadLines(path, 20)) {
+    const record = parseRecord(line), cwd = stringValue(record?.cwd) || (isRecord(record?.payload) ? stringValue(record.payload.cwd) : "");
+    if (cwd) return cwd;
+  }
+  return "";
 }
 
 export class CatalogError extends Error {
@@ -1207,39 +1261,74 @@ export class SessionCatalog {
     if (kept.length !== manual.length) atomicWrite(this.manualLineageFile, JSON.stringify(kept, null, 1));
   }
 
-  async find(keyword: string, limit = 20): Promise<{ total: number; results: (Session & { snippet: string })[] }> {
+  /**
+   * Sessions whose meta fields, main thread and child threads together contain every term (case-insensitive literal).
+   * Every file with a raw hit whose owner has every term is attributed to a result or counted in coverage.
+   */
+  async find(query: SessionQuery, limit = 20): Promise<{ total: number; results: (Session & { snippet: string; match: MatchSummary })[]; coverage: SearchCoverage }> {
     const rg = this.rgPath === undefined ? Bun.which("rg") : this.rgPath;
     if (!rg) throw new CatalogError("missing_rg", "需要 ripgrep (rg)，请安装并加入 PATH");
-    const query = keyword.trim();
-    if (!query) return { total: 0, results: [] };
-    const rows = await this.list({ fresh: true });
-    const indexed = new Map(rows.map((session) => [realpathSync(session.source_path), session]));
-    const hits = new Map<string, Session & { snippet: string }>();
-    for (const session of rows) {
-      const summary = [session.name, session.star_note, session.first_msg, session.id, session.session_id ?? "", session.source_path].find((value) => value.toLowerCase().includes(query.toLowerCase()));
-      if (summary) hits.set(session.id, { ...session, snippet: matchSnippet(summary, query) });
-    }
-    const paths = rows.map((row) => row.source_path);
-    if (paths.length) {
-      const patterns = [...new Set([query, JSON.stringify(query).slice(1, -1)]
-        .filter((pattern) => !pattern.includes("\n") && !pattern.includes("\r")))];
-      for (let offset = 0; offset < paths.length; offset += 128) {
-        const processResult = Bun.spawnSync([rg, "-i", "-F", "-l", "--null", "--no-messages", "--no-ignore", "--hidden",
-          ...patterns.flatMap((pattern) => ["-e", pattern]), "--", ...paths.slice(offset, offset + 128)]);
-        if (processResult.exitCode > 1)
-          throw new CatalogError("search_failed", processResult.stderr.toString().trim() || "ripgrep 搜索失败");
-        for (const path of processResult.stdout.toString().split("\0").filter(Boolean)) {
-          const session = indexed.get(realpathSync(path));
-          if (!session || hits.has(session.id)) continue;
-          const location = this.location(session.id);
-          const message = transcriptOf(location.adapter.events(location.originalId, location.path))
-            .find(({ text }) => text.toLowerCase().includes(query.toLowerCase()));
-          if (message) hits.set(session.id, { ...session, snippet: matchSnippet(message.text, query) });
-        }
+    const terms = parseTerms(query.terms);
+    const coverage: SearchCoverage = { scanned_files: 0, candidate_files: 0, unclassified_files: 0, injected_only_files: 0, orphan_files: 0, orphans: [] };
+    if (!terms.length) return { total: 0, results: [], coverage };
+    const all = await this.list({ fresh: true });
+    const index = await withRealpathMemo(() => this.childIndex());
+    const inRange = (birth: number, mtime: number) => (query.since === undefined || mtime >= query.since) && (query.until === undefined || birth <= query.until);
+    const prefix = query.cwd && (query.cwd.endsWith(sep) ? query.cwd : query.cwd + sep);
+    const underCwd = (cwd: string) => !query.cwd || cwd === query.cwd || cwd.startsWith(prefix!);
+    const toolAllowed = (tool: Tool) => !query.tools?.length || query.tools.includes(tool);
+    const owners: Owner[] = [];
+    for (const row of all) if (inRange(row.birth, row.mtime) && toolAllowed(row.tool) && underCwd(row.cwd) && !query.exclude?.includes(row.id))
+      owners.push({ row, meta: metaHits(row, terms), files: [{ path: row.source_path }, ...(index.children.get(row.id) ?? []).map((child) => ({ path: child.path, child }))] });
+    for (const child of index.orphans) if (inRange(child.mtime, child.mtime) && toolAllowed(child.adapter.tool) && underCwd(headCwd(child.path)))
+      owners.push({ orphan: child, files: [{ path: child.path, child }] });
+    const paths = owners.flatMap((owner) => owner.files.map((file) => file.path));
+    coverage.scanned_files = paths.length;
+    const raw = await grepTerms(rg, terms, paths);
+    const results: (Session & { snippet: string; match: MatchSummary })[] = [];
+    for (const owner of owners) {
+      if (!terms.every((_, term) => owner.meta?.seen.has(term) || owner.files.some((file) => raw[term]!.has(file.path)))) continue;
+      const candidates = owner.files.filter((file) => terms.some((_, term) => raw[term]!.has(file.path)));
+      coverage.candidate_files += candidates.length;
+      const best = new BestHits(), seen = new Set(owner.meta?.seen), injected = new Set<number>();
+      owner.meta?.hits.forEach((hit) => best.add(hit, matchedTerms(hit.snippet, terms).length));
+      let main: ThreadTally | undefined;
+      const threads: MatchSummary["threads"] = [];
+      for (const file of candidates) {
+        let events: RawEvent[];
+        try { events = file.child ? childEventsOf(file.child) : this.mainEvents(owner.row!); }
+        catch (error) { if (error instanceof CatalogError || isRecord(error) && "code" in error) continue; throw error; }
+        const thread = file.child?.thread ?? "main", counts = tally(events, terms, thread, best);
+        counts.seen.forEach((term) => seen.add(term));
+        counts.injected.forEach((term) => injected.add(term));
+        if (!file.child) main = counts;
+        else if (counts.hits) threads.push({ thread, label: file.child.adapter.childLabel(file.child), hits: counts.hits });
       }
+      const complete = (found: Set<number>) => terms.every((_, term) => found.has(term));
+      if (!complete(seen)) {
+        if (complete(new Set([...seen, ...injected]))) coverage.injected_only_files += candidates.length;
+        else coverage.unclassified_files += candidates.length;
+        continue;
+      }
+      if (owner.orphan) {
+        coverage.orphan_files++;
+        coverage.orphans.push({ path: owner.orphan.path, label: owner.orphan.adapter.childLabel(owner.orphan), hits: threads[0]?.hits ?? 0 });
+        continue;
+      }
+      const row = owner.row!, metaFields = owner.meta!.hits.map((hit) => hit.kind === "meta" ? hit.field : "");
+      const counts: Record<MatchKind, number> = { user: 0, assistant: 0, thinking: 0, tool_call: 0, tool_output: 0, ...main?.counts, meta: metaFields.length };
+      const tier = metaFields.some((field) => ["name", "star_note", "first_msg"].includes(field)) || counts.user ? 1 : counts.assistant ? 2 : 3;
+      const hits = best.hits;
+      results.push({ ...row, snippet: hits[0]?.snippet ?? "", match: { tier, counts, threads, best: hits } });
     }
-    const sorted = [...hits.values()].sort(compareSessions);
-    return { total: sorted.length, results: sorted.slice(0, limit) };
+    coverage.orphans = coverage.orphans.sort((left, right) => right.hits - left.hits).slice(0, 5);
+    results.sort((left, right) => left.match.tier - right.match.tier || compareSessions(left, right));
+    return { total: results.length, results: results.slice(0, limit), coverage };
+  }
+
+  private mainEvents(row: Session): RawEvent[] {
+    const location = this.location(row.id);
+    return location.adapter.events(location.originalId, location.path);
   }
 
   async resolve(prefix: string): Promise<Session> {
@@ -1585,12 +1674,4 @@ export class SessionCatalog {
     if (!session) throw new CatalogError("not_found", `没有 session 匹配 '${id}'`);
     return session;
   }
-}
-
-function matchSnippet(value: string, query: string): string {
-  const text = value.replace(/\s+/g, " ").trim();
-  const index = text.toLowerCase().indexOf(query.toLowerCase());
-  if (index < 0) return oneLine(text, 100);
-  const start = Math.max(0, index - 40), end = Math.min(text.length, index + query.length + 60);
-  return `${start ? "…" : ""}${text.slice(start, end)}${end < text.length ? "…" : ""}`;
 }

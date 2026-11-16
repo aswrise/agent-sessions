@@ -69,7 +69,7 @@ export function startServer(options: ServerOptions): Bun.Server<undefined> {
           if (!query) throw new RequestError(400, "缺少 q");
           const rawLimit = url.searchParams.get("limit"), limit = rawLimit === null ? Number.MAX_SAFE_INTEGER : Number(rawLimit);
           if (!Number.isSafeInteger(limit) || limit < 1) throw new RequestError(400, "limit 必须是正整数");
-          const result = await catalog.find(query, limit);
+          const result = await catalog.find({ terms: [query] }, limit);
           return json({ ...result, results: result.results.map((session) => withResumeCommand(session, platform)) });
         }
         if (request.method === "GET" && url.pathname === "/api/session") {

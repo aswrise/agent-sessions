@@ -80,8 +80,12 @@ describe("Bun HTTP seam", () => {
     expect(response.status).toBe(200);
     expect(await response.json()).toMatchObject({
       total: 1,
-      results: [{ id: "codex-b", snippet: "fixture-assistant-codex", resume_command: "cd -- /tmp/beta && codex resume codex-b -m gpt-fixture -c 'model_reasoning_effort=\"high\"'" }],
+      results: [{ id: "codex-b", snippet: "fixture-assistant-codex", resume_command: "cd -- /tmp/beta && codex resume codex-b -m gpt-fixture -c 'model_reasoning_effort=\"high\"'",
+        match: { tier: 2, best: [{ kind: "assistant", thread: "main", snippet: "fixture-assistant-codex" }] } }],
+      coverage: { candidate_files: 1, unclassified_files: 0 },
     });
+    const phrase = await (await fetch(base + "/api/search?q=" + encodeURIComponent("fixture-user-claude fixture-child-output"))).json();
+    expect(phrase.total).toBe(0);
     expect(await (await fetch(base + "/api/lineages")).json()).toEqual({ sessions: [], edges: [] });
     expect((await fetch(base + "/api/search")).status).toBe(400);
     expect((await fetch(base + "/api/search?q=fixture&limit=0")).status).toBe(400);

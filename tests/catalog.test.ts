@@ -42,7 +42,7 @@ describe("SessionCatalog", () => {
 
   test("search excludes malformed, tiny, and Codex subagent files", async () => {
     const { catalog } = setup();
-    const found = await catalog.find("fixture", 2);
+    const found = await catalog.find({ terms: ["fixture"] }, 2);
     expect(found.total).toBe(3);
     expect(found.results.map((result) => result.id)).toEqual([
       "pi-c", "codex-b",
@@ -67,21 +67,103 @@ describe("SessionCatalog", () => {
     expect(index.orphans.map(({ path }) => path)).toEqual([join(home, ".codex/sessions/2026/07/14/rollout-subagent.jsonl")]);
   });
 
+  test("finds Sessions whose only hit is a tool call or tool output, for every tool", async () => {
+    const { home, catalog } = setup();
+    const append = (path: string, records: unknown[]) => appendFileSync(join(home, path), records.map((record) => JSON.stringify(record)).join("\n") + "\n");
+    append(".claude/projects/-tmp-alpha/claude-a.jsonl", [
+      { type: "assistant", timestamp: "t1", message: { role: "assistant", content: [{ type: "thinking", thinking: "" }, { type: "tool_use", id: "u1", name: "Bash", input: { command: "launchctl print claude-call-needle" } }] } },
+      { type: "user", timestamp: "t2", message: { role: "user", content: [{ type: "tool_result", tool_use_id: "u1", content: [{ type: "text", text: "claude-output-needle" }] }] }, toolUseResult: { stdout: "claude-output-needle" } },
+    ]);
+    append(".codex/sessions/2026/07/14/rollout-codex-b.jsonl", [
+      { type: "response_item", timestamp: "t1", payload: { type: "custom_tool_call", name: "exec", input: "tools.exec_command({cmd:'codex-call-needle'})", call_id: "c" } },
+      { type: "event_msg", timestamp: "t2", payload: { type: "item_completed", item: { type: "CommandExecution", command: ["/bin/zsh", "-lc", "ls"], aggregated_output: "codex-command-needle" } } },
+      { type: "event_msg", timestamp: "t3", payload: { type: "item_completed", item: { type: "McpToolCall", server: "browser", tool: "open", arguments: { url: "codex-mcp-needle" }, result: { content: [{ type: "text", text: "ok" }] } } } },
+      { type: "event_msg", timestamp: "t4", payload: { type: "item_completed", item: { type: "AgentMessage", text: "codex-duplicate-needle" } } },
+    ]);
+    append(".pi/agent/sessions/-tmp-gamma/pi-c.jsonl", [
+      { type: "message", timestamp: "t1", message: { role: "assistant", content: [{ type: "toolCall", id: "p", name: "bash", arguments: { command: "pi-call-needle" } }] } },
+      { type: "message", timestamp: "t2", message: { role: "toolResult", toolCallId: "p", toolName: "bash", content: [{ type: "text", text: "pi-output-needle" }] } },
+    ]);
+    const hit = async (term: string) => {
+      const { results } = await catalog.find({ terms: [term] });
+      return results.map(({ id, match }) => ({ id, tier: match.tier, best: match.best[0] && { kind: match.best[0].kind, ...(match.best[0].kind === "meta" ? {} : { tool: match.best[0].tool }) } }));
+    };
+    expect(await hit("claude-call-needle")).toEqual([{ id: "claude-a", tier: 3, best: { kind: "tool_call", tool: "Bash" } }]);
+    expect(await hit("claude-output-needle")).toEqual([{ id: "claude-a", tier: 3, best: { kind: "tool_output", tool: undefined } }]);
+    expect(await hit("codex-call-needle")).toEqual([{ id: "codex-b", tier: 3, best: { kind: "tool_call", tool: "exec" } }]);
+    expect(await hit("codex-command-needle")).toEqual([{ id: "codex-b", tier: 3, best: { kind: "tool_output", tool: "command" } }]);
+    expect(await hit("codex-mcp-needle")).toEqual([{ id: "codex-b", tier: 3, best: { kind: "tool_output", tool: "browser.open" } }]);
+    expect(await hit("pi-call-needle")).toEqual([{ id: "pi-c", tier: 3, best: { kind: "tool_call", tool: "bash" } }]);
+    expect(await hit("pi-output-needle")).toEqual([{ id: "pi-c", tier: 3, best: { kind: "tool_output", tool: "bash" } }]);
+    const duplicate = await catalog.find({ terms: ["codex-duplicate-needle"] });
+    expect(duplicate.results).toEqual([]);
+    expect(duplicate.coverage).toMatchObject({ candidate_files: 1, unclassified_files: 1 });
+  });
+
+  test("ANDs terms across a Session, its child threads, and offloaded tool results", async () => {
+    const { home, catalog } = setup();
+    const split = await catalog.find({ terms: ["fixture-user-claude", "FIXTURE-CHILD-OUTPUT"] });
+    expect(split.results.map(({ id, match }) => ({ id, tier: match.tier, threads: match.threads }))).toEqual([
+      { id: "claude-a", tier: 1, threads: [{ thread: "sub1", label: "Find launch agent", hits: 1 }] },
+    ]);
+    expect((await catalog.find({ terms: ["fixture-child-output", "fixture-user-codex"] })).results).toEqual([]);
+
+    const offloaded = await catalog.find({ terms: ["fixture-offloaded-result"] });
+    expect(offloaded.results[0]!.match.best[0]).toMatchObject({ kind: "tool_output", thread: "toolu_big.txt", ordinal: 1 });
+    expect((await catalog.find({ terms: ["fixture-grandkid-text"] })).results.map(({ id, match }) => [id, match.threads])).toEqual([
+      ["codex-b", [{ thread: "codex-grandkid", label: "/root/kid/grand", hits: 1 }]],
+    ]);
+
+    const orphan = await catalog.find({ terms: ["fixture-subagent-secret"] });
+    expect(orphan.results).toEqual([]);
+    expect(orphan.coverage).toMatchObject({ orphan_files: 1, orphans: [{ path: join(home, ".codex/sessions/2026/07/14/rollout-subagent.jsonl"), label: "codex-child", hits: 1 }] });
+  });
+
+  test("counts injected-only and unprojected hits instead of dropping them", async () => {
+    const { home, catalog } = setup();
+    appendFileSync(join(home, ".claude/projects/-tmp-alpha/claude-a.jsonl"), JSON.stringify({
+      type: "user", message: { role: "user", content: "# AGENTS.md instructions\ninjected-needle" },
+    }) + "\n");
+    const injected = await catalog.find({ terms: ["injected-needle"] });
+    expect(injected.results).toEqual([]);
+    expect(injected.coverage).toMatchObject({ candidate_files: 1, injected_only_files: 1, unclassified_files: 0 });
+
+    const padding = await catalog.find({ terms: ["x".repeat(50)] });
+    expect(padding.results).toEqual([]);
+    const { coverage } = padding;
+    expect(coverage.candidate_files).toBe(coverage.unclassified_files + coverage.injected_only_files + coverage.orphan_files);
+    // Every padded JSONL file: three rows, three Codex threads, one Claude subagent; the offloaded .txt has no padding.
+    expect(coverage).toMatchObject({ scanned_files: 8, candidate_files: 7 });
+  });
+
+  test("filters by time, tool, cwd, and excluded ids before scanning", async () => {
+    const { catalog } = setup();
+    const ids = async (query: Partial<Parameters<typeof catalog.find>[0]>) =>
+      (await catalog.find({ terms: ["fixture"], ...query }, 10)).results.map(({ id }) => id);
+    const rows = await catalog.list({ fresh: true }), codex = rows.find(({ id }) => id === "codex-b")!;
+    expect(await ids({ tools: ["codex", "pi"] })).toEqual(["pi-c", "codex-b"]);
+    expect(await ids({ cwd: "/tmp/beta" })).toEqual(["codex-b"]);
+    expect(await ids({ cwd: "/tmp/bet" })).toEqual([]);
+    expect(await ids({ exclude: ["pi-c"] })).toEqual(["codex-b", "claude-a"]);
+    expect(await ids({ since: 150 })).toEqual(["pi-c", "codex-b"]);
+    expect(await ids({ since: 150, until: codex.birth })).toEqual(["codex-b"]);
+  });
+
   test("deep search combines summary fields with readable Transcript text", async () => {
     const { home, catalog } = setup();
     appendFileSync(join(home, ".claude/projects/-tmp-alpha/claude-a.jsonl"), JSON.stringify({
       type: "assistant", sessionId: "claude-a", message: { role: "assistant", content: "special \"quoted\" C:\\temp\nnext" },
     }) + "\n");
-    expect((await catalog.find("LEGACY NOTE")).results.map(({ id }) => id)).toEqual(["claude-a"]);
-    expect((await catalog.find("CODEX-B")).results.map(({ id }) => id)).toContain("codex-b");
+    expect((await catalog.find({ terms: ["LEGACY NOTE"] })).results.map(({ id }) => id)).toEqual(["claude-a"]);
+    expect((await catalog.find({ terms: ["CODEX-B"] })).results.map(({ id }) => id)).toContain("codex-b");
     const rollout = (await catalog.list()).find(({ id }) => id === "codex-b")!;
-    expect((await catalog.find(basename(rollout.source_path, ".jsonl"))).results.map(({ id }) => id)).toContain("codex-b");
-    expect((await catalog.find("FIXTURE-ASSISTANT-CODEX")).results.map(({ id }) => id)).toEqual(["codex-b"]);
-    expect((await catalog.find("\"quoted\"")).results.map(({ id }) => id)).toEqual(["claude-a"]);
-    expect((await catalog.find(String.raw`C:\temp`)).results.map(({ id }) => id)).toEqual(["claude-a"]);
-    expect((await catalog.find("temp\nnext")).results.map(({ id }) => id)).toEqual(["claude-a"]);
-    expect((await catalog.find("fixture-user-[codex")).results).toEqual([]);
-    expect((await catalog.find("x".repeat(50))).results).toEqual([]);
+    expect((await catalog.find({ terms: [basename(rollout.source_path, ".jsonl")] })).results.map(({ id }) => id)).toContain("codex-b");
+    expect((await catalog.find({ terms: ["FIXTURE-ASSISTANT-CODEX"] })).results.map(({ id }) => id)).toEqual(["codex-b"]);
+    expect((await catalog.find({ terms: ["\"quoted\""] })).results.map(({ id }) => id)).toEqual(["claude-a"]);
+    expect((await catalog.find({ terms: [String.raw`C:\temp`] })).results.map(({ id }) => id)).toEqual(["claude-a"]);
+    expect((await catalog.find({ terms: ["temp\nnext"] })).results.map(({ id }) => id)).toEqual(["claude-a"]);
+    expect((await catalog.find({ terms: ["fixture-user-[codex"] })).results).toEqual([]);
+    expect((await catalog.find({ terms: ["x".repeat(50)] })).results).toEqual([]);
   });
 
   test("refreshes names and marks without reparsing unchanged metadata", async () => {
