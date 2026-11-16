@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, describe, expect, test } from "bun:test";
@@ -7,11 +7,17 @@ import { SessionCatalog } from "../src/catalog.ts";
 const TERMS = ["zeta7", "quux9", "say\"hi", "c:\\tmp9", "召回词", "Kappa3"];
 type Placement = "projected" | "injected" | "noise";
 type Tool = "claude" | "codex" | "pi";
-type GeneratedFile = { path: string; placed: Map<string, Set<Placement>> };
-type GeneratedOwner = { id?: string; orphan: boolean; files: GeneratedFile[] };
+type GeneratedFile = { path: string; placed: Map<string, Set<Placement>>; unreadable?: true };
+type GeneratedOwner = { id?: string; orphan: boolean; threads: GeneratedFile[][] };
 
+const SEEDS = Number(process.env.RECALL_SEEDS ?? 6);
 const roots: string[] = [];
-afterEach(() => roots.splice(0).forEach((root) => rmSync(root, { recursive: true, force: true })));
+const locked: string[] = [];
+const cleanup = () => {
+  locked.splice(0).forEach((path) => chmodSync(path, 0o644));
+  roots.splice(0).forEach((root) => rmSync(root, { recursive: true, force: true }));
+};
+afterEach(cleanup);
 
 function prng(seed: number): () => number {
   return () => {
@@ -71,15 +77,26 @@ function generate(seed: number): { home: string; owners: GeneratedOwner[] } {
   }).map((record) => JSON.stringify(record));
   const padding = JSON.stringify({ padding: "p".repeat(2100) });
   for (let index = 0; index < 10; index++) {
-    const tool = pick(["claude", "codex", "pi"] as const), id = `s${seed}x${serial++}`, owner: GeneratedOwner = { id, orphan: false, files: [] };
+    const tool = pick(["claude", "codex", "pi"] as const), id = `s${seed}x${serial++}`, owner: GeneratedOwner = { id, orphan: false, threads: [[]] };
     const main: GeneratedFile = { path: "", placed: new Map() };
-    owner.files.push(main);
+    owner.threads[0]!.push(main);
     if (tool === "claude") {
       main.path = join(home, ".claude/projects/-tmp-p", `${id}.jsonl`);
       write(main.path, [JSON.stringify({ type: "system", sessionId: id, cwd: "/tmp/p" }), ...records("claude", main), padding]);
     } else if (tool === "codex") {
       main.path = join(home, ".codex/sessions/2026/07/14", `rollout-${id}.jsonl`);
-      write(main.path, [JSON.stringify({ type: "session_meta", payload: { id, cwd: "/tmp/p" } }), ...records("codex", main), padding]);
+      const meta: Record<string, unknown> = { id, cwd: "/tmp/p" };
+      if (random() < 0.3) {
+        // The older segment is a row of its own and also part of the continuing row's main thread, up to end_byte_offset.
+        const older: GeneratedFile = { path: join(home, ".codex/sessions/2026/07/14", `rollout-${id}o.jsonl`), placed: new Map() };
+        const body = [JSON.stringify({ type: "session_meta", payload: { id: `${id}o`, cwd: "/tmp/p" } }), ...records("codex", older)].join("\n") + "\n";
+        mkdirSync(dirname(older.path), { recursive: true });
+        writeFileSync(older.path, body + padding + "\n");
+        meta.history_base = { thread_id: `${id}o`, end_byte_offset: Buffer.byteLength(body) };
+        owner.threads[0]!.push(older);
+        owners.push({ id: `${id}o`, orphan: false, threads: [[older]] });
+      }
+      write(main.path, [JSON.stringify({ type: "session_meta", payload: meta }), ...records("codex", main), padding]);
     } else {
       main.path = join(home, ".pi/agent/sessions/-tmp-p", `${id}.jsonl`);
       write(main.path, [JSON.stringify({ type: "session", id, cwd: "/tmp/p" }), ...records("pi", main), padding]);
@@ -87,8 +104,7 @@ function generate(seed: number): { home: string; owners: GeneratedOwner[] } {
     owners.push(owner);
     for (let child = 0; tool !== "pi" && child < Math.floor(random() * 3); child++) {
       const orphan = random() < 0.3, parent = orphan ? `gone${serial++}` : id, file: GeneratedFile = { path: "", placed: new Map() };
-      const target = orphan ? { orphan: true, files: [file] } : owner;
-      if (orphan) owners.push(target); else owner.files.push(file);
+      if (orphan) owners.push({ orphan: true, threads: [[file]] }); else owner.threads.push([file]);
       if (tool === "codex") {
         file.path = join(home, ".codex/sessions/2026/07/14", `rollout-kid${serial++}.jsonl`);
         write(file.path, [JSON.stringify({ type: "session_meta", payload: { id: `kid${serial++}`, thread_source: "subagent", parent_thread_id: parent } }), ...records("codex", file)]);
@@ -99,57 +115,67 @@ function generate(seed: number): { home: string; owners: GeneratedOwner[] } {
         file.path = join(home, ".claude/projects/-tmp-p", parent, "tool-results", `r${serial++}.txt`);
         write(file.path, ["plain", plant(file, "projected"), "tail"]);
       }
+      if (random() < 0.15) {
+        chmodSync(file.path, 0); locked.push(file.path); file.unreadable = true;
+        // A Codex child names its parent inside the file, so an unreadable one belongs to no Session.
+        if (tool === "codex" && !orphan) { owner.threads.pop(); owners.push({ orphan: true, threads: [[file]] }); }
+      }
     }
   }
   return { home, owners };
 }
 
 /** The naive oracle: does the file's bytes contain the term, as written or JSON-escaped, ignoring case? */
-function rawContains(path: string, term: string): boolean {
-  const text = readFileSync(path, "utf8").toLowerCase();
+function rawContains(file: GeneratedFile, term: string): boolean {
+  if (file.unreadable) return true;
+  const text = readFileSync(file.path, "utf8").toLowerCase();
   return [term, JSON.stringify(term).slice(1, -1)].some((form) => text.includes(form.toLowerCase()));
 }
 
 describe("find recall property", () => {
   test("attributes or counts every raw hit and returns exactly the Sessions whose readable events hold every term", async () => {
-    for (const seed of [1, 2, 3, 4, 5, 6]) {
+    for (let seed = Number(process.env.RECALL_FROM ?? 1); seed <= SEEDS; seed++) {
       const { home, owners } = generate(seed), catalog = new SessionCatalog({ home });
       const random = prng(seed * 7919);
       for (let round = 0; round < 6; round++) {
-        const terms = TERMS.filter(() => random() < 0.3).slice(0, 2);
+        const terms = TERMS.filter(() => random() < 0.3).slice(0, 3);
         if (!terms.length) terms.push(TERMS[round % TERMS.length]!);
         const { results, coverage } = await catalog.find({ terms }, 1000);
-        const has = (owner: GeneratedOwner, placements: Placement[]) => terms.every((term) =>
-          owner.files.some((file) => placements.some((placement) => file.placed.get(term)?.has(placement))));
-        const rawOwner = (owner: GeneratedOwner) => terms.every((term) => owner.files.some((file) => rawContains(file.path, term)));
-        const candidateFiles = (owner: GeneratedOwner) => owner.files.filter((file) => terms.some((term) => rawContains(file.path, term)));
-        const candidates = (owner: GeneratedOwner) => candidateFiles(owner).length;
-        const projectsAny = (file: GeneratedOwner["files"][number]) => terms.some((term) => file.placed.get(term)?.has("projected"));
         const label = `seed ${seed} terms ${JSON.stringify(terms)}`;
-
-        const expected = owners.filter((owner) => !owner.orphan && has(owner, ["projected"])).map((owner) => owner.id).sort();
-        expect(results.map(({ id }) => id).sort(), label).toEqual(expected as string[]);
-        const failed = owners.filter((owner) => rawOwner(owner) && !has(owner, ["projected"]));
+        const touched = (file: GeneratedFile) => terms.some((term) => rawContains(file, term));
+        const termsIn = (files: GeneratedFile[], placements: Placement[]) => new Set(terms.filter((term) =>
+          files.some((file) => !file.unreadable && placements.some((placement) => file.placed.get(term)?.has(placement)))));
+        const expected = { results: [] as string[], orphan_files: 0, injected_only_files: 0, partial_files: 0, unclassified_files: 0, unreadable_files: 0, candidate_files: 0 };
+        for (const owner of owners) {
+          if (!terms.every((term) => owner.threads.flat().some((file) => rawContains(file, term)))) continue;
+          const read = owner.threads.map((files) => files.filter(touched)).filter((files) => files.length);
+          const readable = read.filter((files) => !files.some((file) => file.unreadable));
+          const seen = termsIn(readable.flat(), ["projected"]), any = termsIn(readable.flat(), ["projected", "injected"]);
+          for (const files of read) {
+            expected.candidate_files += files.length;
+            if (!readable.includes(files)) expected.unreadable_files += files.length;
+            else if (seen.size === terms.length) { if (owner.orphan) expected.orphan_files += files.length; }
+            else if (any.size === terms.length) expected.injected_only_files += files.length;
+            else if (termsIn(files, ["projected"]).size) expected.partial_files += files.length;
+            else expected.unclassified_files += files.length;
+          }
+          if (seen.size === terms.length && !owner.orphan) expected.results.push(owner.id!);
+        }
         expect({
+          results: results.map(({ id }) => id).sort(),
           orphan_files: coverage.orphan_files,
           injected_only_files: coverage.injected_only_files,
           partial_files: coverage.partial_files,
           unclassified_files: coverage.unclassified_files,
           unreadable_files: coverage.unreadable_files,
-        }, label).toEqual({
-          orphan_files: owners.filter((owner) => owner.orphan && has(owner, ["projected"])).length,
-          injected_only_files: failed.filter((owner) => has(owner, ["projected", "injected"])).reduce((sum, owner) => sum + candidates(owner), 0),
-          partial_files: failed.filter((owner) => !has(owner, ["projected", "injected"])).reduce((sum, owner) => sum + candidateFiles(owner).filter(projectsAny).length, 0),
-          unclassified_files: failed.filter((owner) => !has(owner, ["projected", "injected"])).reduce((sum, owner) => sum + candidateFiles(owner).filter((file) => !projectsAny(file)).length, 0),
-          unreadable_files: 0,
-        });
-        const attributed = owners.filter((owner) => results.some(({ id }) => id === owner.id)).reduce((sum, owner) => sum + candidates(owner), 0);
-        expect(coverage.candidate_files, label).toBe(attributed + coverage.orphan_files + coverage.injected_only_files + coverage.partial_files + coverage.unclassified_files);
-        for (const owner of owners) for (const file of owner.files) if (terms.every((term) => rawContains(file.path, term)))
-          expect(results.some(({ id }) => id === owner.id) || failed.includes(owner) || owner.orphan, label).toBe(true);
-        for (const result of results)
-          expect(rawOwner(owners.find((owner) => owner.id === result.id)!), label).toBe(true);
+          candidate_files: coverage.candidate_files,
+        }, label).toEqual({ ...expected, results: expected.results.sort() });
+        for (const result of results) {
+          const owner = owners.find(({ id }) => id === result.id)!;
+          expect(terms.every((term) => owner.threads.flat().some((file) => !file.unreadable && rawContains(file, term))), label).toBe(true);
+        }
       }
+      cleanup();
     }
   });
 });
