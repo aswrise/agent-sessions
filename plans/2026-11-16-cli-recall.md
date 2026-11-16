@@ -174,15 +174,18 @@ sessions show <id前缀> --at [<thread>:]<n>[-<m>] [-C 0] [--chars 300] [--json]
 - 设了 `--cwd` 时孤儿按头部 `cwd` 过滤。没有 `cwd` 的孤儿（Claude `tool-results/*.txt`）会被过滤掉。
 - 归档 Codex 里只靠 SQLite 判定为子线程、头部没有 `parent_thread_id` 的文件，计为孤儿。
 - 候选文件整文件读入再投影，内存上限按单个文件算，没有流式解析。rg 只输出 `-l` 路径，按批收集。
-- 工具调用多的 Session，`show <id> <词>` 可能比整段 `show` 还大：实测 `01a1cc0e` 的 `launchctl` 窗口 9.0K 字符，整段 Transcript 6.4K。窗口里有 Transcript 不含的工具证据（14 处命中）。
+- 工具调用多的 Session，`show <id> <词>` 可能比整段 `show` 还大：实测 `01a1cc0e` 的 `launchctl` 窗口 9.0K 字符，整段 Transcript 6.4K。窗口里有 Transcript 不含的工具证据（14 处命中）。另一个原因是 `CommandExecution` 的文本以命令开头，裁剪落在同一条 `launchctl` 命令上，`#300`–`#303` 重复显示这条命令，没有显示输出。
+- 未解决的漏召回：Codex 把同一线程续写成多个 rollout 文件（`rollout-…-<id>.jsonl`、`rollout-…-<id>_<段id>.jsonl`），头部没有 `history_base`。live 去重只留最新的文件作为 row，较早的分段既不扫描，也不进 `detail()`。这是 row 建模的既有行为，不是本次引入的。根目录 rg 对账发现：`ModuleNotFoundError` 漏掉 Session `01a1c889`，`installed.json` 漏掉 `01a1c970`，因为词只出现在较早的分段里。
 
 真实数据（2026-11-16，编译后的 `build/sessions`，真实 HOME，第二次运行计时；默认结果排除了调用者自己的 Session，`--self` 一列包含它）：
 
-| 词 | find 结果数（默认 / --self） | coverage：扫描 / 候选 / 未归类 / 仅注入 / 孤儿 | 耗时 | stdout / stderr 字节 | 旧 find：结果数、耗时、stdout / stderr 字节 |
-|---|---|---|---|---|---|
-| launchctl | 10 / 11 | 7683 / 11 / 0 / 0 / 1 | 1.95s | 2856 / 0 | 1，1.84s，387 / 3809 |
-| ModuleNotFoundError | 39 / 40 | 7683 / 41 / 0 / 0 / 0 | 2.24s | 4734 / 0 | 1，2.14s，499 / 3809 |
-| installed.json | 5 / 6 | 7683 / 5 / 0 / 0 / 0 | 2.01s | 1252 / 0 | 1，1.79s，468 / 3809 |
-| herdr_task | 3 / 4 | 7683 / 3 / 0 / 0 / 0 | 1.78s | 958 / 0 | 2，1.96s，917 / 3809 |
+| 词 | find 结果数（默认 / --self） | coverage：扫描 / 候选 / 未归类 / 仅注入 / 孤儿 | 原文命中文件（根目录 rg） | 耗时 | stdout / stderr 字节 | 旧 find：结果数、耗时、stdout / stderr 字节 |
+|---|---|---|---|---|---|---|
+| launchctl | 10 / 11 | 7683 / 11 / 0 / 0 / 1 | 17，其中 15 在扫描范围内 | 1.95s | 2856 / 0 | 1，1.84s，387 / 3809 |
+| ModuleNotFoundError | 39 / 40 | 7683 / 41 / 0 / 0 / 0 | 45，其中 44 在扫描范围内 | 2.24s | 4734 / 0 | 1，2.14s，499 / 3809 |
+| installed.json | 5 / 6 | 7683 / 5 / 0 / 0 / 0 | 10，其中 9 在扫描范围内 | 2.01s | 1252 / 0 | 1，1.79s，468 / 3809 |
+| herdr_task | 3 / 4 | 7683 / 3 / 0 / 0 / 0 | 8，其中 7 在扫描范围内 | 1.78s | 958 / 0 | 2，1.96s，917 / 3809 |
+
+同一时刻对账，`--self` 的候选数是 15、45、9、7，根目录 rg 落在扫描范围内的是 15、44、9、7。ModuleNotFoundError 差的 1 个是归档文件 `…01a03cdc-63b5-….jsonl`，里面有 1520 个 NUL 字节：rg 递归扫目录时遇到 NUL 按二进制文件提前停下，find 逐个传路径，会搜完整个文件。范围外的文件全部是 Codex 的较早分段文件，见上面「未解决的漏召回」。耗时是单次热运行；新 find 扫描 7683–7688 个文件（含子线程与孤儿），旧 find 只扫 4442 个 row。
 
 `find launchctl --since 14d` 耗时 0.68s。`show 0cfeba3f launchctl` 输出 1136 字符，整段 `show` 7588 字符。
