@@ -20,7 +20,7 @@ import type { Stats } from "node:fs";
 import { open } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import packageJson from "../package.json" with { type: "json" };
-import { isStatus, type LineageEdge, type LineageRefresh, type ManualLineageEdge, type MarkPatch, type Session, type SessionStatus, type SourceDiagnostic, type Tool, type Transcript, type TranscriptMessage } from "./contracts.ts";
+import { isStatus, type EventKind, type LineageEdge, type LineageRefresh, type ManualLineageEdge, type MarkPatch, type Session, type SessionStatus, type SourceDiagnostic, type Tool, type Transcript, type TranscriptMessage } from "./contracts.ts";
 import { LineageIndex } from "./lineage.ts";
 import { homeDirectory, userDataDirectory } from "./paths.ts";
 import { archiveAction } from "./resume.ts";
@@ -133,7 +133,12 @@ interface Adapter {
   parseJob(paths: string[]): ArchiveParseJob;
   metadataSignature(path: string): string;
   loadNames(paths: string[]): Map<string, string>;
-  transcript(id: string, path?: string): TranscriptMessage[];
+  /** One JSONL record to 0..n events. Pure; the only place that knows each tool's wire format. */
+  project(record: Json): Projected[];
+  /** A main thread file's ordered events; Codex joins history_base segments oldest first. */
+  events(id: string, path?: string): RawEvent[];
+  /** A child thread file's ordered events, without main-file filters. */
+  childEvents(path: string): RawEvent[];
   rename(id: string, name: string, path?: string): Promise<void>;
   findFile(id: string): string | undefined;
   allowed(path: string): boolean;
@@ -180,6 +185,46 @@ function contentText(content: unknown): string {
     const text = stringValue(part.text).trim();
     return text ? [text] : [];
   }).join("\n").trim();
+}
+
+type RawEvent = { kind: EventKind; text: string; tool?: string; timestamp: string; injected?: true };
+type Projected = Omit<RawEvent, "timestamp">;
+
+/** The only Transcript definition: readable user and assistant text, injected context left out. */
+function transcriptOf(events: RawEvent[]): TranscriptMessage[] {
+  return events.flatMap(({ kind, text, timestamp, injected }) =>
+    (kind === "user" || kind === "assistant") && !injected ? [{ role: kind, text, timestamp }] : []);
+}
+
+/** Scalar leaves as `key: value` lines, so a term matches decoded tool input rather than its JSON spelling. */
+function leaves(value: unknown, key = ""): string[] {
+  if (typeof value === "string") return value ? [key ? `${key}: ${value}` : value] : [];
+  if (typeof value === "number" || typeof value === "boolean") return [key ? `${key}: ${value}` : String(value)];
+  if (Array.isArray(value)) return value.flatMap((item) => leaves(item, key));
+  return isRecord(value) ? Object.entries(value).flatMap(([name, item]) => leaves(item, name)) : [];
+}
+
+const flatten = (value: unknown): string => leaves(value).join("\n");
+
+function textEvent(role: string, content: unknown): Projected[] {
+  if (role !== "user" && role !== "assistant") return [];
+  const text = contentText(content);
+  return text ? [{ kind: role, text, ...(skipTranscript(role, text) ? { injected: true as const } : {}) }] : [];
+}
+
+function partEvents(content: unknown, kind: "thinking" | "tool_call", type: string, text: (part: Json) => string, tool?: (part: Json) => string): Projected[] {
+  return (Array.isArray(content) ? content : []).flatMap((part): Projected[] => {
+    if (!isRecord(part) || part.type !== type) return [];
+    const value = text(part).trim(), name = tool?.(part);
+    return value ? [{ kind, text: value, ...(name ? { tool: name } : {}) }] : [];
+  });
+}
+
+const toolEvent = (kind: "tool_call" | "tool_output", tool: string, text: string): Projected[] =>
+  text.trim() ? [{ kind, text: text.trim(), ...(tool ? { tool } : {}) }] : [];
+
+function outputText(output: unknown): string {
+  return typeof output === "string" ? output : Array.isArray(output) ? contentText(output) : flatten(output);
 }
 
 function skipTranscript(role: string, text: string): boolean {
@@ -459,25 +504,36 @@ abstract class JsonlAdapter implements Adapter {
     return latest(this.discover().filter((path) => this.parse(path)?.id === id));
   }
 
-  protected messages(id: string, pick: (record: Json) => Json | undefined, locatedPath?: string, marker?: string): TranscriptMessage[] {
-    const path = locatedPath ?? this.findFile(id);
-    if (!path) throw new CatalogError("not_found", `找不到 ${this.tool} session 文件: ${id}`);
-    const output: TranscriptMessage[] = [];
-    for (const line of readLines(path, true)) {
-      if (marker && !line.includes(marker)) continue;
+  abstract project(record: Json): Projected[];
+
+  /** Lines that cannot project to an event are skipped before JSON.parse. */
+  protected projectable(_line: string): boolean { return true; }
+
+  protected eventsOf(text: string, keep: (record: Json) => boolean = () => true): RawEvent[] {
+    const output: RawEvent[] = [];
+    for (const line of text.split(/\r?\n/)) {
+      if (!this.projectable(line)) continue;
       const record = parseRecord(line);
-      const message = record && pick(record);
-      if (!record || !message) continue;
-      const role = stringValue(message.role);
-      if (role !== "user" && role !== "assistant") continue;
-      const text = contentText(message.content);
-      if (text && !skipTranscript(role, text))
-        output.push({ role, text, timestamp: stringValue(record.timestamp) });
+      if (!record || !keep(record)) continue;
+      const timestamp = stringValue(record.timestamp);
+      for (const event of this.project(record)) output.push({ ...event, timestamp });
     }
     return output;
   }
 
-  abstract transcript(id: string): TranscriptMessage[];
+  protected mainFile(id: string, path?: string): string {
+    const file = path ?? this.findFile(id);
+    if (!file) throw new CatalogError("not_found", `找不到 ${this.tool} session 文件: ${id}`);
+    return file;
+  }
+
+  events(id: string, path?: string): RawEvent[] {
+    return this.eventsOf(readFileSync(this.mainFile(id, path), "utf8"));
+  }
+
+  childEvents(path: string): RawEvent[] {
+    return this.eventsOf(readFileSync(path, "utf8"));
+  }
 }
 
 class ClaudeAdapter extends JsonlAdapter {
@@ -577,11 +633,29 @@ class ClaudeAdapter extends JsonlAdapter {
     return true;
   }
 
-  transcript(id: string, path?: string): TranscriptMessage[] {
-    return this.messages(id, (record) => {
-      if (!["user", "assistant"].includes(stringValue(record.type)) || record.isSidechain || record.toolUseResult) return;
-      return isRecord(record.message) ? record.message : this.archive ? { ...record, role: record.type } : undefined;
-    }, path, this.archive ? '"content"' : '"message"');
+  protected override projectable(line: string): boolean { return line.includes(this.archive ? '"content"' : '"message"'); }
+
+  project(record: Json): Projected[] {
+    const type = stringValue(record.type);
+    if (type !== "user" && type !== "assistant") return [];
+    const message = isRecord(record.message) ? record.message : this.archive ? { ...record, role: type } : undefined;
+    if (!message) return [];
+    const content = message.content;
+    return [
+      ...partEvents(content, "thinking", "thinking", (part) => stringValue(part.thinking)),
+      // Tool-result records carry the output twice; the content block is the copy that stays readable.
+      ...record.toolUseResult ? toolEvent("tool_output", "", contentText(content)) : textEvent(stringValue(message.role), content),
+      ...(Array.isArray(content) ? content : []).flatMap((part): Projected[] => {
+        if (!isRecord(part)) return [];
+        if (part.type === "tool_use") return toolEvent("tool_call", stringValue(part.name), `${stringValue(part.name)}: ${flatten(part.input)}`);
+        return part.type === "tool_result" ? toolEvent("tool_output", "", contentText(part.content)) : [];
+      }),
+    ];
+  }
+
+  // Subagent files are sidechain throughout; only a main file drops sidechain records.
+  override events(id: string, path?: string): RawEvent[] {
+    return this.eventsOf(readFileSync(this.mainFile(id, path), "utf8"), (record) => !record.isSidechain);
   }
 
   async rename(id: string, name: string, locatedPath?: string): Promise<void> {
@@ -777,9 +851,40 @@ class CodexAdapter extends JsonlAdapter {
     return this.names;
   }
 
-  transcript(id: string, path?: string): TranscriptMessage[] {
-    const current = path ?? this.findFile(id);
-    if (!current) throw new CatalogError("not_found", `找不到 codex session 文件: ${id}`);
+  protected override projectable(line: string): boolean {
+    return this.archive || line.includes('"response_item"') || line.includes('"item_completed"');
+  }
+
+  project(record: Json): Projected[] {
+    const payload = isRecord(record.payload) ? record.payload : undefined;
+    const item = this.archive && record.type === "message" ? record
+      : record.type === "response_item" ? payload : this.archive && !payload ? record : undefined;
+    if (item) switch (item.type) {
+      case "message": return textEvent(stringValue(item.role), item.content);
+      case "function_call": return toolEvent("tool_call", stringValue(item.name), `${stringValue(item.name)}: ${stringValue(item.arguments)}`);
+      case "custom_tool_call": return toolEvent("tool_call", stringValue(item.name), `${stringValue(item.name)}: ${stringValue(item.input)}`);
+      case "local_shell_call": return toolEvent("tool_call", "local_shell", `local_shell: ${flatten(item.action)}`);
+      case "function_call_output": case "custom_tool_call_output": case "local_shell_call_output":
+        return toolEvent("tool_output", "", outputText(item.output));
+      default: return [];
+    }
+    const done = record.type === "event_msg" && payload?.type === "item_completed" && isRecord(payload.item) ? payload.item : undefined;
+    if (!done) return [];
+    if (done.type === "CommandExecution") {
+      const command = Array.isArray(done.command) ? done.command.map(stringValue).join(" ") : stringValue(done.command);
+      return toolEvent("tool_output", "command", `${command}\n${stringValue(done.aggregated_output)}`);
+    }
+    if (done.type === "McpToolCall") {
+      const tool = `${stringValue(done.server)}.${stringValue(done.tool)}`, result = isRecord(done.result) ? done.result : undefined;
+      return toolEvent("tool_output", tool, [`${tool}: ${flatten(done.arguments)}`, contentText(result?.content) || flatten(result), flatten(done.error)].filter(Boolean).join("\n"));
+    }
+    if (done.type === "FileChange" && isRecord(done.changes))
+      return toolEvent("tool_output", "file_change", Object.entries(done.changes).map(([path, change]) => `${path}\n${flatten(change)}`).join("\n"));
+    return [];
+  }
+
+  override events(id: string, path?: string): RawEvent[] {
+    const current = this.mainFile(id, path);
     const segments: { path: string; end?: number }[] = [];
     const seen = new Set<string>();
     let segment: { path: string; end?: number } = { path: current };
@@ -805,23 +910,12 @@ class CodexAdapter extends JsonlAdapter {
         throw new CatalogError("not_found", `Codex 会话历史文件缺失或不唯一: ${base.thread_id}`);
       segment = { path: matches[0]!, end: base.end_byte_offset };
     }
-    const output: TranscriptMessage[] = [];
-    for (const part of segments.reverse()) {
+    return segments.reverse().flatMap((part) => {
       const data = readFileSync(part.path);
       if (part.end !== undefined && (part.end > data.length || (part.end > 0 && data[part.end - 1] !== 10)))
         throw new CatalogError("invalid", `Codex 会话历史边界超出文件或不完整: ${part.path}`);
-      for (const line of data.subarray(0, part.end).toString("utf8").split(/\r?\n/)) {
-        const record = parseRecord(line);
-        if (!record) continue;
-        const message = this.archive && record.type === "message" ? record
-          : record.type === "response_item" && isRecord(record.payload) && record.payload.type === "message" ? record.payload : undefined;
-        if (!message) continue;
-        const role = stringValue(message.role), text = contentText(message.content);
-        if ((role === "user" || role === "assistant") && text && !skipTranscript(role, text))
-          output.push({ role, text, timestamp: stringValue(record.timestamp) });
-      }
-    }
-    return output;
+      return this.eventsOf(data.subarray(0, part.end).toString("utf8"));
+    });
   }
 
   async rename(id: string, name: string): Promise<void> {
@@ -862,8 +956,18 @@ class PiAdapter extends JsonlAdapter {
 
   loadNames(): Map<string, string> { return new Map(); }
 
-  transcript(id: string, path?: string): TranscriptMessage[] {
-    return this.messages(id, (record) => record.type === "message" && isRecord(record.message) ? record.message : undefined, path, '"message"');
+  protected override projectable(line: string): boolean { return line.includes('"message"'); }
+
+  project(record: Json): Projected[] {
+    const message = record.type === "message" && isRecord(record.message) ? record.message : undefined;
+    if (!message) return [];
+    const role = stringValue(message.role), content = message.content;
+    if (role === "toolResult") return toolEvent("tool_output", stringValue(message.toolName), contentText(content));
+    return [
+      ...partEvents(content, "thinking", "thinking", (part) => stringValue(part.thinking)),
+      ...textEvent(role, content),
+      ...partEvents(content, "tool_call", "toolCall", (part) => `${stringValue(part.name)}: ${flatten(part.arguments)}`, (part) => stringValue(part.name)),
+    ];
   }
 
   async rename(id: string, name: string, locatedPath?: string): Promise<void> {
@@ -972,7 +1076,7 @@ export class SessionCatalog {
   async detail(id: string): Promise<Transcript> {
     const session = await this.exact(id);
     const location = this.location(id);
-    return { ...session, messages: location.adapter.transcript(location.originalId, location.path) };
+    return { ...session, messages: transcriptOf(location.adapter.events(location.originalId, location.path)) };
   }
 
   async refreshLineage(force = false): Promise<LineageRefresh> {
@@ -1055,7 +1159,7 @@ export class SessionCatalog {
           const session = indexed.get(realpathSync(path));
           if (!session || hits.has(session.id)) continue;
           const location = this.location(session.id);
-          const message = location.adapter.transcript(location.originalId, location.path)
+          const message = transcriptOf(location.adapter.events(location.originalId, location.path))
             .find(({ text }) => text.toLowerCase().includes(query.toLowerCase()));
           if (message) hits.set(session.id, { ...session, snippet: matchSnippet(message.text, query) });
         }

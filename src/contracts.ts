@@ -45,6 +45,21 @@ export interface Transcript extends Session {
   messages: TranscriptMessage[];
 }
 
+export const EVENT_KINDS = ["user", "assistant", "thinking", "tool_call", "tool_output"] as const;
+export type EventKind = (typeof EVENT_KINDS)[number];
+export type MatchKind = EventKind | "meta";
+
+export interface SessionEvent {
+  /** Position in its thread's full event stream, 0-based; tool events take ordinals too. */
+  ordinal: number;
+  kind: EventKind;
+  /** Clipped by excerpt(); `length` is set to the original length when it was. */
+  text: string;
+  length?: number;
+  tool?: string;
+  timestamp: string;
+}
+
 export interface SessionView extends Session {
   resume_command?: string;
 }
@@ -60,13 +75,41 @@ export interface SessionsEnvelope {
   diagnostics?: SourceDiagnostic[];
 }
 
+export type MetaField = "name" | "star_note" | "first_msg" | "id" | "session_id" | "source_path";
+
+/** `thread` is "main" or a child thread id. */
+export type SearchHit =
+  | { kind: "meta"; field: MetaField; snippet: string }
+  | { kind: EventKind; thread: string; ordinal: number; tool?: string; snippet: string };
+
+export interface MatchSummary {
+  /** 1: name/star_note/first_msg or a non-injected user message; 2: assistant only; 3: everything else. */
+  tier: 1 | 2 | 3;
+  /** Main thread events and meta fields; child threads are counted in `threads`. */
+  counts: Record<MatchKind, number>;
+  threads: { thread: string; label: string; hits: number }[];
+  best: SearchHit[];
+}
+
+export interface SearchCoverage {
+  scanned_files: number;
+  /** Files with a raw hit whose owner has every term somewhere; each one is attributed or counted below. */
+  candidate_files: number;
+  unclassified_files: number;
+  injected_only_files: number;
+  orphan_files: number;
+  orphans: { path: string; label: string; hits: number }[];
+}
+
 export interface SearchHitView extends SessionView {
   snippet: string;
+  match?: MatchSummary;
 }
 
 export interface SearchEnvelope {
   total: number;
   results: SearchHitView[];
+  coverage?: SearchCoverage;
 }
 
 type LineageEdgeBase = {
