@@ -136,6 +136,12 @@ export interface SessionQuery {
   exclude?: string[];
 }
 
+export type ExcerptSpec =
+  | { around: string[]; context?: number; chars?: number; windows?: number }
+  | { at: { thread?: string; from: number; to: number }; context?: number; chars?: number };
+export type ExcerptWindow = { thread: string; label: string; from: number; to: number; hits: number[]; events: SessionEvent[] };
+export type Excerpt = Session & { threads: { thread: string; label: string; events: number; hits: number[] }[]; windows: ExcerptWindow[]; omitted_windows: number };
+
 type ScanFile = { path: string; child?: ChildEntry };
 type Owner = { row?: Session; orphan?: ChildEntry; meta?: ReturnType<typeof metaHits>; files: ScanFile[] };
 
@@ -1324,6 +1330,47 @@ export class SessionCatalog {
     coverage.orphans = coverage.orphans.sort((left, right) => right.hits - left.hits).slice(0, 5);
     results.sort((left, right) => left.match.tier - right.match.tier || compareSessions(left, right));
     return { total: results.length, results: results.slice(0, limit), coverage };
+  }
+
+  /** Windows of one Session's event streams (main thread, then child threads), so a reader never needs the whole Transcript. */
+  async excerpt(id: string, spec: ExcerptSpec): Promise<Excerpt> {
+    const session = await this.exact(id);
+    const index = await withRealpathMemo(() => this.childIndex());
+    const threads = [
+      { thread: "main", label: "main", events: this.mainEvents(session) },
+      ...(index.children.get(id) ?? []).sort((left, right) => left.path.localeCompare(right.path))
+        .map((child) => ({ thread: child.thread, label: child.adapter.childLabel(child), events: childEventsOf(child) })),
+    ];
+    const terms = "around" in spec ? parseTerms(spec.around) : [];
+    if ("around" in spec && !terms.length) throw new CatalogError("invalid", "缺少要定位的词");
+    const chars = spec.chars ?? 300;
+    const hits = threads.map(({ events }) => events.flatMap((event, ordinal) => !event.injected && matchedTerms(event.text, terms).length ? [ordinal] : []));
+    let ranges: { thread: number; from: number; to: number; hits: number[] }[];
+    if ("around" in spec) {
+      ranges = threads.flatMap(({ events }, thread) => mergeWindows(hits[thread]!, spec.context ?? 2, events.length - 1).map((range) => ({ thread, ...range })));
+    } else {
+      const { at } = spec, name = at.thread ?? "main";
+      const matches = threads.flatMap((item, position) => item.thread === name ? [position] : []);
+      const prefixed = matches.length ? matches : threads.flatMap((item, position) => item.thread.startsWith(name) ? [position] : []);
+      if (prefixed.length !== 1) throw new CatalogError("invalid", `找不到唯一的子线程: ${name}`);
+      const thread = prefixed[0]!, last = threads[thread]!.events.length - 1, context = spec.context ?? 0;
+      if (!Number.isSafeInteger(at.from) || !Number.isSafeInteger(at.to) || at.from < 0 || at.to < at.from || at.from > last)
+        throw new CatalogError("invalid", `序号超出范围 0-${last}: ${at.from}-${at.to}`);
+      ranges = [{ thread, from: Math.max(0, at.from - context), to: Math.min(last, at.to + context), hits: [] }];
+    }
+    const shown = "around" in spec ? ranges.slice(0, spec.windows ?? 8) : ranges;
+    return {
+      ...session,
+      threads: threads.map(({ thread, label, events }, position) => ({ thread, label, events: events.length, hits: hits[position]! })),
+      windows: shown.map(({ thread, from, to, hits: windowHits }) => {
+        const { thread: name, label, events } = threads[thread]!;
+        return { thread: name, label, from, to, hits: windowHits, events: events.slice(from, to + 1).map((event, offset): SessionEvent => {
+          const clipped = clip(event.text, terms, chars);
+          return { ordinal: from + offset, kind: event.kind, ...clipped, ...(event.tool ? { tool: event.tool } : {}), timestamp: event.timestamp };
+        }) };
+      }),
+      omitted_windows: ranges.length - shown.length,
+    };
   }
 
   private mainEvents(row: Session): RawEvent[] {

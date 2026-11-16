@@ -136,6 +136,57 @@ describe("SessionCatalog", () => {
     expect(await ids({ since: 150, until: codex.birth })).toEqual(["codex-b"]);
   });
 
+  test("excerpt returns merged, clipped windows around hits and lands on find's ordinals", async () => {
+    const { home, catalog } = setup();
+    const long = "a".repeat(1000) + " window-needle " + "b".repeat(1000);
+    appendFileSync(join(home, ".claude/projects/-tmp-alpha/claude-a.jsonl"), [
+      ...Array.from({ length: 12 }, (_, index) => ({ type: "assistant", timestamp: `f${index}`, message: { role: "assistant", content: `filler ${index}` } })),
+      { type: "assistant", timestamp: "n1", message: { role: "assistant", content: long } },
+      { type: "assistant", timestamp: "n2", message: { role: "assistant", content: "second window-needle" } },
+      ...Array.from({ length: 10 }, (_, index) => ({ type: "assistant", timestamp: `g${index}`, message: { role: "assistant", content: `filler ${index}` } })),
+      { type: "user", timestamp: "n3", message: { role: "user", content: "late window-needle" } },
+    ].map((record) => JSON.stringify(record)).join("\n") + "\n");
+    // Main stream: 2 original messages, 12 fillers, ordinals 14 and 15 are hits, 10 fillers, ordinal 26 is a hit.
+    const excerpt = await catalog.excerpt("claude-a", { around: ["WINDOW-NEEDLE"], context: 1, chars: 100 });
+    expect(excerpt.threads.map(({ thread, events, hits }) => ({ thread, events, hits }))).toEqual([
+      { thread: "main", events: 27, hits: [14, 15, 26] },
+      { thread: "sub1", events: 3, hits: [] },
+      { thread: "toolu_big.txt", events: 3, hits: [] },
+    ]);
+    expect(excerpt.windows.map(({ thread, from, to, hits }) => ({ thread, from, to, hits }))).toEqual([
+      { thread: "main", from: 13, to: 16, hits: [14, 15] },
+      { thread: "main", from: 25, to: 26, hits: [26] },
+    ]);
+    const clipped = excerpt.windows[0]!.events.find(({ ordinal }) => ordinal === 14)!;
+    expect(clipped.text).toContain("window-needle");
+    expect(clipped.text.length).toBeLessThanOrEqual(102);
+    expect(clipped.length).toBe(long.length);
+    expect(excerpt.omitted_windows).toBe(0);
+    const capped = await catalog.excerpt("claude-a", { around: ["window-needle"], context: 0, windows: 1 });
+    // Adjacent hits 14 and 15 share one window even without context.
+    expect([capped.windows.length, capped.omitted_windows]).toEqual([1, 1]);
+    const whole = await catalog.excerpt("claude-a", { around: ["window-needle"], context: 0, chars: 0 });
+    expect(whole.windows[0]!.events[0]!.text).toBe(long);
+
+    const best = (await catalog.find({ terms: ["late window-needle"] })).results[0]!.match.best[0]!;
+    expect(best).toMatchObject({ kind: "user", thread: "main", ordinal: 26 });
+    const landed = await catalog.excerpt("claude-a", { at: { from: 26, to: 26 } });
+    expect(landed.windows[0]!.events).toEqual([{ ordinal: 26, kind: "user", text: "late window-needle", timestamp: "n3" }]);
+  });
+
+  test("excerpt reads child threads by id or prefix and rejects unknown positions", async () => {
+    const { catalog } = setup();
+    const child = await catalog.excerpt("claude-a", { at: { thread: "sub", from: 1, to: 1 }, context: 1 });
+    expect(child.windows.map(({ thread, label, from, to, events }) => ({ thread, label, from, to, kinds: events.map(({ kind }) => kind) }))).toEqual([
+      { thread: "sub1", label: "Find launch agent", from: 0, to: 2, kinds: ["user", "tool_call", "tool_output"] },
+    ]);
+    const offloaded = await catalog.excerpt("claude-a", { around: ["fixture-offloaded-result"], context: 0 });
+    expect(offloaded.windows).toEqual([{ thread: "toolu_big.txt", label: "toolu_big.txt", from: 1, to: 1, hits: [1],
+      events: [{ ordinal: 1, kind: "tool_output", text: "fixture-offloaded-result", timestamp: "" }] }]);
+    for (const at of [{ thread: "missing", from: 0, to: 0 }, { from: 99, to: 99 }, { from: 2, to: 1 }])
+      await expect(catalog.excerpt("claude-a", { at })).rejects.toMatchObject({ code: "invalid" });
+  });
+
   test("deep search combines summary fields with readable Transcript text", async () => {
     const { home, catalog } = setup();
     appendFileSync(join(home, ".claude/projects/-tmp-alpha/claude-a.jsonl"), JSON.stringify({
