@@ -158,3 +158,31 @@ sessions show <id前缀> --at [<thread>:]<n>[-<m>] [-C 0] [--chars 300] [--json]
 - 召回性质测试：对随机生成的夹具 HOME 与随机词，`find` 结果 ∪ coverage 计数覆盖朴素扫描（逐文件子串）找到的全部文件，且每个结果确实含全部词。
 - CLI：stderr 默认无来源统计；`find --help` 打印帮助；`show <id> <词>` 与 `--at` 输出窗口。
 - 真实数据：`launchctl`、`ModuleNotFoundError`、`installed.json`、`herdr_task` 的结果数加 coverage 计数与原文命中文件数对得上；记录耗时与输出字符数。
+
+## 实现对账
+
+与上面设计不一致或设计没写到的地方：
+
+- 适配器接口多了三处。`childEvents(path)` 读子线程文件：Claude 子 agent 文件每条记录都带 `isSidechain`，只有主文件才丢弃这类记录。`childLabel(file)` 按需读 `.meta.json`，只给要显示的子线程读，2000 多个归档子 agent 不再逐个打开。`children(rows)` 接收已知主文件路径，Codex 不再读主文件的头部；子线程归属在真实数据上从约 500ms 降到约 170ms。
+- `ChildFile` 的 `tool_result_file` 也带 `label`（文件名）。它的事件序号是 0 起的行下标，不是 1 起的行号。
+- `SessionEvent` 多了可选的 `length`：被裁剪时记原长，CLI 用它标「原长 N」。
+- coverage 按 owner（row 或孤儿文件）的结果计文件。owner 的逐词 rg 求交成立，但已分类事件凑不齐全部词时：加上注入事件能凑齐，它的全部候选文件计入 `injected_only_files`，否则计入 `unclassified_files`。所以 `unclassified_files` 也包含有部分事件命中的文件。恒等式 `candidate_files = 归入结果的候选文件 + orphan_files + injected_only_files + unclassified_files` 由性质测试守护。
+- Codex `item_completed` 里的 `UserMessage` 与 `AgentMessage` 一样重复 `response_item`，不投影。`Extension`、`SubAgentActivity`、`CollabAgentToolCall`、`ImageView`、`Reasoning` 也不投影，命中只在这些地方的文件计入 `unclassified_files`。
+- `project()` 逐条记录，没有 call_id 配对，所以 Claude `tool_result`、Codex `*_output` 的事件没有工具名。`CommandExecution` 记为 `command`，`FileChange` 记为 `file_change`，MCP 记为 `server.tool`。Codex `function_call` 保留原始 arguments 字符串，不拆成叶子，带 JSON 标点的词也能分类。Claude 与 pi 的工具输入拆成 `key: value` 叶子，数字和布尔值也算。
+- `find` 解析单个文件失败时（例如 Codex history_base 的基线文件缺失），这个文件按 owner 结果计数，整次搜索不报错。
+- `excerpt` 里命中外的上下文事件裁到 `min(chars, 120)`；`--at` 的线程名接受唯一前缀。`ExcerptSpec`、`Excerpt`、`SessionQuery` 从 `src/catalog.ts` 导出，不在 `contracts.ts`。纯匹配逻辑（词解析、片段、窗口合并、裁剪、最佳命中）放在新文件 `src/search.ts`。
+- 设了 `--cwd` 时孤儿按头部 `cwd` 过滤。没有 `cwd` 的孤儿（Claude `tool-results/*.txt`）会被过滤掉。
+- 归档 Codex 里只靠 SQLite 判定为子线程、头部没有 `parent_thread_id` 的文件，计为孤儿。
+- 候选文件整文件读入再投影，内存上限按单个文件算，没有流式解析。rg 只输出 `-l` 路径，按批收集。
+- 工具调用多的 Session，`show <id> <词>` 可能比整段 `show` 还大：实测 `01a1cc0e` 的 `launchctl` 窗口 9.0K 字符，整段 Transcript 6.4K。窗口里有 Transcript 不含的工具证据（14 处命中）。
+
+真实数据（2026-11-16，编译后的 `build/sessions`，真实 HOME，第二次运行计时；默认结果排除了调用者自己的 Session，`--self` 一列包含它）：
+
+| 词 | find 结果数（默认 / --self） | coverage：扫描 / 候选 / 未归类 / 仅注入 / 孤儿 | 耗时 | stdout / stderr 字节 | 旧 find：结果数、耗时、stdout / stderr 字节 |
+|---|---|---|---|---|---|
+| launchctl | 10 / 11 | 7683 / 11 / 0 / 0 / 1 | 1.95s | 2856 / 0 | 1，1.84s，387 / 3809 |
+| ModuleNotFoundError | 39 / 40 | 7683 / 41 / 0 / 0 / 0 | 2.24s | 4734 / 0 | 1，2.14s，499 / 3809 |
+| installed.json | 5 / 6 | 7683 / 5 / 0 / 0 / 0 | 2.01s | 1252 / 0 | 1，1.79s，468 / 3809 |
+| herdr_task | 3 / 4 | 7683 / 3 / 0 / 0 / 0 | 1.78s | 958 / 0 | 2，1.96s，917 / 3809 |
+
+`find launchctl --since 14d` 耗时 0.68s。`show 0cfeba3f launchctl` 输出 1136 字符，整段 `show` 7588 字符。
