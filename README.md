@@ -125,7 +125,12 @@ Session IDs may be shortened to any unique prefix.
 | `sessions dash` | Start or reopen the dashboard |
 
 Add `--json` to `list`, `find`, `show`, `index`, or `lineage` for stable
-machine-readable output.
+machine-readable output. A bare `--since`/`--until` date is a local day, and
+`--until` includes that day. `find` ends with its coverage: files it scanned,
+candidates, and the files it could not attribute (unclassified, partial,
+injected-only, unreadable, orphan child threads), listing the first orphans and
+unreadable paths. The CLI prints only source errors to stderr; `-v` adds
+per-source counts.
 
 ## Additional archive sources
 
@@ -176,8 +181,7 @@ configuration and discovers new files in every root, keeps the current list
 visible while scanning, preserves filters, and clamps the page when necessary.
 Library callers use `list({ fresh: true })` to rescan; normal list/detail calls
 may reuse the current catalog cache. Missing roots and invalid configuration
-produce visible diagnostics while other sources keep working. The CLI prints
-only source errors to stderr; `-v` adds per-source counts. Offline rows are
+produce visible diagnostics while other sources keep working. Offline rows are
 omitted until their source returns; their marks and manual relations remain.
 
 Archive discovery accepts valid flat or nested JSONL files and excludes
