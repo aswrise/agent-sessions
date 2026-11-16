@@ -499,8 +499,9 @@ describe("SessionCatalog search robustness", () => {
 
       const blocked = await catalog.find({ terms: ["fixture-offloaded-result"] });
       expect(blocked.results).toEqual([]);
-      expect(blocked.coverage).toMatchObject({ unreadable_files: 1, unreadable: [offloaded] });
-      expect(blocked.coverage.candidate_files).toBe(1);
+      expect(blocked.coverage).toMatchObject({ unreadable_files: 2 });
+      expect([...blocked.coverage.unreadable].sort()).toEqual([offloaded, subagents].sort());
+      expect(blocked.coverage.candidate_files).toBe(2);
     } finally {
       chmodSync(subagents, 0o755);
       chmodSync(offloaded, 0o644);
