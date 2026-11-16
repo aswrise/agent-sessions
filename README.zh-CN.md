@@ -104,8 +104,10 @@ Session ID 可以缩写为任意不重复的前缀。
 | --- | --- |
 | `sessions list -n 30` | 列出所有工具、所有项目中的最近 Session |
 | `sessions list claude` | 只看 `claude`、`codex` 或 `pi` |
-| `sessions find "关键词"` | 检索摘要和可读 Transcript 文本 |
+| `sessions find launchctl plist --since 14d --cwd .` | 找出同时包含全部词的 Session，范围含标题、消息、工具调用与输出、子线程；另有 `--until`、`--tool claude,codex,pi`、`--self`、`-n`、`--json` |
 | `sessions show 48e17d64` | 查看一个完整 Transcript |
+| `sessions show 48e17d64 launchctl` | 只看命中附近的窗口（`-C 2`、`--chars 300`、`-n 8`） |
+| `sessions show 48e17d64 --at sub1:10-20` | 按序号读一段事件，可指定子线程 |
 | `sessions index` | 增量分析跨 Session 的文件交接 |
 | `sessions lineage 48e17d64` | 查看完整上下游连通链 |
 | `sessions star 48e17d64 "备注"` | 标记 Session，并可附带备注 |
@@ -161,7 +163,7 @@ Session ID 可以缩写为任意不重复的前缀。
 显示范围。刷新会重新读取配置并发现所有根目录的新文件，期间保留已有列表；
 完成后保留筛选，页码越界时收回最后一页。库调用方使用
 `list({ fresh: true })` 重新扫描，普通列表和详情可复用当前缓存。来源缺失或
-配置无效会显示诊断，其余来源继续工作。离线记录暂时不显示，但标记和手动
+配置无效会显示诊断，其余来源继续工作。CLI 默认只往 stderr 打印来源错误，`-v` 另外打印各来源的统计。离线记录暂时不显示，但标记和手动
 关系继续保留，来源恢复后可再次看到。
 
 旧目录支持平铺或多层 JSONL，按工具格式读取，排除已识别的内部子会话和损坏

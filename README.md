@@ -113,8 +113,10 @@ Session IDs may be shortened to any unique prefix.
 | --- | --- |
 | `sessions list -n 30` | List recent Sessions across all tools and projects |
 | `sessions list claude` | Limit results to `claude`, `codex`, or `pi` |
-| `sessions find "keyword"` | Search summaries and readable Transcript text |
+| `sessions find launchctl plist --since 14d --cwd .` | Find Sessions containing every term in titles, messages, tool calls and output, or child threads; `--until`, `--tool claude,codex,pi`, `--self`, `-n`, `--json` |
 | `sessions show 48e17d64` | Show one complete Transcript |
+| `sessions show 48e17d64 launchctl` | Show only windows around hits (`-C 2`, `--chars 300`, `-n 8`) |
+| `sessions show 48e17d64 --at sub1:10-20` | Show a range of events by ordinal, optionally inside a child thread |
 | `sessions index` | Incrementally analyze cross-Session Artifact handoffs |
 | `sessions lineage 48e17d64` | Show the complete upstream/downstream component |
 | `sessions star 48e17d64 "note"` | Star a Session with an optional note |
@@ -174,7 +176,8 @@ configuration and discovers new files in every root, keeps the current list
 visible while scanning, preserves filters, and clamps the page when necessary.
 Library callers use `list({ fresh: true })` to rescan; normal list/detail calls
 may reuse the current catalog cache. Missing roots and invalid configuration
-produce visible diagnostics while other sources keep working. Offline rows are
+produce visible diagnostics while other sources keep working. The CLI prints
+only source errors to stderr; `-v` adds per-source counts. Offline rows are
 omitted until their source returns; their marks and manual relations remain.
 
 Archive discovery accepts valid flat or nested JSONL files and excludes

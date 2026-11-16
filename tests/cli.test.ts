@@ -9,9 +9,10 @@ const cleanups: (() => void)[] = [];
 const executable = fileURLToPath(new URL("../sessions", import.meta.url));
 afterEach(() => cleanups.splice(0).forEach((cleanup) => cleanup()));
 
-function run(home: string, args: string[], path = process.env.PATH ?? "") {
+function run(home: string, args: string[], path = process.env.PATH ?? "", env: Record<string, string> = {}) {
+  const { CLAUDE_CODE_SESSION_ID: _, ...inherited } = process.env;
   const result = Bun.spawnSync([process.execPath, executable, ...args], {
-    env: { ...process.env, HOME: home, USERPROFILE: home, PATH: path, NO_COLOR: "1" },
+    env: { ...inherited, HOME: home, USERPROFILE: home, PATH: path, NO_COLOR: "1", ...env },
   });
   return { exitCode: result.exitCode, stdout: result.stdout.toString(), stderr: result.stderr.toString() };
 }
@@ -34,7 +35,44 @@ describe("CLI process seam", () => {
     const found = await command(["find", "fixture", "-n", "10"]);
     expect(found.exitCode).toBe(0);
     expect(found.stdout).toContain("共 3 个匹配 session");
-    expect(found.stdout).not.toContain("codex-child");
+    const lines = found.stdout.split("\n");
+    expect(lines.filter((line) => /^[★ ] \S/.test(line)).map((line) => line.split(" ")[1])).toEqual(["pi-c", "codex-b", "claude-a"]);
+    expect(lines.filter((line) => line.startsWith("孤儿")).join("\n")).toContain("rollout-subagent.jsonl");
+  });
+
+  test("finds by AND terms with filters, leaves out the calling Session, and reads windows", async () => {
+    const fixture = fixtureHome(); cleanups.push(fixture.cleanup);
+    const ids = (stdout: string) => stdout.split("\n").filter((line) => /^[★ ] \S/.test(line)).map((line) => line.split(" ")[1]);
+    expect(ids(run(fixture.home, ["find", "fixture-user-claude", "fixture-child-output"]).stdout)).toEqual(["claude-a"]);
+    expect(ids(run(fixture.home, ["find", "fixture", "--tool", "codex,pi", "--cwd", "/tmp/beta"]).stdout)).toEqual(["codex-b"]);
+    expect(ids(run(fixture.home, ["find", "fixture"], undefined, { CLAUDE_CODE_SESSION_ID: "pi-c" }).stdout)).toEqual(["codex-b", "claude-a"]);
+    expect(ids(run(fixture.home, ["find", "fixture", "--self"], undefined, { CLAUDE_CODE_SESSION_ID: "pi-c" }).stdout)).toEqual(["pi-c", "codex-b", "claude-a"]);
+    const json = JSON.parse(run(fixture.home, ["find", "fixture-child-output", "--json"]).stdout);
+    expect(json).toMatchObject({ total: 1, results: [{ id: "claude-a", resume_command: expect.any(String), match: { tier: 3, threads: [{ thread: "sub1" }] } }], coverage: { orphan_files: 0 } });
+
+    const windows = run(fixture.home, ["show", "claude", "fixture-child-output", "-C", "0"]);
+    expect(windows.exitCode).toBe(0);
+    expect(windows.stdout).toContain("── sub1 (Find launch agent) #2-2");
+    expect(windows.stdout).toContain("#2 out  0 fixture-child-output");
+    expect(windows.stdout).not.toContain("fixture-assistant-claude");
+    const at = run(fixture.home, ["show", "claude", "--at", "sub1:1", "--json"]);
+    expect(JSON.parse(at.stdout).windows).toEqual([expect.objectContaining({ thread: "sub1", from: 1, to: 1,
+      events: [expect.objectContaining({ ordinal: 1, kind: "tool_call", tool: "Bash" })] })]);
+    expect(run(fixture.home, ["show", "claude", "--at", "nope:1"]).exitCode).toBe(1);
+  });
+
+  test("keeps stderr free of source statistics unless -v, and prints help anywhere", async () => {
+    const fixture = fixtureHome(); cleanups.push(fixture.cleanup);
+    const sources = join(fixture.home, "sources.json");
+    writeFileSync(sources, JSON.stringify({ version: 1, sources: [{ id: "old", label: "old", roots: [{ id: "claude", tool: "claude", path: join(fixture.home, ".claude/projects") }] }] }));
+    const env = { AGENT_SESSIONS_SOURCES_FILE: sources };
+    const quiet = run(fixture.home, ["find", "fixture"], undefined, env);
+    expect(quiet.exitCode).toBe(0);
+    expect(quiet.stderr).toBe("");
+    expect(run(fixture.home, ["find", "fixture", "-v"], undefined, env).stderr).toContain("[old/claude]");
+    const help = run(fixture.home, ["find", "fixture", "--help"]);
+    expect(help.stdout).toContain("sessions show <id-prefix> --at");
+    expect(help.stdout).not.toContain("共");
   });
 
   test("provides stable JSON list, find, and show output for terminal agents", async () => {
