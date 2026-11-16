@@ -146,6 +146,8 @@ type ScanFile = { path: string; child?: ChildEntry };
 type Owner = { row?: Session; orphan?: ChildEntry; meta?: ReturnType<typeof metaHits>; files: ScanFile[] };
 
 const RG_BATCH = 128;
+/** Context events around a hit are clipped harder than the hit itself; they only orient the reader. */
+const CONTEXT_CHARS = 120;
 const RG_CONCURRENCY = 8;
 
 /** One `rg -l` per term and batch, at most RG_CONCURRENCY at a time; returns the matching paths per term. */
@@ -1369,7 +1371,7 @@ export class SessionCatalog {
       windows: shown.map(({ thread, from, to, hits: windowHits }) => {
         const { thread: name, label, events } = threads[thread]!;
         return { thread: name, label, from, to, hits: windowHits, events: events.slice(from, to + 1).map((event, offset): SessionEvent => {
-          const clipped = clip(event.text, terms, chars);
+          const clipped = clip(event.text, terms, terms.length && !windowHits.includes(from + offset) ? Math.min(chars, CONTEXT_CHARS) : chars);
           return { ordinal: from + offset, kind: event.kind, ...clipped, ...(event.tool ? { tool: event.tool } : {}), timestamp: event.timestamp };
         }) };
       }),

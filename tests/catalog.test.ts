@@ -174,6 +174,18 @@ describe("SessionCatalog", () => {
     expect(landed.windows[0]!.events).toEqual([{ ordinal: 26, kind: "user", text: "late window-needle", timestamp: "n3" }]);
   });
 
+  test("excerpt clips context events harder than hits", async () => {
+    const { home, catalog } = setup();
+    appendFileSync(join(home, ".claude/projects/-tmp-alpha/claude-a.jsonl"), [
+      { type: "assistant", timestamp: "c1", message: { role: "assistant", content: "c".repeat(500) } },
+      { type: "assistant", timestamp: "c2", message: { role: "assistant", content: "h".repeat(250) + " context-needle " + "h".repeat(250) } },
+    ].map((record) => JSON.stringify(record)).join("\n") + "\n");
+    const [context, hit] = (await catalog.excerpt("claude-a", { around: ["context-needle"], context: 1 })).windows[0]!.events.slice(-2);
+    expect(context!.text.length).toBeLessThan(hit!.text.length);
+    expect(hit!.text.length).toBeLessThanOrEqual(302);
+    expect([context!.length, hit!.length]).toEqual([500, 516]);
+  });
+
   test("excerpt reads child threads by id or prefix and rejects unknown positions", async () => {
     const { catalog } = setup();
     const child = await catalog.excerpt("claude-a", { at: { thread: "sub", from: 1, to: 1 }, context: 1 });
