@@ -163,29 +163,32 @@ sessions show <id前缀> --at [<thread>:]<n>[-<m>] [-C 0] [--chars 300] [--json]
 
 与上面设计不一致或设计没写到的地方：
 
-- 适配器接口多了三处。`childEvents(path)` 读子线程文件：Claude 子 agent 文件每条记录都带 `isSidechain`，只有主文件才丢弃这类记录。`childLabel(file)` 按需读 `.meta.json`，只给要显示的子线程读，2000 多个归档子 agent 不再逐个打开。`children(rows)` 接收已知主文件路径，Codex 不再读主文件的头部；子线程归属在真实数据上从约 500ms 降到约 170ms。
-- `ChildFile` 的 `tool_result_file` 也带 `label`（文件名）。它的事件序号是 0 起的行下标，不是 1 起的行号。
+- 适配器接口：`childEvents(file)` 读任意子线程文件，Claude 的 `tool-results/*.txt` 按行成事件；Claude 子 agent 文件每条记录都带 `isSidechain`，只有主文件才丢弃这类记录。`children()` 不带参数，自己遍历根目录；Codex 读每个候选文件头部 4KB 判断是否子线程。`label(file)` 按需读 `.meta.json` 或 Codex 头部，只给要显示的子线程读。`history(path)` 返回 Codex rollout 的 `history_base` 链上的较早分段。子线程目录或文件不可读时跳过，记一条 error 级来源诊断（带路径），其余子线程照常归属。
+- `tool_result_file` 的事件序号是 0 起的行下标，不是 1 起的行号。
 - `SessionEvent` 多了可选的 `length`：被裁剪时记原长，CLI 用它标「原长 N」。
-- coverage 按 owner（row 或孤儿文件）的结果计文件。owner 的逐词 rg 求交成立，但已分类事件凑不齐全部词时：加上注入事件能凑齐，它的全部候选文件计入 `injected_only_files`，否则计入 `unclassified_files`。所以 `unclassified_files` 也包含有部分事件命中的文件。恒等式 `candidate_files = 归入结果的候选文件 + orphan_files + injected_only_files + unclassified_files` 由性质测试守护。
-- Codex `item_completed` 里的 `UserMessage` 与 `AgentMessage` 一样重复 `response_item`，不投影。`Extension`、`SubAgentActivity`、`CollabAgentToolCall`、`ImageView`、`Reasoning` 也不投影，命中只在这些地方的文件计入 `unclassified_files`。
-- `project()` 逐条记录，没有 call_id 配对，所以 Claude `tool_result`、Codex `*_output` 的事件没有工具名。`CommandExecution` 记为 `command`，`FileChange` 记为 `file_change`，MCP 记为 `server.tool`。Codex `function_call` 保留原始 arguments 字符串，不拆成叶子，带 JSON 标点的词也能分类。Claude 与 pi 的工具输入拆成 `key: value` 叶子，数字和布尔值也算。
-- `find` 解析单个文件失败时（例如 Codex history_base 的基线文件缺失），这个文件按 owner 结果计数，整次搜索不报错。
-- `excerpt` 里命中外的上下文事件裁到 `min(chars, 120)`；`--at` 的线程名接受唯一前缀。`ExcerptSpec`、`Excerpt`、`SessionQuery` 从 `src/catalog.ts` 导出，不在 `contracts.ts`。纯匹配逻辑（词解析、片段、窗口合并、裁剪、最佳命中）放在新文件 `src/search.ts`。
+- Codex 续写的 rollout 头部带 `history_base`（真实数据 10 个分段文件都有），指向较早分段的线程 id 和截止字节。row 的元数据记下 `history_base`，`find` 把整条链上的文件当作这个 row 的主线程扫描，事件由 `events()` 拼接，与 `detail()` 一致。较早分段自己也是 row 时，词只在较早分段里的搜索会同时返回两个 row。
+- coverage 每个候选文件只落进一个桶：归入结果、`orphan_files`、`injected_only_files`、`partial_files`、`unclassified_files`、`unreadable_files`。owner（row 或孤儿文件）的逐词 rg 求交成立、可读事件凑不齐全部词时：加上注入事件能凑齐，全部候选文件计入 `injected_only_files`；否则有可读事件命中的文件计入 `partial_files`，没有的计入 `unclassified_files`。恒等式由性质测试守护。
+- 候选文件包括 rg 读不了的文件：rg 退出码 2 时保留其余结果，从 stderr 的 `rg: <路径>: ` 认出失败路径；解析失败（读文件出错、Codex 历史链无效）同样处理。不可读文件可能含任何词，所以仍让 owner 参与求交，计入 `unreadable_files`，路径列在 `coverage.unreadable`，CLI 显示前 5 个。stderr 里认不出路径的行仍让搜索失败。
+- Codex `item_completed` 里的 `UserMessage` 与 `AgentMessage` 一样重复 `response_item`，不投影。`Extension`、`SubAgentActivity`、`CollabAgentToolCall`、`ImageView`、`Reasoning` 也不投影。
+- `project()` 逐条记录，没有 call_id 配对，所以 Claude `tool_result`、Codex `*_output` 的事件没有工具名。`CommandExecution` 记为 `command`，`FileChange` 记为 `file_change`，MCP 记为 `server.tool`。Codex `function_call` 保留原始 arguments 字符串，不拆成叶子。Claude 与 pi 的工具输入拆成 `key: value` 叶子，数字和布尔值也算。
+- 片段与裁剪的中心：工具输出取最后一处命中，命令回显在前、输出在后，所以输出里有命中时落在输出上；其他事件取第一处命中。
+- `excerpt` 里命中外的上下文事件裁到 `min(chars, 120)`；`--at` 的线程名接受唯一前缀。`ExcerptSpec`、`Excerpt`、`SessionQuery` 从 `src/catalog.ts` 导出，`SearchResult` 在 `contracts.ts`，catalog、server 和 `parseSearchEnvelope` 共用。纯匹配逻辑（词解析、片段、窗口合并、裁剪、最佳命中、coverage 分桶、tier）放在 `src/search.ts`。
+- CLI：`--since`、`--until` 只写日期时按本地时间整天计算，`--until` 含当天。结果行打印 8 位 id，`show` 用 `resolve` 处理前缀歧义。`-n`、`-C`、`--chars` 的默认值只在 catalog 里。
 - 设了 `--cwd` 时孤儿按头部 `cwd` 过滤。没有 `cwd` 的孤儿（Claude `tool-results/*.txt`）会被过滤掉。
 - 归档 Codex 里只靠 SQLite 判定为子线程、头部没有 `parent_thread_id` 的文件，计为孤儿。
 - 候选文件整文件读入再投影，内存上限按单个文件算，没有流式解析。rg 只输出 `-l` 路径，按批收集。
-- 工具调用多的 Session，`show <id> <词>` 可能比整段 `show` 还大：实测 `01a1cc0e` 的 `launchctl` 窗口 9.0K 字符，整段 Transcript 6.4K。窗口里有 Transcript 不含的工具证据（14 处命中）。另一个原因是 `CommandExecution` 的文本以命令开头，裁剪落在同一条 `launchctl` 命令上，`#300`–`#303` 重复显示这条命令，没有显示输出。
-- 未解决的漏召回：Codex 把同一线程续写成多个 rollout 文件（`rollout-…-<id>.jsonl`、`rollout-…-<id>_<段id>.jsonl`），头部没有 `history_base`。live 去重只留最新的文件作为 row，较早的分段既不扫描，也不进 `detail()`。这是 row 建模的既有行为，不是本次引入的。根目录 rg 对账发现：`ModuleNotFoundError` 漏掉 Session `01a1c889`，`installed.json` 漏掉 `01a1c970`，因为词只出现在较早的分段里。
+- 工具调用多的 Session，`show <id> <词>` 可能比整段 `show` 还大：`01a1cc0e` 的 `launchctl` 窗口 9036 字节，`-C 0` 为 5135，整段 Transcript 6397。14 处命中几乎都在工具事件里，同一条命令出现在一次 `exec` 调用和三条输出（两条 `CommandExecution`、一条聚合输出）的回显里，输出部分没有这个词，所以裁剪仍落在命令上。要再缩小，得在投影时去掉输出里的命令回显，这次没有做。
 
 真实数据（2026-11-16，编译后的 `build/sessions`，真实 HOME，第二次运行计时；默认结果排除了调用者自己的 Session，`--self` 一列包含它）：
 
-| 词 | find 结果数（默认 / --self） | coverage：扫描 / 候选 / 未归类 / 仅注入 / 孤儿 | 原文命中文件（根目录 rg） | 耗时 | stdout / stderr 字节 | 旧 find：结果数、耗时、stdout / stderr 字节 |
-|---|---|---|---|---|---|---|
-| launchctl | 10 / 11 | 7683 / 11 / 0 / 0 / 1 | 17，其中 15 在扫描范围内 | 1.95s | 2856 / 0 | 1，1.84s，387 / 3809 |
-| ModuleNotFoundError | 39 / 40 | 7683 / 41 / 0 / 0 / 0 | 45，其中 44 在扫描范围内 | 2.24s | 4734 / 0 | 1，2.14s，499 / 3809 |
-| installed.json | 5 / 6 | 7683 / 5 / 0 / 0 / 0 | 10，其中 9 在扫描范围内 | 2.01s | 1252 / 0 | 1，1.79s，468 / 3809 |
-| herdr_task | 3 / 4 | 7683 / 3 / 0 / 0 / 0 | 8，其中 7 在扫描范围内 | 1.78s | 958 / 0 | 2，1.96s，917 / 3809 |
+| 词 | find 结果数（默认 / --self） | coverage：扫描 / 候选 / 未归类 / 部分 / 仅注入 / 不可读 / 孤儿 | 耗时 | stdout / stderr 字节 |
+|---|---|---|---|---|
+| launchctl | 11 / 12 | 7701 / 13 / 0 / 0 / 0 / 0 / 1 | 1.92s | 3081 / 0 |
+| ModuleNotFoundError | 40 / 41 | 7701 / 45 / 0 / 0 / 0 / 0 / 0 | 2.21s | 4653 / 0 |
+| installed.json | 6 / 7 | 7701 / 6 / 0 / 0 / 0 / 0 / 0 | 1.78s | 1523 / 0 |
+| herdr_task | 3 / 4 | 7701 / 4 / 0 / 0 / 0 / 0 / 0 | 1.77s | 948 / 0 |
+| shepherdr uninstall | 5 | 7701 / 45 / 18 / 12 / 0 / 0 / 0 | 2.61s | 1429 / 0 |
 
-同一时刻对账，`--self` 的候选数是 15、45、9、7，根目录 rg 落在扫描范围内的是 15、44、9、7。ModuleNotFoundError 差的 1 个是归档文件 `…01a03cdc-63b5-….jsonl`，里面有 1520 个 NUL 字节：rg 递归扫目录时遇到 NUL 按二进制文件提前停下，find 逐个传路径，会搜完整个文件。范围外的文件全部是 Codex 的较早分段文件，见上面「未解决的漏召回」。耗时是单次热运行；新 find 扫描 7683–7688 个文件（含子线程与孤儿），旧 find 只扫 4442 个 row。
+与上一版（e41c427）的 `--self` 结果集对比，四个词都只增不减：launchctl 多 `01a1cfae`，ModuleNotFoundError 多 `01a1c889`，installed.json 多 `01a1c970`，herdr_task 不变。多出来的都是词只在较早分段里的续写 rollout。旧 find 在同一批词上是 1、1、1、2 个结果，stderr 各 3809 字节。
 
-`find launchctl --since 14d` 耗时 0.68s。`show 0cfeba3f launchctl` 输出 1136 字符，整段 `show` 7588 字符。
+`find launchctl --since 14d` 耗时 0.71s。`show 0cfeba3f launchctl` 输出 1146 字节，整段 `show` 7588 字符。
