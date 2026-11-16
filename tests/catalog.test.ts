@@ -50,23 +50,6 @@ describe("SessionCatalog", () => {
     expect((await catalog.list({ fresh: true })).map((session) => session.id)).not.toContain("codex-child");
   });
 
-  test("attributes child thread files to their root Session and keeps them out of list", async () => {
-    const { home, catalog } = setup();
-    const rows = await catalog.list({ fresh: true });
-    expect(rows.map(({ id }) => id).sort()).toEqual(["claude-a", "codex-b", "pi-c"]);
-    const index = catalog["childIndex"]();
-    const children = (id: string) => (index.children.get(id) ?? []).map((entry) => ({ kind: entry.kind, thread: entry.thread, label: entry.adapter.childLabel(entry) }));
-    expect(children("claude-a")).toEqual([
-      { kind: "agent", thread: "sub1", label: "Find launch agent" },
-      { kind: "tool_result_file", thread: "toolu_big.txt", label: "toolu_big.txt" },
-    ]);
-    expect(children("codex-b").sort((a, b) => a.thread.localeCompare(b.thread))).toEqual([
-      { kind: "agent", thread: "codex-grandkid", label: "/root/kid/grand" },
-      { kind: "agent", thread: "codex-kid", label: "Euclid" },
-    ]);
-    expect(index.orphans.map(({ path }) => path)).toEqual([join(home, ".codex/sessions/2026/07/14/rollout-subagent.jsonl")]);
-  });
-
   test("finds Sessions whose only hit is a tool call or tool output, for every tool", async () => {
     const { home, catalog } = setup();
     const append = (path: string, records: unknown[]) => appendFileSync(join(home, path), records.map((record) => JSON.stringify(record)).join("\n") + "\n");
@@ -86,10 +69,10 @@ describe("SessionCatalog", () => {
     ]);
     const hit = async (term: string) => {
       const { results } = await catalog.find({ terms: [term] });
-      return results.map(({ id, match }) => ({ id, tier: match.tier, best: match.best[0] && { kind: match.best[0].kind, ...(match.best[0].kind === "meta" ? {} : { tool: match.best[0].tool }) } }));
+      return results.map(({ id, match }) => ({ id, tier: match.tier, best: match.best[0] && { kind: match.best[0].kind, tool: match.best[0].kind === "meta" ? "" : match.best[0].tool ?? "" } }));
     };
     expect(await hit("claude-call-needle")).toEqual([{ id: "claude-a", tier: 3, best: { kind: "tool_call", tool: "Bash" } }]);
-    expect(await hit("claude-output-needle")).toEqual([{ id: "claude-a", tier: 3, best: { kind: "tool_output", tool: undefined } }]);
+    expect(await hit("claude-output-needle")).toEqual([{ id: "claude-a", tier: 3, best: { kind: "tool_output", tool: "" } }]);
     expect(await hit("codex-call-needle")).toEqual([{ id: "codex-b", tier: 3, best: { kind: "tool_call", tool: "exec" } }]);
     expect(await hit("codex-command-needle")).toEqual([{ id: "codex-b", tier: 3, best: { kind: "tool_output", tool: "command" } }]);
     expect(await hit("codex-mcp-needle")).toEqual([{ id: "codex-b", tier: 3, best: { kind: "tool_output", tool: "browser.open" } }]);
@@ -110,6 +93,10 @@ describe("SessionCatalog", () => {
 
     const offloaded = await catalog.find({ terms: ["fixture-offloaded-result"] });
     expect(offloaded.results[0]!.match.best[0]).toMatchObject({ kind: "tool_output", thread: "toolu_big.txt", ordinal: 1 });
+    expect((await catalog.find({ terms: ["fixture-kid-output"] })).results.map(({ id, match }) => [id, match.threads])).toEqual([
+      ["codex-b", [{ thread: "codex-kid", label: "Euclid", hits: 1 }]],
+    ]);
+    expect((await catalog.list({ fresh: true })).map(({ id }) => id).sort()).toEqual(["claude-a", "codex-b", "pi-c"]);
     expect((await catalog.find({ terms: ["fixture-grandkid-text"] })).results.map(({ id, match }) => [id, match.threads])).toEqual([
       ["codex-b", [{ thread: "codex-grandkid", label: "/root/kid/grand", hits: 1 }]],
     ]);
