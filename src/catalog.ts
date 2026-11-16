@@ -105,6 +105,12 @@ type Mark = {
   added?: string;
 };
 type Marks = Record<string, Mark>;
+/** A `tool_result_file` is plain text whose event ordinals are line indexes. */
+type ChildFile =
+  | { kind: "agent"; path: string; thread: string; label: string; parentOriginalId?: string }
+  | { kind: "tool_result_file"; path: string; thread: string; label: string; parentOriginalId: string };
+type ChildEntry = ChildFile & { adapter: Adapter; mtime: number };
+type ChildIndex = { children: Map<string, ChildEntry[]>; orphans: ChildEntry[] };
 
 export interface CatalogOptions {
   home?: string;
@@ -139,6 +145,10 @@ interface Adapter {
   events(id: string, path?: string): RawEvent[];
   /** A child thread file's ordered events, without main-file filters. */
   childEvents(path: string): RawEvent[];
+  /** Child thread files under this root with their direct parent's original id; not subject to MIN_SIZE. */
+  children(): ChildFile[];
+  /** Display label of a child; may read a sidecar file, so callers ask only for children they show. */
+  childLabel(file: ChildFile): string;
   rename(id: string, name: string, path?: string): Promise<void>;
   findFile(id: string): string | undefined;
   allowed(path: string): boolean;
@@ -288,6 +298,16 @@ function* readHeadLines(path: string, limit: number): Generator<string> {
   } finally {
     if (fd !== undefined) closeSync(fd);
   }
+}
+
+function headText(path: string, length: number): string {
+  let fd: number | undefined;
+  try {
+    fd = openSync(path, "r");
+    const buffer = Buffer.allocUnsafe(length);
+    return buffer.toString("utf8", 0, readSync(fd, buffer, 0, length, 0));
+  } catch { return ""; }
+  finally { if (fd !== undefined) closeSync(fd); }
 }
 
 function latest(paths: string[]): string | undefined {
@@ -488,9 +508,21 @@ abstract class JsonlAdapter implements Adapter {
 
   parseJob(paths: string[]): ArchiveParseJob { return { tool: this.tool, root: this.root, paths }; }
 
+  children(): ChildFile[] { return []; }
+
+  childLabel(file: ChildFile): string { return file.label || file.thread; }
+
+  /** The last discover() result, reused so children() does not walk the root twice. */
+  protected discovered: string[] | undefined;
+
+  protected glob(pattern: string): string[] {
+    return existsSync(this.root) ? [...new Bun.Glob(pattern).scanSync({ cwd: this.root, absolute: true, dot: true })].filter((path) => this.allowed(path)) : [];
+  }
+
   protected files(pattern: string): string[] {
     const files = existsSync(this.root) ? [...new Bun.Glob(pattern).scanSync({ cwd: this.root, absolute: true, dot: true })] : [];
     this.discoveredCount = files.length;
+    this.discovered = files;
     return this.realPaths ? files.filter((path) => this.allowed(path)) : files;
   }
 
@@ -656,6 +688,34 @@ class ClaudeAdapter extends JsonlAdapter {
   // Subagent files are sidechain throughout; only a main file drops sidechain records.
   override events(id: string, path?: string): RawEvent[] {
     return this.eventsOf(readFileSync(this.mainFile(id, path), "utf8"), (record) => !record.isSidechain);
+  }
+
+  override children(): ChildFile[] {
+    const deep = this.archive ? "**" : "*/*";
+    const parentDirectory = (path: string, marker: string) => {
+      const parts = relative(this.root, path).split(sep);
+      return parts[parts.lastIndexOf(marker) - 1] ?? "";
+    };
+    const agentFiles = this.archive ? this.glob("**/agent-*.jsonl") : [...this.glob("*/agent-*.jsonl"), ...this.glob("*/*/subagents/**/agent-*.jsonl")];
+    const agents = agentFiles.map((path): ChildFile => {
+      const thread = basename(path, ".jsonl").slice("agent-".length);
+      if (relative(this.root, path).split(sep).includes("subagents"))
+        return { kind: "agent", path, thread, label: "", parentOriginalId: parentDirectory(path, "subagents") };
+      const parent = stringValue(parseRecord(readHeadLines(path, 1).next().value ?? "")?.sessionId);
+      return { kind: "agent", path, thread, label: thread, ...(parent ? { parentOriginalId: parent } : {}) };
+    });
+    const results = this.glob(`${deep}/tool-results/*.txt`).map((path): ChildFile =>
+      ({ kind: "tool_result_file", path, thread: basename(path), label: basename(path), parentOriginalId: parentDirectory(path, "tool-results") }));
+    return [...agents, ...results];
+  }
+
+  override childLabel(file: ChildFile): string {
+    if (file.label) return file.label;
+    try {
+      const meta: unknown = JSON.parse(readFileSync(file.path.replace(/\.jsonl$/, ".meta.json"), "utf8"));
+      if (isRecord(meta)) return stringValue(meta.description) || stringValue(meta.agentType) || file.thread;
+    } catch {}
+    return file.thread;
   }
 
   async rename(id: string, name: string, locatedPath?: string): Promise<void> {
@@ -881,6 +941,19 @@ class CodexAdapter extends JsonlAdapter {
     if (done.type === "FileChange" && isRecord(done.changes))
       return toolEvent("tool_output", "file_change", Object.entries(done.changes).map(([path, change]) => `${path}\n${flatten(change)}`).join("\n"));
     return [];
+  }
+
+  override children(): ChildFile[] {
+    return (this.discovered ?? this.discover()).flatMap((path): ChildFile[] => {
+      const indexed = this.archiveSubagents.get(realPath(path));
+      // A child's session_meta names itself and its parent in the first few hundred bytes, before base_instructions.
+      const head = headText(path, 4096);
+      if (!indexed && !/"thread_source":"subagent"|"parent_thread_id"|"subagent":\{/.test(head)) return [];
+      const field = (name: string) => head.match(new RegExp(`"${name}":"([^"]*)"`))?.[1] ?? "";
+      const parent = field("parent_thread_id"), thread = field("id") || indexed || basename(path, ".jsonl");
+      const label = field("agent_nickname") || field("agent_path") || thread;
+      return [{ kind: "agent", path, thread, label, ...(parent ? { parentOriginalId: parent } : {}) }];
+    });
   }
 
   override events(id: string, path?: string): RawEvent[] {
@@ -1247,6 +1320,39 @@ export class SessionCatalog {
     }
     this.archiveBindings = retained;
     this.bindings = bindings;
+  }
+
+  /** Attributes every child file of the last scan to a row, walking child-of-child chains; the rest are orphans. */
+  private childIndex(): ChildIndex {
+    const rowIds = new Map<Adapter, Map<string, string>>(), rowPaths = new Set<string>();
+    for (const [id, location] of this.locations) {
+      const ids = rowIds.get(location.adapter) ?? new Map<string, string>();
+      ids.set(location.originalId, id);
+      rowIds.set(location.adapter, ids);
+      rowPaths.add(resolve(location.path));
+    }
+    const index: ChildIndex = { children: new Map(), orphans: [] };
+    for (const { adapter } of this.bindings) {
+      let files: ChildFile[];
+      try { files = adapter.children(); } catch { continue; }
+      const parents = new Map(files.flatMap((file) => file.kind === "agent" ? [[file.thread, file.parentOriginalId] as const] : []));
+      const ids = rowIds.get(adapter);
+      for (const file of files) {
+        if (rowPaths.has(resolve(file.path))) continue;
+        let mtime: number;
+        try { mtime = statSync(file.path).mtimeMs / 1000; } catch { continue; }
+        let parent = file.parentOriginalId, owner: string | undefined;
+        for (const seen = new Set<string>(); parent && !seen.has(parent); parent = parents.get(parent)) {
+          seen.add(parent);
+          owner = ids?.get(parent);
+          if (owner) break;
+        }
+        const entry: ChildEntry = { ...file, adapter, mtime };
+        if (!owner) index.orphans.push(entry);
+        else index.children.set(owner, [...index.children.get(owner) ?? [], entry]);
+      }
+    }
+    return index;
   }
 
   private location(id: string): Located {

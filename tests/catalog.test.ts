@@ -50,6 +50,23 @@ describe("SessionCatalog", () => {
     expect((await catalog.list({ fresh: true })).map((session) => session.id)).not.toContain("codex-child");
   });
 
+  test("attributes child thread files to their root Session and keeps them out of list", async () => {
+    const { home, catalog } = setup();
+    const rows = await catalog.list({ fresh: true });
+    expect(rows.map(({ id }) => id).sort()).toEqual(["claude-a", "codex-b", "pi-c"]);
+    const index = catalog["childIndex"]();
+    const children = (id: string) => (index.children.get(id) ?? []).map((entry) => ({ kind: entry.kind, thread: entry.thread, label: entry.adapter.childLabel(entry) }));
+    expect(children("claude-a")).toEqual([
+      { kind: "agent", thread: "sub1", label: "Find launch agent" },
+      { kind: "tool_result_file", thread: "toolu_big.txt", label: "toolu_big.txt" },
+    ]);
+    expect(children("codex-b").sort((a, b) => a.thread.localeCompare(b.thread))).toEqual([
+      { kind: "agent", thread: "codex-grandkid", label: "/root/kid/grand" },
+      { kind: "agent", thread: "codex-kid", label: "Euclid" },
+    ]);
+    expect(index.orphans.map(({ path }) => path)).toEqual([join(home, ".codex/sessions/2026/07/14/rollout-subagent.jsonl")]);
+  });
+
   test("deep search combines summary fields with readable Transcript text", async () => {
     const { home, catalog } = setup();
     appendFileSync(join(home, ".claude/projects/-tmp-alpha/claude-a.jsonl"), JSON.stringify({

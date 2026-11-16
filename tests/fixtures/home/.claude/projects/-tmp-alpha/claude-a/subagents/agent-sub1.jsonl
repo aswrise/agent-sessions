@@ -1,0 +1,3 @@
+{"type":"user","isSidechain":true,"agentId":"sub1","sessionId":"claude-a","cwd":"/tmp/alpha project","timestamp":"2026-07-14T01:02:00Z","message":{"role":"user","content":"Explore fixture launch agents"}}
+{"type":"assistant","isSidechain":true,"agentId":"sub1","sessionId":"claude-a","timestamp":"2026-07-14T01:03:00Z","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_sub","name":"Bash","input":{"command":"launchctl list | grep fixture-child-call"}}]}}
+{"type":"user","isSidechain":true,"agentId":"sub1","sessionId":"claude-a","timestamp":"2026-07-14T01:04:00Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_sub","content":"0 fixture-child-output"}]},"toolUseResult":{"stdout":"0 fixture-child-output"}}
