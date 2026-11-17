@@ -1468,7 +1468,7 @@ tr.pinned .pinbtn{color:var(--lime)}
 .detail-meta{color:var(--ash);font-size:12px;width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .manual-lineage-form{display:flex;align-items:center;gap:8px;width:100%}.manual-lineage-form label{color:var(--ash);font-size:11px;white-space:nowrap}.manual-lineage-form input{min-width:220px;flex:1;height:34px;padding:0 10px;border:1px solid var(--input-line);border-radius:8px;background:var(--input-bg);color:var(--paper);font:11px ui-monospace,monospace;outline:none}.manual-lineage-form input:focus{border-color:var(--lime)}
 .manual-lineages{display:flex;gap:8px;flex-wrap:wrap;width:100%}.manual-lineage{display:inline-flex;align-items:center;gap:8px;padding:4px 5px 4px 9px;border:1px dashed color-mix(in srgb,var(--lime) 28%,var(--obsidian));border-radius:9px;color:var(--mist);font-size:11px}
-.msglist{display:grid;gap:14px;padding:20px 0 48px;max-width:1040px;margin:0 auto}
+.msglist{display:grid;grid-template-columns:minmax(0,1fr);gap:14px;padding:20px 0 48px;max-width:1040px;margin:0 auto}
 .bubble{max-width:88%;border:1px solid var(--obsidian);border-radius:14px 14px 14px 4px;
   padding:13px 15px;background:var(--carbon);box-shadow:0 5px 18px rgba(0,0,0,.06)}
 .bubble.user{margin-left:auto;border-radius:14px 14px 4px 14px;
