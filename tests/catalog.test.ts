@@ -296,23 +296,6 @@ exec '${realRg}' "$@"
     expect(cached[0]!.name).not.toBe("caller mutation");
   });
 
-  test("automatically refreshes Lineage before returning the global graph", async () => {
-    const { home, catalog } = setup();
-    const artifact = join(home, "handoff.md");
-    appendFileSync(join(home, ".codex/sessions/2026/07/14/rollout-codex-b.jsonl"), [
-      JSON.stringify({ timestamp: "2026-07-14T01:00:00Z", type: "event_msg", payload: { type: "task_started", turn_id: "handoff" } }),
-      JSON.stringify({ timestamp: "2026-07-14T01:00:01Z", type: "event_msg", payload: { type: "user_message", message: "write handoff" } }),
-      JSON.stringify({ timestamp: "2026-07-14T01:00:02Z", type: "event_msg", payload: { type: "patch_apply_end", turn_id: "handoff", success: true, changes: { [artifact]: { type: "add" } } } }),
-    ].join("\n") + "\n");
-    appendFileSync(join(home, ".pi/agent/sessions/-tmp-gamma/pi-c.jsonl"), JSON.stringify({
-      type: "message", timestamp: "2026-07-14T02:00:00Z", message: { role: "user", content: [{ type: "text", text: `continue ${artifact}` }] },
-    }) + "\n");
-
-    expect((await catalog.lineages()).edges).toEqual([
-      expect.objectContaining({ upstream_id: "codex-b", downstream_id: "pi-c", path: artifact }),
-    ]);
-  });
-
   test("prefers Codex thread_name over a legacy local name", async () => {
     const { catalog } = setup();
     expect((await catalog.list({ fresh: true })).find(({ id }) => id === "codex-b")?.name).toBe("Codex explicit");
@@ -336,50 +319,6 @@ exec '${realRg}' "$@"
     await catalog.updateMark("claude-a", { pin: false });
     expect(JSON.parse(readFileSync(marks, "utf8"))["claude-a"]).toBeUndefined();
     expect((await new SessionCatalog({ home }).list({ fresh: true })).find(({ id }) => id === "claude-a")?.pinned).toBeUndefined();
-  });
-
-  test("keeps manual Lineage after refresh, cache deletion, and Catalog restart", async () => {
-    const { home, catalog } = setup();
-    await catalog.list({ fresh: true });
-    await catalog.addManualLineage("claude-a", "codex-b");
-    expect((await catalog.refreshLineage(true)).edges).toBe(1);
-    rmSync(join(home, ".local/share/session-snapshots/lineage.sqlite"), { force: true });
-
-    const lineage = await new SessionCatalog({ home }).lineage("codex-b", false);
-    expect(lineage.edges).toEqual([expect.objectContaining({
-      relation: "manual", upstream_id: "claude-a", downstream_id: "codex-b",
-    })]);
-    expect(readFileSync(join(home, ".local/share/session-snapshots/manual-lineages.json"), "utf8")).toContain("claude-a");
-  });
-
-  test("removes only the selected manual Lineage persistently", async () => {
-    const { home, catalog } = setup();
-    await catalog.addManualLineage("claude-a", "codex-b");
-    await catalog.addManualLineage("pi-c", "codex-b");
-
-    await catalog.removeManualLineage("claude-a", "codex-b");
-
-    const lineage = await new SessionCatalog({ home }).lineage("codex-b", false);
-    expect(lineage.edges).toEqual([expect.objectContaining({
-      relation: "manual", upstream_id: "pi-c", downstream_id: "codex-b",
-    })]);
-  });
-
-  test("rebuilds the derived cache before rejecting a cyclic manual Lineage", async () => {
-    const { home, catalog } = setup();
-    const handoff = join(home, "handoff.md");
-    appendFileSync(join(home, ".claude/projects/-tmp-alpha/claude-a.jsonl"), [
-      { type: "assistant", timestamp: "2026-07-14T01:01:00Z", message: { role: "assistant", content: [{ type: "tool_use", id: "write-handoff", name: "Write", input: { file_path: handoff } }] } },
-      { type: "user", timestamp: "2026-07-14T01:02:00Z", message: { role: "user", content: [{ type: "tool_result", tool_use_id: "write-handoff", content: "ok" }] } },
-    ].map((record) => JSON.stringify(record)).join("\n") + "\n");
-    appendFileSync(join(home, ".codex/sessions/2026/07/14/rollout-codex-b.jsonl"), JSON.stringify({
-      type: "response_item", timestamp: "2026-07-14T02:03:00Z",
-      payload: { type: "message", role: "user", content: [{ type: "input_text", text: `continue ${handoff}` }] },
-    }) + "\n");
-    rmSync(join(home, ".local/share/session-snapshots/lineage.sqlite"), { force: true });
-
-    await expect(catalog.addManualLineage("codex-b", "claude-a"))
-      .rejects.toEqual(new CatalogError("invalid", "手动关系不能形成循环"));
   });
 
   test("keeps each adapter's rename behavior behind the Catalog", async () => {

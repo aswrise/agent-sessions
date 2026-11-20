@@ -1,15 +1,10 @@
 <script setup lang="ts">
 import MarkdownIt from "markdown-it";
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
-import LineageGraph from "./LineageGraph.vue";
-import LineagePreview from "./LineagePreview.vue";
-import { lineageComponents } from "./lineageLayout.ts";
 import { compareModels, shortModel } from "./models.ts";
 import { sourceCopy } from "./sourceCopy.ts";
 import {
   isTool,
-  parseLineageRefresh,
-  parseLineageView,
   parseSearchEnvelope,
   parseSessionsEnvelope,
   parseTranscriptView,
@@ -17,14 +12,12 @@ import {
   type SessionStatus,
   type SourceDiagnostic,
   type SessionView,
-  type LineageView,
   type Tool,
   type TranscriptView,
 } from "./contracts.ts";
 
-type Tab = "" | Tool | "__star__" | "__chain__" | "__arch__";
+type Tab = "" | Tool | "__star__" | "__arch__";
 type SearchMode = "normal" | "deep";
-type ViewMode = "sessions" | "lineage";
 type SortKey = keyof Pick<SessionView, "starred" | "mtime" | "model" | "name" | "size_kb" | "cwd">;
 type MenuItem = { value: string; label: string };
 type MenuState = {
@@ -39,8 +32,6 @@ type Editing = { id: string; field: "name" | "star_note" };
 type PreviewState =
   | { key: string; kind: "text"; text: string; anchor: HTMLElement; style: Record<string, string> }
   | { key: string; kind: "transcript"; detail?: TranscriptView; loading: boolean; anchor: HTMLElement; style: Record<string, string> };
-type ChainInfo = { chainKey: string; size: number; view: LineageView };
-type LineagePreviewState = { row: SessionView; info: ChainInfo; anchor: HTMLElement; pinned: boolean; style: Record<string, string> };
 
 const PAGE_SIZE = 100;
 const MODEL_CHIP_LIMIT = 20;
@@ -76,7 +67,6 @@ const copyGroups = computed(() => {
 const copies = (row: SessionView) => copyGroups.value.get(JSON.stringify([row.tool, row.session_id ?? row.id])) ?? [];
 const error = ref("");
 const notice = ref("");
-const viewMode = ref<ViewMode>("sessions");
 const tab = ref<Tab>("");
 const keyword = ref("");
 const effectiveKeyword = ref("");
@@ -152,24 +142,12 @@ function closeFilePreview(): void {
 }
 
 const detailError = ref("");
-const lineage = ref<LineageView>();
-const lineageLoading = ref(false);
-const manualLineageOpen = ref(false);
-const manualUpstreamId = ref("");
-const addingManualLineage = ref(false);
-const removingManualUpstreamId = ref("");
-const indexingLineage = ref(false);
-const globalLineage = ref<LineageView>();
-const globalLineageLoading = ref(false);
-const globalLineageFocus = ref("");
 const editing = ref<Editing>();
 const editValue = ref("");
 const menu = ref<MenuState>();
 const menuElement = ref<HTMLElement>();
 const preview = ref<PreviewState>();
 const previewElement = ref<HTMLElement>();
-const lineagePreview = ref<LineagePreviewState>();
-const lineagePreviewElement = ref<HTMLElement>();
 const previewCache = new Map<string, TranscriptView>();
 const previewRequests = new Map<string, Promise<TranscriptView>>();
 let transcriptRevision = 0;
@@ -179,10 +157,6 @@ let toastTimer: ReturnType<typeof setTimeout> | undefined;
 let copiedPathTimer: ReturnType<typeof setTimeout> | undefined;
 let previewShowTimer: ReturnType<typeof setTimeout> | undefined;
 let previewHideTimer: ReturnType<typeof setTimeout> | undefined;
-let lineagePreviewShowTimer: ReturnType<typeof setTimeout> | undefined;
-let lineagePreviewHideTimer: ReturnType<typeof setTimeout> | undefined;
-let globalLineageRequest: Promise<void> | undefined;
-let suppressLineageFocusOpen = false;
 
 function savedWidths(): number[] {
   try {
@@ -201,33 +175,12 @@ function initialTheme(): "dark" | "light" {
 const theme = ref<"dark" | "light">(initialTheme());
 const compact = ref(localStorage.getItem("compact") === "1");
 
-const chainInfo = computed(() => {
-  const result = new Map<string, ChainInfo>();
-  if (!globalLineage.value?.edges.length) return result;
-  for (const view of lineageComponents(globalLineage.value)) {
-    if (!view.edges.length) continue;
-    const chainKey = view.sessions.map(({ id }) => id).sort().join(":");
-    const info = { chainKey, size: view.sessions.length, view };
-    for (const session of view.sessions) result.set(session.id, info);
-  }
-  return result;
-});
-const manualUpstreams = computed(() => {
-  const view = lineage.value, downstreamId = detail.value?.id;
-  if (!view || !downstreamId) return [];
-  return view.edges.flatMap((edge) => {
-    if (edge.relation !== "manual" || edge.downstream_id !== downstreamId) return [];
-    const session = view.sessions.find(({ id }) => id === edge.upstream_id);
-    return [{ id: edge.upstream_id, label: session?.name || session?.first_msg || edge.upstream_id }];
-  });
-});
 const tabs = computed<{ value: Tab; label: string }[]>(() => [
   { value: "", label: "全部" },
   { value: "claude", label: "claude" },
   { value: "codex", label: "codex" },
   { value: "pi", label: "pi" },
   { value: "__star__", label: "★ 标记" },
-  ...(chainInfo.value.size ? [{ value: "__chain__" as const, label: "⛓ 有链" }] : []),
   { value: "__arch__", label: "归档" },
 ]);
 
@@ -237,7 +190,6 @@ const tabCounts = computed<Record<Tab, number>>(() => ({
   codex: rows.value.filter((row) => !row.archived && row.tool === "codex").length,
   pi: rows.value.filter((row) => !row.archived && row.tool === "pi").length,
   __star__: rows.value.filter((row) => !row.archived && row.starred).length,
-  __chain__: rows.value.filter((row) => !row.archived && chainInfo.value.has(row.id)).length,
   __arch__: rows.value.filter((row) => row.archived).length,
 }));
 
@@ -280,7 +232,6 @@ const filtered = computed(() => {
   const result = rows.value.filter((row) => {
     if (tab.value === "__arch__" ? !row.archived : row.archived) return false;
     if (tab.value === "__star__" && !row.starred) return false;
-    if (tab.value === "__chain__" && !chainInfo.value.has(row.id)) return false;
     if (isTool(tab.value) && row.tool !== tab.value) return false;
     if (model.value && row.model !== model.value) return false;
     if (path.value && row.cwd !== path.value) return false;
@@ -391,43 +342,6 @@ async function loadArchive(): Promise<void> {
   } catch {
     archiveLoad = undefined;
   }
-}
-
-async function indexLineage(): Promise<void> {
-  indexingLineage.value = true;
-  try {
-    const response = await fetch("/api/lineage/index", { method: "POST", body: "{}" });
-    if (!response.ok) throw new Error();
-    const result = parseLineageRefresh(await response.json());
-    showToast(`已分析 ${result.sessions} 个 Session，发现 ${result.edges} 条关系`);
-    await loadGlobalLineage(viewMode.value !== "lineage", true);
-  } catch {
-    showToast("关系分析失败", true);
-  } finally {
-    indexingLineage.value = false;
-  }
-}
-
-async function loadGlobalLineage(silent = false, force = false): Promise<void> {
-  if (!force && globalLineage.value) return;
-  if (globalLineageRequest) {
-    await globalLineageRequest;
-    if (!force) return;
-  }
-  globalLineageLoading.value = true;
-  globalLineageRequest = (async () => {
-    try {
-      const response = await fetch("/api/lineages");
-      if (!response.ok) throw new Error();
-      globalLineage.value = parseLineageView(await response.json());
-    } catch {
-      if (!silent) showToast("关系图加载失败", true);
-    } finally {
-      globalLineageLoading.value = false;
-      globalLineageRequest = undefined;
-    }
-  })();
-  return globalLineageRequest;
 }
 
 function resetDeepSearch(): void {
@@ -612,7 +526,6 @@ async function placeMenu(): Promise<void> {
 function openMenu(key: string, anchor: HTMLElement, items: MenuItem[], value: string, select: MenuState["select"]): void {
   if (menu.value?.key === key) { closeMenu(true); return; }
   closeMenu();
-  closeLineagePreview();
   menu.value = { key, anchor, items, value, select, style: {} };
   void placeMenu();
 }
@@ -681,115 +594,27 @@ async function fetchDetail(id: string): Promise<TranscriptView> {
 }
 
 async function openDetail(id: string, push = true): Promise<void> {
-  manualLineageOpen.value = false;
-  manualUpstreamId.value = "";
   detail.value = undefined;
-  lineage.value = undefined;
-  lineageLoading.value = false;
   detailError.value = "";
   detailLoading.value = true;
   hidePreview();
-  closeLineagePreview();
   closeMenu();
   if (push) history.pushState(null, "", `/?session=${encodeURIComponent(id)}`);
-  void loadLineage(id);
   try { detail.value = await fetchDetail(id); }
   catch { detailError.value = "加载失败"; }
   finally { detailLoading.value = false; }
 }
 
-async function loadLineage(id: string): Promise<void> {
-  lineageLoading.value = true;
-  lineage.value = undefined;
-  try {
-    const response = await fetch(`/api/lineage?id=${encodeURIComponent(id)}`);
-    if (!response.ok) throw new Error();
-    lineage.value = parseLineageView(await response.json());
-  } catch {
-    showToast("关系链分析失败", true);
-  } finally {
-    lineageLoading.value = false;
-  }
-}
-
-async function addManualLineage(): Promise<void> {
-  const downstreamId = detail.value?.id, upstreamId = manualUpstreamId.value.trim();
-  if (!downstreamId || !rows.value.some((row) => row.id === upstreamId && row.id !== downstreamId)) {
-    showToast("请选择有效的上游 Session", true);
-    return;
-  }
-  addingManualLineage.value = true;
-  try {
-    const response = await fetch("/api/lineage/manual", {
-      method: "POST", body: JSON.stringify({ upstream_id: upstreamId, downstream_id: downstreamId }),
-    });
-    if (!response.ok) throw new Error();
-    manualLineageOpen.value = false;
-    manualUpstreamId.value = "";
-    await Promise.all([loadLineage(downstreamId), loadGlobalLineage(true, true)]);
-    showToast("已添加手动上游");
-  } catch {
-    showToast("添加手动上游失败", true);
-  } finally {
-    addingManualLineage.value = false;
-  }
-}
-
-async function removeManualLineage(upstreamId: string): Promise<void> {
-  const downstreamId = detail.value?.id;
-  if (!downstreamId) return;
-  removingManualUpstreamId.value = upstreamId;
-  try {
-    const response = await fetch("/api/lineage/manual", {
-      method: "DELETE", body: JSON.stringify({ upstream_id: upstreamId, downstream_id: downstreamId }),
-    });
-    if (!response.ok) throw new Error();
-    await Promise.all([loadLineage(downstreamId), loadGlobalLineage(true, true)]);
-    showToast("已取消手动关联");
-  } catch {
-    showToast("取消手动关联失败", true);
-  } finally {
-    removingManualUpstreamId.value = "";
-  }
-}
-
 function showSessions(push = true): void {
-  closeLineagePreview();
-  viewMode.value = "sessions";
   detail.value = undefined;
   detailError.value = "";
   detailLoading.value = false;
   if (push) history.pushState(null, "", "/");
 }
 
-function showLineages(push = true, focusId = ""): void {
-  closeLineagePreview();
-  viewMode.value = "lineage";
-  globalLineageFocus.value = focusId;
-  detail.value = undefined;
-  detailError.value = "";
-  detailLoading.value = false;
-  if (push) history.pushState(null, "", "/?view=lineage");
-  void loadGlobalLineage();
-}
-
-async function locateLineage(id: string): Promise<void> {
-  showLineages(true, id);
-  await loadGlobalLineage();
-  await nextTick();
-  try { document.querySelector<HTMLElement>("#lineageOverview .dag-node.focus")?.closest<HTMLElement>(".dag-card")?.scrollIntoView({ block: "start" }); } catch {}
-}
-
-function showList(push = true): void {
-  lineage.value = undefined;
-  lineageLoading.value = false;
-  if (viewMode.value === "lineage") showLineages(push); else showSessions(push);
-}
-
 function syncHistory(): void {
   const params = new URLSearchParams(location.search), id = params.get("session");
   if (id) void openDetail(id, false);
-  else if (params.get("view") === "lineage") showLineages(false);
   else showSessions(false);
 }
 
@@ -817,7 +642,6 @@ function revealPreview(value: PreviewState): void {
 }
 
 function showTextPreview(event: MouseEvent, key: string, text: string): void {
-  closeLineagePreview();
   const cell = event.currentTarget as HTMLElement;
   if (cell.scrollWidth <= cell.clientWidth + 1) { hidePreview(); return; }
   clearTimeout(previewHideTimer);
@@ -828,7 +652,6 @@ function showTextPreview(event: MouseEvent, key: string, text: string): void {
 }
 
 function showTranscriptPreview(row: SessionView, event: MouseEvent): void {
-  closeLineagePreview();
   const anchor = event.currentTarget as HTMLElement;
   const key = `transcript:${row.id}`;
   clearTimeout(previewHideTimer);
@@ -867,98 +690,6 @@ function hidePreview(): void {
   clearTimeout(previewHideTimer);
   previewShowTimer = undefined;
   preview.value = undefined;
-}
-
-async function placeLineagePreview(): Promise<void> {
-  await nextTick();
-  if (!lineagePreview.value || !lineagePreviewElement.value) return;
-  const box = lineagePreview.value.anchor.getBoundingClientRect();
-  const width = Math.min(700, innerWidth - 24);
-  let top = box.bottom + 6;
-  let origin = "top left";
-  if (top + lineagePreviewElement.value.offsetHeight > innerHeight - 8) {
-    top = Math.max(8, box.top - lineagePreviewElement.value.offsetHeight - 6);
-    origin = "bottom left";
-  }
-  lineagePreview.value.style = {
-    width: `${width}px`, left: `${Math.max(12, Math.min(box.left, innerWidth - width - 12))}px`,
-    top: `${top}px`, transformOrigin: origin,
-  };
-}
-
-function revealLineagePreview(row: SessionView, anchor: HTMLElement, pinned = false): void {
-  const info = chainInfo.value.get(row.id);
-  if (!info) return;
-  hidePreview();
-  closeMenu();
-  lineagePreview.value = { row, info, anchor, pinned, style: {} };
-  void placeLineagePreview();
-}
-
-function scheduleLineagePreview(row: SessionView, event: MouseEvent): void {
-  if (lineagePreview.value?.pinned) return;
-  hidePreview();
-  const anchor = event.currentTarget as HTMLElement;
-  clearTimeout(lineagePreviewHideTimer);
-  clearTimeout(lineagePreviewShowTimer);
-  if (lineagePreview.value) revealLineagePreview(row, anchor);
-  else lineagePreviewShowTimer = setTimeout(() => revealLineagePreview(row, anchor), 180);
-}
-
-function scheduleLineagePreviewHide(): void {
-  clearTimeout(lineagePreviewShowTimer);
-  clearTimeout(lineagePreviewHideTimer);
-  if (!lineagePreview.value?.pinned) lineagePreviewHideTimer = setTimeout(closeLineagePreview, 100);
-}
-
-function keepLineagePreview(): void {
-  clearTimeout(lineagePreviewHideTimer);
-}
-
-function closeLineagePreview(refocus = false): void {
-  clearTimeout(lineagePreviewShowTimer);
-  clearTimeout(lineagePreviewHideTimer);
-  lineagePreviewShowTimer = undefined;
-  const anchor = lineagePreview.value?.anchor;
-  lineagePreview.value = undefined;
-  if (refocus && anchor && document.activeElement !== anchor) {
-    suppressLineageFocusOpen = true;
-    void nextTick(() => anchor.focus());
-  }
-}
-
-function focusCurrentLineageNode(): void {
-  void nextTick(() => lineagePreviewElement.value?.querySelector<HTMLElement>(".lineage-mini-node.current")?.focus());
-}
-
-function focusLineagePreview(row: SessionView, event: FocusEvent): void {
-  if (suppressLineageFocusOpen) { suppressLineageFocusOpen = false; return; }
-  revealLineagePreview(row, event.currentTarget as HTMLElement);
-}
-
-function toggleLineagePreview(row: SessionView, event: MouseEvent): void {
-  const anchor = event.currentTarget as HTMLElement;
-  if (lineagePreview.value?.row.id === row.id && lineagePreview.value.pinned) { closeLineagePreview(); return; }
-  revealLineagePreview(row, anchor, true);
-  if (event.detail === 0) focusCurrentLineageNode();
-}
-
-function enterPinnedLineagePreview(event: KeyboardEvent): void {
-  if (!lineagePreview.value?.pinned) return;
-  event.preventDefault();
-  focusCurrentLineageNode();
-}
-
-function lineagePreviewKeydown(event: KeyboardEvent): void {
-  if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); closeLineagePreview(true); return; }
-  if (event.key !== "Tab" || !lineagePreview.value?.pinned || !lineagePreviewElement.value) return;
-  const controls = [...lineagePreviewElement.value.querySelectorAll<HTMLElement>("button:not(:disabled)")];
-  if (!controls.length) return;
-  const index = controls.indexOf(document.activeElement as HTMLElement);
-  if (index < 0 || (!event.shiftKey && index === controls.length - 1) || (event.shiftKey && index === 0)) {
-    event.preventDefault();
-    controls[event.shiftKey ? controls.length - 1 : 0]?.focus();
-  }
 }
 
 function resize(index: number, event: PointerEvent): void {
@@ -1010,10 +741,7 @@ function toggleTheme(): void {
 
 function keydown(event: KeyboardEvent): void {
   const editingControl = ["INPUT", "TEXTAREA", "SELECT"].includes((event.target as HTMLElement).tagName);
-  if (event.key === "Escape" && lineagePreview.value) {
-    event.preventDefault();
-    closeLineagePreview(true);
-  } else if (event.key === "/" && !editingControl) {
+  if (event.key === "/" && !editingControl) {
     event.preventDefault();
     document.querySelector<HTMLInputElement>("#q")?.focus();
   } else if (event.key === "Escape" && document.activeElement?.id === "q") {
@@ -1023,18 +751,16 @@ function keydown(event: KeyboardEvent): void {
     page.value = 1;
     (document.activeElement as HTMLElement).blur();
   } else if (event.key === "Escape" && filePreviewOpen.value) closeFilePreview();
-  else if (event.key === "Escape" && (detail.value || detailError.value)) showList();
+  else if (event.key === "Escape" && (detail.value || detailError.value)) showSessions();
 }
 
 function documentClick(event: MouseEvent): void {
   const target = event.target as Node;
   if (menu.value && !menuElement.value?.contains(target) && !menu.value.anchor.contains(target)) closeMenu();
-  if (lineagePreview.value && !lineagePreviewElement.value?.contains(target) && !lineagePreview.value.anchor.contains(target)) closeLineagePreview();
 }
 
 function closeFloatingOnScroll(event: Event): void {
   if (event.target !== previewElement.value) hidePreview();
-  if (!(event.target instanceof Node) || !lineagePreviewElement.value?.contains(event.target)) closeLineagePreview();
   if (event.target !== menuElement.value) closeMenu();
 }
 
@@ -1045,7 +771,6 @@ onMounted(async () => {
   window.addEventListener("scroll", closeFloatingOnScroll, true);
   document.addEventListener("click", documentClick);
   await load(new URLSearchParams(location.search).get("fresh") === "1");
-  void loadGlobalLineage(true);
   syncHistory();
 });
 
@@ -1055,8 +780,6 @@ onBeforeUnmount(() => {
   clearTimeout(copiedPathTimer);
   clearTimeout(previewShowTimer);
   clearTimeout(previewHideTimer);
-  clearTimeout(lineagePreviewShowTimer);
-  clearTimeout(lineagePreviewHideTimer);
   window.removeEventListener("popstate", syncHistory);
   window.removeEventListener("keydown", keydown);
   window.removeEventListener("scroll", closeFloatingOnScroll, true);
@@ -1070,14 +793,10 @@ onBeforeUnmount(() => {
       <span class="mark" aria-hidden="true">◆</span>
       <div><h1>Agent Sessions</h1><p class="tagline">找到上下文，继续工作。</p></div>
     </div>
-    <nav v-if="!detail && !detailError && !detailLoading" class="view-switch" aria-label="主视图">
-      <button id="showSessions" type="button" :class="{ active: viewMode === 'sessions' }" :aria-pressed="viewMode === 'sessions'" @click="showSessions()">Sessions</button>
-      <button id="showLineages" type="button" :class="{ active: viewMode === 'lineage' }" :aria-pressed="viewMode === 'lineage'" @click="showLineages()">关系图</button>
-    </nav>
     <span class="meta"><strong>{{ rows.length }}</strong> 个会话 · 更新于 {{ formatGeneratedAt(generatedAt) }}</span>
   </header>
 
-  <div v-if="!detail && !detailError && !detailLoading && viewMode === 'sessions'" id="chrome" class="chrome">
+  <div v-if="!detail && !detailError && !detailLoading" id="chrome" class="chrome">
     <div class="bar">
       <div class="search-modes" role="group" aria-label="检索范围">
         <button id="searchModeNormal" type="button" class="f" :class="{ on: searchMode === 'normal' }" :aria-pressed="searchMode === 'normal'" @click="setSearchMode('normal')">普通</button>
@@ -1125,20 +844,7 @@ onBeforeUnmount(() => {
 
   <main>
     <details v-if="diagnostics.length" class="source-diagnostics" :open="hasSourceErrors"><summary>{{ hasSourceErrors ? sourceCopy.scanProblem : sourceCopy.scanInfo }}</summary><p v-for="item in diagnostics" :key="`${item.source_id}/${item.root_id}`">[{{ item.source_id }}{{ item.root_id ? `/${item.root_id}` : '' }}] {{ item.message }}</p></details>
-    <section v-if="!detail && !detailError && !detailLoading && viewMode === 'lineage'" id="lineageOverview" aria-label="全部关系链">
-      <div class="lineage-toolbar">
-        <div><h2>Session 关系图</h2><p>按文件传递方向从左到右排列；悬停节点可聚焦直接上下游。</p></div>
-        <button id="lineageIndex" type="button" class="f act" :disabled="indexingLineage" @click="indexLineage">{{ indexingLineage ? "分析中…" : "重新分析" }}</button>
-      </div>
-      <div v-if="globalLineageLoading && !globalLineage" class="empty">正在读取关系缓存...</div>
-      <div v-else-if="!globalLineage?.edges.length" class="lineage-zero">
-        <strong>缓存中还没有关系链</strong><span>先分析一次，之后打开关系图和 Session 详情都会直接读取持久缓存。</span>
-        <button type="button" class="f act" :disabled="indexingLineage" @click="indexLineage">开始分析</button>
-      </div>
-      <LineageGraph v-else :view="globalLineage" :focus-id="globalLineageFocus" @select="openDetail" />
-    </section>
-
-    <section v-else-if="!detail && !detailError && !detailLoading" id="list" aria-label="Session 列表">
+    <section v-if="!detail && !detailError && !detailLoading" id="list" aria-label="Session 列表">
       <table :class="{ compact }">
         <colgroup>
           <col v-for="(className, index) in ['c-star','c-date','c-model','','c-stat','c-path','c-ops']" :key="index" :class="className" :style="widths[index] ? { width: `${widths[index]}px` } : undefined" />
@@ -1180,13 +886,6 @@ onBeforeUnmount(() => {
             <td class="p" @mouseenter="showTextPreview($event, `${row.id}:path`, shortPath(row.cwd))" @mouseleave="schedulePreviewHide">{{ shortPath(row.cwd) }}</td>
             <td class="opscell">
               <div class="ops">
-                <button v-if="chainInfo.get(row.id)" type="button" class="iconbtn chainbtn" :aria-label="`所在关系链，共 ${chainInfo.get(row.id)!.size} 个 Session，查看整条链`"
-                  :title="`所在关系链，共 ${chainInfo.get(row.id)!.size} 个 Session，查看整条链`" aria-haspopup="dialog" aria-controls="lineage-preview"
-                  :aria-expanded="lineagePreview?.row.id === row.id" @mouseenter="scheduleLineagePreview(row, $event)" @mouseleave="scheduleLineagePreviewHide"
-                  @focus="focusLineagePreview(row, $event)" @blur="scheduleLineagePreviewHide" @click.stop="toggleLineagePreview(row, $event)" @keydown.stop @keydown.tab="enterPinnedLineagePreview" @keydown.esc.prevent="closeLineagePreview(true)">
-                  <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><path d="M6.4 5.1 5.2 3.9a2.4 2.4 0 0 0-3.4 3.4l1.7 1.7a2.4 2.4 0 0 0 3.4 0l1.2-1.2M9.6 10.9l1.2 1.2a2.4 2.4 0 0 0 3.4-3.4L12.5 7a2.4 2.4 0 0 0-3.4 0L7.9 8.2" /></svg>
-                  <span class="n">{{ chainInfo.get(row.id)!.size }}</span>
-                </button>
                 <button type="button" class="iconbtn hoveronly" title="打开详情页" aria-label="打开详情页" @click.stop="openDetail(row.id)">
                   <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M1.5 8S3.9 3.6 8 3.6 14.5 8 14.5 8 12.1 12.4 8 12.4 1.5 8 1.5 8Z" /><circle cx="8" cy="8" r="2" /></svg>
                 </button>
@@ -1216,38 +915,18 @@ onBeforeUnmount(() => {
 
     <section v-else id="detail" aria-label="Transcript 详情">
       <div v-if="detailLoading" class="empty">加载中...</div>
-      <div v-else-if="detailError" class="empty">{{ detailError }} <button type="button" class="f act" @click="showList()">返回</button></div>
+      <div v-else-if="detailError" class="empty">{{ detailError }} <button type="button" class="f act" @click="showSessions()">返回</button></div>
       <template v-else-if="detail">
         <div class="detail-top">
-          <button type="button" class="f act" @click="showList()">返回</button>
+          <button type="button" class="f act" @click="showSessions()">返回</button>
           <button type="button" class="f act" @click="copy(detail)">{{ copyLabel(detail) }}</button>
           <button type="button" class="f act" @click="copySourcePath(detail)">{{ sourceCopy.copySourcePath }}</button>
-          <button id="addManualLineage" type="button" class="f act" :aria-expanded="manualLineageOpen" @click="manualLineageOpen = !manualLineageOpen">补充上游</button>
           <div class="detail-title">{{ detail.name || detail.first_msg || detail.id }}</div>
           <div class="detail-meta mono">{{ detail.tool }} · {{ detail.model || "无模型" }} · {{ shortPath(detail.cwd) }} · {{ formatSize(detail.size_kb) }}<template v-if="detail.source_kind === 'archive'"> · {{ detail.source_label }} · {{ detail.session_id }}</template></div>
           <p v-if="detail.primary_action?.kind === 'fork'">{{ sourceCopy.forkHelp }}</p>
           <p v-else-if="detail.primary_action?.kind === 'path'">{{ sourceCopy.pathHelp }}</p>
           <div v-if="copies(detail).length > 1">{{ sourceCopy.otherCopies }}：<button v-for="copy in copies(detail).filter((row) => row.id !== detail!.id)" :key="copy.id" type="button" class="f act" @click="openDetail(copy.id)">{{ copy.source_label ?? sourceCopy.live }} · {{ copy.root_id ?? copy.tool }}</button></div>
-          <form v-if="manualLineageOpen" id="manualLineageForm" class="manual-lineage-form" @submit.prevent="addManualLineage">
-            <label for="manualUpstream">上游 Session</label>
-            <input id="manualUpstream" v-model="manualUpstreamId" list="manualUpstreamOptions" type="text" placeholder="输入名称或 ID 后选择" autocomplete="off" />
-            <datalist id="manualUpstreamOptions">
-              <option v-for="row in rows.filter((row) => row.id !== detail!.id)" :key="row.id" :value="row.id" :label="row.name || row.first_msg || row.id" />
-            </datalist>
-            <button type="submit" class="f act" :disabled="addingManualLineage || !manualUpstreamId.trim()">{{ addingManualLineage ? "添加中…" : "添加" }}</button>
-            <button type="button" class="f" :disabled="addingManualLineage" @click="manualLineageOpen = false; manualUpstreamId = ''">取消</button>
-          </form>
-          <div v-if="manualUpstreams.length" class="manual-lineages">
-            <span v-for="upstream in manualUpstreams" :key="upstream.id" class="manual-lineage">
-              <span :title="upstream.id">手动上游：{{ upstream.label }}</span>
-              <button type="button" class="f remove-manual-lineage" :disabled="!!removingManualUpstreamId" @click="removeManualLineage(upstream.id)">{{ removingManualUpstreamId === upstream.id ? "取消中…" : "取消关联" }}</button>
-            </span>
-          </div>
         </div>
-        <div v-if="lineageLoading" class="lineage-loading">正在读取关系缓存...</div>
-        <section v-else-if="lineage" class="detail-lineage" aria-label="Session 关系链">
-          <LineageGraph :view="lineage" :focus-id="detail.id" @select="openDetail" />
-        </section>
         <div class="msglist" @click="previewLocalLink">
           <div v-if="!detail.messages.length" class="empty">没有可展示的 user / assistant 文本消息</div>
           <article v-for="(message, index) in detail.messages" :key="index" class="bubble" :class="message.role">
@@ -1289,10 +968,6 @@ onBeforeUnmount(() => {
     <template v-else>{{ preview.loading ? "加载对话预览..." : "加载失败" }}</template>
   </aside>
 
-  <aside v-if="lineagePreview" id="lineage-preview" ref="lineagePreviewElement" class="show" :style="lineagePreview.style" role="dialog" aria-label="Session 关系链预览"
-    @click.stop @mouseenter="keepLineagePreview" @mouseleave="scheduleLineagePreviewHide" @keydown="lineagePreviewKeydown">
-    <LineagePreview :view="lineagePreview.info.view" :current-id="lineagePreview.row.id" :pinned="lineagePreview.pinned" @select="openDetail" @locate="locateLineage(lineagePreview.row.id)" />
-  </aside>
 </template>
 
 <style>
@@ -1325,8 +1000,6 @@ header{display:flex;align-items:center;justify-content:space-between;gap:24px;fl
   font-size:15px;box-shadow:inset 0 1px 0 rgba(255,255,255,.08)}
 h1{font-size:19px;line-height:1.2;font-weight:650;letter-spacing:-.025em;margin:0;color:var(--paper)}
 .tagline{margin:3px 0 0;color:var(--ash);font-size:12px;letter-spacing:.005em}
-.view-switch{display:flex;align-items:center;gap:3px;padding:3px;border:1px solid var(--obsidian);border-radius:10px;background:var(--carbon)}
-.view-switch button{padding:6px 12px;border:0;border-radius:7px;background:transparent;color:var(--ash);font-size:12px;cursor:pointer;transition:transform 140ms var(--ease-out),background-color 140ms ease,color 140ms ease}.view-switch button.active{background:var(--chip);color:var(--paper);box-shadow:0 1px 3px rgba(0,0,0,.18)}.view-switch button:active{transform:scale(.97)}.view-switch button:focus-visible{outline:2px solid var(--lime);outline-offset:2px}
 .meta{color:var(--ash);font-size:12px;padding:7px 10px;border:1px solid var(--obsidian);
   border-radius:8px;background:var(--carbon)}
 .meta strong{color:var(--paper);font-weight:600;font-variant-numeric:tabular-nums}
@@ -1367,7 +1040,6 @@ main{max-width:1760px;margin:0 auto;padding:0 32px 56px}
 .nm[aria-disabled="true"]:empty::after{content:""}
 #list{overflow-x:auto;border:1px solid var(--obsidian);border-radius:14px;background:var(--carbon);
   box-shadow:0 16px 40px rgba(0,0,0,.08)}
-#lineageOverview{display:grid;gap:14px}.lineage-toolbar{display:flex;align-items:center;justify-content:space-between;gap:20px;padding:16px 18px;border:1px solid var(--obsidian);border-radius:14px;background:var(--carbon)}.lineage-toolbar h2{margin:0;color:var(--paper);font-size:15px;font-weight:650}.lineage-toolbar p{margin:3px 0 0;color:var(--ash);font-size:11px}.lineage-zero{display:grid;justify-items:center;gap:8px;padding:72px 20px;border:1px dashed var(--graphite);border-radius:14px;color:var(--ash);text-align:center}.lineage-zero strong{color:var(--mist);font-size:14px}.lineage-zero span{max-width:520px;font-size:12px}.detail-lineage{margin-top:12px}.lineage-loading{margin-top:12px;padding:28px;border:1px solid var(--obsidian);border-radius:12px;background:var(--carbon);color:var(--ash);text-align:center}
 table{width:100%;min-width:1040px;border-collapse:collapse;table-layout:fixed}
 col.c-star{width:36px}col.c-date{width:92px}col.c-model{width:158px}
 col.c-stat{width:72px}col.c-path{width:190px}col.c-ops{width:176px}
@@ -1432,11 +1104,9 @@ td.opscell{padding-right:6px}
   border:0;border-radius:7px;background:transparent;color:var(--ash);font:inherit;cursor:pointer;
   transition:transform 120ms var(--ease-out),background-color 120ms ease,color 120ms ease,opacity 130ms ease}
 .iconbtn svg{width:14px;height:14px}
-.iconbtn .n{font:600 10px/1 ui-monospace,monospace;font-variant-numeric:tabular-nums}
 .iconbtn:active{transform:scale(.94)}
 .iconbtn:disabled{cursor:wait}
 .iconbtn:focus-visible{outline:2px solid var(--lime);outline-offset:-1px}
-.chainbtn{color:var(--lime)}
 .iconbtn.copied{color:#6fd49b;opacity:1}
 .hoveronly{transition:opacity 130ms ease}
 .tool-pill{display:inline-flex;align-items:center;padding:2px 6px;border-radius:5px;
@@ -1466,8 +1136,6 @@ tr.pinned .pinbtn{color:var(--lime)}
   border:1px solid var(--obsidian);border-radius:14px;background:var(--carbon)}
 .detail-title{font-size:16px;font-weight:620;color:var(--paper);min-width:0;flex:1}
 .detail-meta{color:var(--ash);font-size:12px;width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.manual-lineage-form{display:flex;align-items:center;gap:8px;width:100%}.manual-lineage-form label{color:var(--ash);font-size:11px;white-space:nowrap}.manual-lineage-form input{min-width:220px;flex:1;height:34px;padding:0 10px;border:1px solid var(--input-line);border-radius:8px;background:var(--input-bg);color:var(--paper);font:11px ui-monospace,monospace;outline:none}.manual-lineage-form input:focus{border-color:var(--lime)}
-.manual-lineages{display:flex;gap:8px;flex-wrap:wrap;width:100%}.manual-lineage{display:inline-flex;align-items:center;gap:8px;padding:4px 5px 4px 9px;border:1px dashed color-mix(in srgb,var(--lime) 28%,var(--obsidian));border-radius:9px;color:var(--mist);font-size:11px}
 .msglist{display:grid;grid-template-columns:minmax(0,1fr);gap:14px;padding:20px 0 48px;max-width:1040px;margin:0 auto}
 .bubble{max-width:88%;border:1px solid var(--obsidian);border-radius:14px 14px 14px 4px;
   padding:13px 15px;background:var(--carbon);box-shadow:0 5px 18px rgba(0,0,0,.06)}
@@ -1513,8 +1181,6 @@ tr.pinned .pinbtn{color:var(--lime)}
   white-space:pre-wrap;word-break:break-all;box-shadow:0 18px 55px rgba(0,0,0,.36);
   transition:opacity 110ms var(--ease-out),transform 110ms var(--ease-out)}
 #tip.show{visibility:visible;opacity:1;transform:scale(1);pointer-events:auto}
-#lineage-preview{position:fixed;z-index:10;display:flex;flex-direction:column;max-width:min(700px,calc(100vw - 24px));max-height:min(78vh,720px);overflow:hidden;border:1px solid var(--graphite);border-radius:12px;background:var(--material);backdrop-filter:blur(24px) saturate(150%);box-shadow:0 20px 64px rgba(0,0,0,.4),inset 0 1px rgba(255,255,255,.055);opacity:1;transform:scale(1);transition:opacity 140ms var(--ease-out),transform 140ms var(--ease-out)}
-@starting-style{#lineage-preview{opacity:0;transform:scale(.97)}}
 .tiptitle{font-weight:600;color:var(--paper);margin-bottom:8px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .tipmsg{padding:9px 11px;margin-top:8px;border:1px solid var(--obsidian);border-radius:10px 10px 10px 3px;
   background:var(--carbon);white-space:normal;word-break:break-word}
@@ -1539,7 +1205,6 @@ tr.pinned .pinbtn{color:var(--lime)}
 .markdown table{width:auto;min-width:0;table-layout:auto}.markdown th,.markdown td{height:auto;padding:5px 7px;white-space:normal}
 @media (hover:hover) and (pointer:fine){
   .f:hover{background:var(--chip);color:var(--paper)}
-  .view-switch button:hover{color:var(--paper)}
   th:hover{color:var(--mist)}
   tr.row:hover td{background:var(--hover)}
   .rowbtn:hover,.iconbtn:hover{background:var(--chip);color:var(--paper)}
@@ -1550,20 +1215,19 @@ tr.pinned .pinbtn{color:var(--lime)}
   .chip:hover{border-color:var(--smoke);color:var(--paper)}
 }
 @media (max-width:760px){
-  header{padding:24px 16px 18px}.view-switch{order:3}.meta{width:100%}.chrome{top:8px;margin:0 12px 14px}
+  header{padding:24px 16px 18px}.meta{width:100%}.chrome{top:8px;margin:0 12px 14px}
   main{padding:0 12px 36px}.searchbox{min-width:100%}.tabs{order:3;width:100%;overflow-x:auto}
 }
 @media (prefers-reduced-motion:reduce){
   html,body{transition:background-color 120ms ease,color 120ms ease}
-  .view-switch button,.f,.rowbtn,.iconbtn{transition:background-color 120ms ease,color 120ms ease,opacity 120ms ease}
-  .view-switch button:active,.f:active:not(:disabled),.rowbtn:active,.iconbtn:active{transform:none}
+  .f,.rowbtn,.iconbtn{transition:background-color 120ms ease,color 120ms ease,opacity 120ms ease}
+  .f:active:not(:disabled),.rowbtn:active,.iconbtn:active{transform:none}
   .select-button svg{transition:none}
   .menu,#tip{transform:none;transition:opacity 120ms ease}
-  #lineage-preview{transform:none;transition:opacity 120ms ease}
   #toast,#toast.show{transform:translateX(-50%);transition:opacity 120ms ease}
 }
-@media (prefers-reduced-transparency:reduce){.chrome,.menu,#tip,#lineage-preview{background:var(--carbon);backdrop-filter:none}}
-@media (prefers-contrast:more){.chrome,.menu,#tip,#lineage-preview,#list,.detail-top,.bubble{border-color:var(--fog)}}
+@media (prefers-reduced-transparency:reduce){.chrome,.menu,#tip{background:var(--carbon);backdrop-filter:none}}
+@media (prefers-contrast:more){.chrome,.menu,#tip,#list,.detail-top,.bubble{border-color:var(--fog)}}
 </style>
 
 <style>

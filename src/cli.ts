@@ -18,8 +18,6 @@ Usage:
   sessions show <id-prefix> [--json]
   sessions show <id-prefix> <term>... [-C 2] [--chars 300] [-n 8] [--json]
   sessions show <id-prefix> --at [<thread>:]<n>[-<m>] [-C 0] [--chars 300] [--json]
-  sessions index [--rebuild] [--json]
-  sessions lineage <id-prefix> [--json]
   sessions star <id-prefix> [note]
   sessions unstar <id-prefix>
   sessions stars
@@ -182,7 +180,7 @@ export async function main(argv = process.argv.slice(2), options: { html?: strin
       return 0;
     }
     const verbose = flag(args, "-v") || flag(args, "--verbose");
-    const json = flag(args, "--json"), rebuild = flag(args, "--rebuild"), command = args.shift();
+    const json = flag(args, "--json"), command = args.shift();
     const n = integer(args, "-n"), catalog = new SessionCatalog({ home: home() });
     if (command === "list") {
       const rawTool = args[0]; if (rawTool && !isTool(rawTool)) throw new Error(`未知工具: ${rawTool}`);
@@ -233,23 +231,6 @@ export async function main(argv = process.argv.slice(2), options: { html?: strin
         printEntry(transcript);
         transcript.messages.forEach((message) => console.log(`[${message.role}] ${message.text}\n`));
       }
-      return 0;
-    }
-    if (command === "index" && !args.length) {
-      const result = await catalog.refreshLineage(rebuild);
-      reportSources(catalog, verbose);
-      if (json) console.log(JSON.stringify(result, null, 2));
-      else console.log(`已分析 ${result.sessions} 个 session（本次扫描 ${result.scanned} 个），发现 ${result.edges} 条关系，耗时 ${result.elapsed_ms}ms`);
-      return 0;
-    }
-    if (command === "lineage" && args.length === 1) {
-      const row = await catalog.resolve(args[0]!);
-      const lineage = await catalog.lineage(row.id);
-      reportSources(catalog, verbose);
-      const value = { ...lineage, sessions: lineage.sessions.map((session) => withResumeCommand(session)) };
-      if (json) console.log(JSON.stringify(value, null, 2));
-      else if (!lineage.edges.length) console.log(`${row.id} 暂未发现上下游 session`);
-      else lineage.edges.forEach((edge) => console.log(`${edge.upstream_id} -> ${edge.downstream_id}\n    ${edge.relation === "manual" ? "手动关联" : edge.path}`));
       return 0;
     }
     if (command === "star" && args.length) {

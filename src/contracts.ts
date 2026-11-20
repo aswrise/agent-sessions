@@ -130,45 +130,6 @@ export interface SearchEnvelope {
   coverage: SearchCoverage;
 }
 
-type LineageEdgeBase = {
-  upstream_id: string;
-  downstream_id: string;
-};
-
-export type ArtifactLineageEdge = LineageEdgeBase & {
-  relation: "artifact";
-  path: string;
-  produced_at: number;
-  referenced_at: number;
-  producer_turn: number;
-  reference_turn: number;
-  reference_source: "user";
-  kind: "add" | "update";
-};
-
-export type ManualLineageEdge = LineageEdgeBase & {
-  relation: "manual";
-  created_at: number;
-};
-
-export type LineageEdge = ArtifactLineageEdge | ManualLineageEdge;
-
-export interface LineageView {
-  sessions: SessionView[];
-  edges: LineageEdge[];
-}
-
-export interface LineageRefresh {
-  sessions: number;
-  scanned: number;
-  unchanged: number;
-  removed: number;
-  writes: number;
-  references: number;
-  edges: number;
-  elapsed_ms: number;
-}
-
 export interface MarkPatch {
   star?: boolean;
   note?: string;
@@ -231,22 +192,4 @@ export function parseTranscriptView(value: unknown): TranscriptView {
         && typeof message.text === "string" && typeof message.timestamp === "string"))
     throw new Error("Transcript 响应无效");
   return value as unknown as TranscriptView;
-}
-
-export function parseLineageView(value: unknown): LineageView {
-  const edge = (item: unknown): boolean => isRecord(item) && stringFields(item, ["upstream_id", "downstream_id"])
-    && (item.relation === "manual" ? numberFields(item, ["created_at"])
-      : item.relation === "artifact" && stringFields(item, ["path", "reference_source", "kind"])
-        && numberFields(item, ["produced_at", "referenced_at", "producer_turn", "reference_turn"])
-        && item.reference_source === "user" && ["add", "update"].includes(item.kind as string));
-  if (!isRecord(value) || !Array.isArray(value.sessions) || !value.sessions.every(isSessionView)
-      || !Array.isArray(value.edges) || !value.edges.every(edge))
-    throw new Error("Session 关系链响应无效");
-  return value as unknown as LineageView;
-}
-
-export function parseLineageRefresh(value: unknown): LineageRefresh {
-  if (!isRecord(value) || !numberFields(value, ["sessions", "scanned", "unchanged", "removed", "writes", "references", "edges", "elapsed_ms"]))
-    throw new Error("Session 关系索引响应无效");
-  return value as unknown as LineageRefresh;
 }

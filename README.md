@@ -23,12 +23,6 @@ each tool—there is no import step and no hosted account.
   and browser back/forward navigation.
 - **Organize useful work** with stars, names, notes, statuses, and recoverable
   archives.
-- **Trace Session Lineage** when one Session writes a Markdown or HTML Artifact
-  and another Session picks it up. Hover a Session or file to focus its direct
-  upstream and downstream relationships.
-- **Repair missing Lineage** by adding an upstream Session manually. Manual
-  relationships can be removed if added by mistake and survive refreshes,
-  restarts, and derived-index rebuilds.
 - **Automate from the terminal** with stable JSON output for other agents and
   scripts.
 
@@ -81,27 +75,10 @@ use its labeled copy action. Press `/` to focus search and
 - Archive completed work; it remains available from the **归档** tab and can be
   restored later.
 
-### Understand Session Lineage
-
-Open **关系图**, then click **开始分析** the first time. Agent Sessions
-incrementally finds Artifact handoffs and lays the connected Sessions out from
-upstream to downstream. Hover a Session or FILE card to isolate the relevant
-path; click a Session to inspect its Transcript and complete relationship chain.
-
-If inference misses a handoff:
-
-1. Open the downstream Session.
-2. Click **补充上游** and choose the upstream Session.
-3. Use **取消关联** beside a manual upstream if the relationship was added by
-   mistake.
-
-Automatic Artifact relationships remain read-only; only relationships marked
-`MANUAL / 手动关联` can be removed.
-
 ### Read the Transcript
 
-The detail page keeps the Session metadata, resume action, relationship graph,
-and readable user/assistant messages together.
+The detail page keeps the Session metadata, resume action, and readable
+user/assistant messages together.
 
 ![Transcript detail](docs/dashboard-detail.png)
 
@@ -117,15 +94,13 @@ Session IDs may be shortened to any unique prefix.
 | `sessions show 48e17d64` | Show one complete Transcript |
 | `sessions show 48e17d64 launchctl` | Show only windows around hits (`-C 2`, `--chars 300`, `-n 8`) |
 | `sessions show 48e17d64 --at sub1:10-20` | Show a range of events by ordinal, optionally inside a child thread |
-| `sessions index` | Incrementally analyze cross-Session Artifact handoffs |
-| `sessions lineage 48e17d64` | Show the complete upstream/downstream component |
 | `sessions star 48e17d64 "note"` | Star a Session with an optional note |
 | `sessions unstar 48e17d64` | Remove a star |
 | `sessions stars` | List starred Sessions |
 | `sessions dash` | Start or reopen the dashboard |
 
-Add `--json` to `list`, `find`, `show`, `index`, or `lineage` for stable
-machine-readable output. A bare `--since`/`--until` date is a local day, and
+Add `--json` to `list`, `find`, or `show` for stable machine-readable output.
+A bare `--since`/`--until` date is a local day, and
 `--until` includes that day. `find` ends with its coverage: files it scanned,
 candidates, and the files it could not attribute (unclassified, partial,
 injected-only, unreadable, orphan child threads), listing the first orphans and
@@ -182,7 +157,7 @@ visible while scanning, preserves filters, and clamps the page when necessary.
 Library callers use `list({ fresh: true })` to rescan; normal list/detail calls
 may reuse the current catalog cache. Missing roots and invalid configuration
 produce visible diagnostics while other sources keep working. Offline rows are
-omitted until their source returns; their marks and manual relations remain.
+omitted until their source returns; their marks remain.
 
 Archive discovery accepts valid flat or nested JSONL files and excludes
 recognized internal subagents and malformed records. Valid tiny archive files
@@ -200,7 +175,7 @@ remain separate even when their original IDs match.
 
 Archive `id` values are stable record keys derived from source ID, root ID,
 tool, original ID, and relative file path. `session_id` contains the original
-tool ID. Use the row `id` for detail, search, marks, and lineage. Keep IDs and
+tool ID. Use the row `id` for detail, search, and marks. Keep IDs and
 relative paths unchanged to retain annotations. Live records retain their
 original IDs and raw-ID annotations. When live files share an ID, the newest
 file supplies the single live row. Archive copies keep independent keys and
@@ -214,9 +189,8 @@ fall back to the file's own metadata.
 Archive SQLite reads use a temporary application-data copy of the database and
 its WAL, so SQLite cannot create or update sidecars in the archive directory.
 
-Archive rename is rejected by the catalog. Stars, notes, statuses, and manual
-relations write only application data. Automatic lineage connects records
-within a source; explicit manual relations may cross sources.
+Archive rename is rejected by the catalog. Stars, notes, and statuses
+write only application data.
 
 Live `resume_command` values keep their existing behavior. Archive JSON has a
 `primary_action` with `kind` of `path` or `fork` and its copy `value`, and omits
@@ -246,16 +220,13 @@ Agent Sessions reads local files directly and does not upload Transcript data.
 | Codex | `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl` plus read-only indexes |
 | pi | `~/.pi/agent/sessions/<path-slug>/*.jsonl` |
 
-Scanning, search, detail, and automatic Lineage analysis do not modify source
-Sessions. Explicit rename follows each tool's local naming behavior. Stars,
-notes, statuses, and archives are stored in `stars.json`; Manual
-Lineage is stored in `manual-lineages.json`; the disposable automatic Lineage
-cache is `lineage.sqlite`. These files live under
+Scanning, search, and detail do not modify source Sessions. Explicit rename
+follows each tool's local naming behavior. Stars, notes, statuses, and archives
+are stored in `stars.json` under
 `~/.local/share/session-snapshots/` on POSIX or the platform local application
 data directory on native Windows.
 
-Back up `stars.json` and `manual-lineages.json` if those annotations matter to
-you. `lineage.sqlite` can always be rebuilt.
+Back up `stars.json` if those annotations matter to you.
 
 ## Build from source
 

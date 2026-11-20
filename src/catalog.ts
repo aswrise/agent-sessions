@@ -21,8 +21,7 @@ import type { Dirent, Stats } from "node:fs";
 import { open } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import packageJson from "../package.json" with { type: "json" };
-import { isStatus, type EventKind, type LineageEdge, type SearchCoverage, type SearchResult, type SessionEvent, type LineageRefresh, type ManualLineageEdge, type MarkPatch, type Session, type SessionStatus, type SourceDiagnostic, type Tool, type Transcript, type TranscriptMessage } from "./contracts.ts";
-import { LineageIndex } from "./lineage.ts";
+import { isStatus, type EventKind, type SearchCoverage, type SearchResult, type SessionEvent, type MarkPatch, type Session, type SessionStatus, type SourceDiagnostic, type Tool, type Transcript, type TranscriptMessage } from "./contracts.ts";
 import { homeDirectory, userDataDirectory } from "./paths.ts";
 import { archiveAction } from "./resume.ts";
 import { readSources, realContained, realPath, withRealpathMemo, type ArchiveSource } from "./sources.ts";
@@ -1266,7 +1265,6 @@ export class SessionCatalog {
   private childDiagnostics: SourceDiagnostic[] = [];
   private marksFile: string;
   private dataDirectory: string;
-  private manualLineageFile: string;
   private metadataFile: string;
   private metadataState: "unloaded" | "clean" | "dirty" = "unloaded";
   private metadata = new Map<string, { signature: string; value: Metadata | null }>();
@@ -1277,7 +1275,6 @@ export class SessionCatalog {
   private locations = new Map<string, Located>();
   private now: () => Date;
   private rgPath: string | null | undefined;
-  private lineageIndex: LineageIndex;
 
   constructor(options: CatalogOptions = {}) {
     const home = options.home ?? homeDirectory();
@@ -1300,9 +1297,7 @@ export class SessionCatalog {
     this.sourcesFile = options.sourcesFile ?? (options.environment ?? process.env).AGENT_SESSIONS_SOURCES_FILE ?? join(userDataDirectory(home, options.environment, options.platform), "sources.json");
     this.explicitSourcesFile = options.sourcesFile !== undefined || (options.environment ?? process.env).AGENT_SESSIONS_SOURCES_FILE !== undefined;
     this.marksFile = join(dataDirectory, "stars.json");
-    this.manualLineageFile = join(dataDirectory, "manual-lineages.json");
     this.metadataFile = join(dataDirectory, "metadata-cache.json");
-    this.lineageIndex = new LineageIndex(join(dataDirectory, "lineage.sqlite"));
     this.now = options.now ?? (() => new Date());
     this.rgPath = options.rgPath;
   }
@@ -1328,61 +1323,6 @@ export class SessionCatalog {
     const session = await this.exact(id);
     const location = this.location(id);
     return { ...session, messages: transcriptOf(location.adapter.events(location.originalId, location.path)) };
-  }
-
-  async refreshLineage(force = false): Promise<LineageRefresh> {
-    const sessions = await this.list({ fresh: true }), refreshed = this.lineageIndex.refresh(sessions, force);
-    const ids = new Set(sessions.map((session) => session.id));
-    const manual = this.loadManualLineages().filter((edge) => ids.has(edge.upstream_id) && ids.has(edge.downstream_id));
-    return { ...refreshed, edges: refreshed.edges + manual.length };
-  }
-
-  async lineage(id: string, refresh = true): Promise<{ sessions: Session[]; edges: LineageEdge[] }> {
-    await this.exact(id);
-    const sessions = await this.list({ fresh: refresh });
-    if (refresh) this.lineageIndex.refresh(sessions);
-    const graph = this.lineageIndex.lineage(id, this.loadManualLineages());
-    const indexed = new Map(sessions.map((session) => [session.id, session]));
-    const present = new Set(graph.session_ids.filter((sessionId) => indexed.has(sessionId)));
-    return {
-      sessions: [...present].flatMap((sessionId) => {
-        const session = indexed.get(sessionId);
-        return session ? [session] : [];
-      }),
-      edges: graph.edges.filter((edge) => present.has(edge.upstream_id) && present.has(edge.downstream_id)),
-    };
-  }
-
-  async lineages(): Promise<{ sessions: Session[]; edges: LineageEdge[] }> {
-    const sessions = await this.list({ fresh: true });
-    this.lineageIndex.refresh(sessions);
-    const graph = this.lineageIndex.all(this.loadManualLineages());
-    const ids = new Set(graph.session_ids);
-    const present = new Set(sessions.filter((session) => ids.has(session.id)).map((session) => session.id));
-    return {
-      sessions: sessions.filter((session) => present.has(session.id)),
-      edges: graph.edges.filter((edge) => present.has(edge.upstream_id) && present.has(edge.downstream_id)),
-    };
-  }
-
-  async addManualLineage(upstreamId: string, downstreamId: string): Promise<void> {
-    const sessions = await this.list({ fresh: true });
-    await Promise.all([this.exact(upstreamId), this.exact(downstreamId)]);
-    this.lineageIndex.refresh(sessions);
-    const manual = this.loadManualLineages();
-    if (manual.some((edge) => edge.upstream_id === upstreamId && edge.downstream_id === downstreamId)) return;
-    const reachable = new Set([downstreamId]);
-    for (const id of reachable) for (const edge of this.lineageIndex.all(manual).edges)
-      if (edge.upstream_id === id) reachable.add(edge.downstream_id);
-    if (reachable.has(upstreamId)) throw new CatalogError("invalid", "手动关系不能形成循环");
-    manual.push({ relation: "manual", upstream_id: upstreamId, downstream_id: downstreamId, created_at: this.now().getTime() / 1000 });
-    atomicWrite(this.manualLineageFile, JSON.stringify(manual, null, 1));
-  }
-
-  removeManualLineage(upstreamId: string, downstreamId: string): void {
-    const manual = this.loadManualLineages();
-    const kept = manual.filter((edge) => edge.upstream_id !== upstreamId || edge.downstream_id !== downstreamId);
-    if (kept.length !== manual.length) atomicWrite(this.manualLineageFile, JSON.stringify(kept, null, 1));
   }
 
   /**
@@ -1791,20 +1731,6 @@ export class SessionCatalog {
       atomicWrite(this.metadataFile, JSON.stringify({ version: metadataCacheVersion(), entries }));
       this.metadataState = "clean";
     } catch {}
-  }
-
-  private loadManualLineages(): ManualLineageEdge[] {
-    if (!existsSync(this.manualLineageFile)) return [];
-    try {
-      const value: unknown = JSON.parse(readFileSync(this.manualLineageFile, "utf8"));
-      if (!Array.isArray(value) || !value.every((edge) => isRecord(edge) && edge.relation === "manual"
-        && typeof edge.upstream_id === "string" && edge.upstream_id
-        && typeof edge.downstream_id === "string" && edge.downstream_id !== edge.upstream_id
-        && typeof edge.created_at === "number" && Number.isFinite(edge.created_at))) throw new Error();
-      return value as ManualLineageEdge[];
-    } catch {
-      throw new CatalogError("invalid", "手动关系数据已损坏");
-    }
   }
 
   private loadMarks(): Marks {

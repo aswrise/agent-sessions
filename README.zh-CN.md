@@ -21,10 +21,6 @@ Agent Sessions 是一个本地 Dashboard 和 CLI，适合同时使用多个编�
 - **阅读完整对话**：在独立详情页中查看 Markdown 渲染后的用户与 Agent 消息，
   支持浏览器前进和后退。
 - **整理有价值的工作**：使用标记、名称、备注、状态和可恢复归档管理 Session。
-- **查看 Session 血缘**：识别一个 Session 写出 Markdown/HTML 文件、另一个
-  Session 接手的过程；悬停 Session 或文件即可聚焦直接上下游。
-- **手动补全漏掉的血缘**：为当前 Session 添加上游；加错后可以取消。手动
-  关系在刷新、重启和自动索引重建后仍会保留。
 - **从终端自动化**：为其他 Agent 和脚本提供稳定的 JSON 输出。
 
 ## 快速开始
@@ -74,25 +70,10 @@ Linux 或 Windows x64 CPU 请使用下文的 baseline 源码构建命令。
 - 设置 `todo`、`in progress`、`review`、`blocked`、`done` 等状态。
 - 完成的工作可以归档；之后仍能从 **归档** 页签找回并恢复。
 
-### 看懂 Session 血缘
-
-打开 **关系图**，首次使用时点击 **开始分析**。Agent Sessions 会增量识别
-Session 之间的文件交接，并按从上游到下游的方向排列。悬停 Session 或 FILE
-卡片可聚焦相关路径；点击 Session 可查看它的 Transcript 和完整上下游链路。
-
-如果自动分析漏掉了一次交接：
-
-1. 打开下游 Session。
-2. 点击 **补充上游**，选择对应的上游 Session。
-3. 如果加错，在该手动上游旁点击 **取消关联**。
-
-自动识别的 Artifact 关系保持只读；只有标记为 `MANUAL / 手动关联` 的关系
-可以取消。
-
 ### 阅读 Transcript
 
-详情页会把 Session 元信息、恢复操作、关系链和可读的 user/assistant 消息放在
-一起，便于确认上下文后继续工作。
+详情页会把 Session 元信息、恢复操作和可读的 user/assistant 消息放在一起，
+便于确认上下文后继续工作。
 
 ![Transcript 详情](docs/dashboard-detail.png)
 
@@ -108,14 +89,12 @@ Session ID 可以缩写为任意不重复的前缀。
 | `sessions show 48e17d64` | 查看一个完整 Transcript |
 | `sessions show 48e17d64 launchctl` | 只看命中附近的窗口（`-C 2`、`--chars 300`、`-n 8`） |
 | `sessions show 48e17d64 --at sub1:10-20` | 按序号读一段事件，可指定子线程 |
-| `sessions index` | 增量分析跨 Session 的文件交接 |
-| `sessions lineage 48e17d64` | 查看完整上下游连通链 |
 | `sessions star 48e17d64 "备注"` | 标记 Session，并可附带备注 |
 | `sessions unstar 48e17d64` | 取消标记 |
 | `sessions stars` | 列出所有已标记 Session |
 | `sessions dash` | 启动或重新打开 Dashboard |
 
-`list`、`find`、`show`、`index` 和 `lineage` 均可添加 `--json`，获得稳定的
+`list`、`find` 和 `show` 均可添加 `--json`，获得稳定的
 机器可读输出。`--since`、`--until` 只写日期时按本地时间的整天计算，`--until`
 包含当天。`find` 末尾给出覆盖情况：扫描的文件数、候选数，以及未能归属的文件
 （未归类、部分命中、仅注入、不可读、孤儿子线程），并列出前几个孤儿和不可读路径。
@@ -166,8 +145,8 @@ CLI 默认只往 stderr 打印来源错误，`-v` 另外打印各来源的统计
 显示范围。刷新会重新读取配置并发现所有根目录的新文件，期间保留已有列表；
 完成后保留筛选，页码越界时收回最后一页。库调用方使用
 `list({ fresh: true })` 重新扫描，普通列表和详情可复用当前缓存。来源缺失或
-配置无效会显示诊断，其余来源继续工作。离线记录暂时不显示，但标记和手动
-关系继续保留，来源恢复后可再次看到。
+配置无效会显示诊断，其余来源继续工作。离线记录暂时不显示，但标记继续保留，
+来源恢复后可再次看到。
 
 旧目录支持平铺或多层 JSONL，按工具格式读取，排除已识别的内部子会话和损坏
 记录。有效小文件也会显示；本机目录保留现有 2 KiB 下限以兼容已有行为。
@@ -176,8 +155,8 @@ CLI 默认只往 stderr 打印来源错误，`-v` 另外打印各来源的统计
 文件即使原始 ID 相同，也各自保留。
 
 旧来源的行 `id` 是稳定记录键，由来源 ID、根目录 ID、工具、原始会话 ID 和
-相对文件路径生成。`session_id` 单独保留工具原始 ID。详情、检索、标记、
-血缘均使用行 `id`。需要保留标注时，不要更改来源 ID、根目录 ID 或相对路径。
+相对文件路径生成。`session_id` 单独保留工具原始 ID。详情、检索和标记
+均使用行 `id`。需要保留标注时，不要更改来源 ID、根目录 ID 或相对路径。
 本机会话继续使用原始 ID 和原有裸 ID 标注。本机多个文件使用相同 ID 时，
 仍由更新时间最新的文件提供唯一一行。归档副本使用独立记录键和标注。
 名称和 Codex 元数据各自跟随根目录。
@@ -193,8 +172,7 @@ SQLite 名称、首条消息和模型只用于真实 rollout 路径与原始 ID 
 其中 `instructions` 可以为 null。旧 Claude 支持直接包含用户或助手内容的 transcript 导出。
 历史工作目录缺失时显示 `?`。
 
-旧来源禁止原生改名。标星、备注、状态和手动关系只写 Agent Sessions 应用
-数据。自动血缘只在同一来源内建立；明确添加的手动关系可以跨来源。
+旧来源禁止原生改名。标星、备注和状态只写 Agent Sessions 应用数据。
 
 本机 `resume_command` 保持现有行为。旧来源 JSON 使用 `primary_action`，
 包含 `path` 或 `fork` 类型的 `kind` 以及要复制的 `value`，不提供误导性的
@@ -220,15 +198,12 @@ Agent Sessions 直接读取本地文件，不会上传 Transcript 数据。
 | Codex | `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl` 及只读索引 |
 | pi | `~/.pi/agent/sessions/<路径-slug>/*.jsonl` |
 
-扫描、检索、详情和自动血缘分析不会修改源 Session。明确改名时会按各工具的
-本地命名方式写入。标记、备注、状态和归档保存在 `stars.json`；
-手动血缘保存在 `manual-lineages.json`；可随时重建的自动血缘缓存是
-`lineage.sqlite`。POSIX 下这些文件位于
+扫描、检索和详情不会修改源 Session。明确改名时会按各工具的本地命名方式
+写入。标记、备注、状态和归档保存在 `stars.json`。POSIX 下该文件位于
 `~/.local/share/session-snapshots/`，原生 Windows 下位于平台本地应用数据
 目录。
 
-如果标注和手动血缘很重要，请备份 `stars.json` 和 `manual-lineages.json`；
-`lineage.sqlite` 无需备份。
+如果这些标注很重要，请备份 `stars.json`。
 
 ## 从源码构建
 

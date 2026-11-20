@@ -287,7 +287,7 @@ describe("configured archive sources", () => {
     f.configure([source("old", old)]);
     const before = { hash: digest(path), mtime: statSync(path).mtimeMs };
     const row = (await f.catalog.list())[0]!;
-    await f.catalog.detail(row.id); await f.catalog.find({ terms: ["deep"] }); await f.catalog.refreshLineage();
+    await f.catalog.detail(row.id); await f.catalog.find({ terms: ["deep"] });
     await f.catalog.updateMark(row.id, { star: true, note: "safe", status: "done" });
     await expect(f.catalog.rename(row.id, "changed")).rejects.toThrow("只读");
     const server = startServer({ catalog: f.catalog, home: f.home, port: 0 }); cleanups.push(() => server.stop(true));
@@ -356,29 +356,19 @@ describe("configured archive sources", () => {
     expect((await f.catalog.find({ terms: ["reused-secret"] })).results.map((row) => row.source_path)).toEqual([reused]);
   });
 
-  test("keeps source-scoped automatic lineage and retains manual relations and marks while a root is offline", async () => {
+  test("retains marks while a root is offline", async () => {
     const f = setup(), a = join(f.root, "a"), b = join(f.root, "b");
-    const artifact = "/shared/handoff.md";
-    jsonl(join(a, "writer.jsonl"), [
-      { type: "session", id: "writer", cwd: "/old" },
-      { type: "message", timestamp: "2020-01-01T00:00:00Z", message: { role: "user", content: "write" } },
-      { type: "message", timestamp: "2020-01-01T00:00:01Z", message: { role: "assistant", content: [{ type: "toolCall", id: "call", name: "write", arguments: { path: artifact, content: "handoff" } }] } },
-      { type: "message", timestamp: "2020-01-01T00:00:02Z", message: { role: "toolResult", toolCallId: "call", toolName: "write", isError: false, content: [{ type: "text", text: "ok" }] } },
-    ]);
-    jsonl(join(a, "reader.jsonl"), [{ type: "session", id: "reader", cwd: "/old" }, { type: "message", timestamp: "2020-01-02T00:00:00Z", message: { role: "user", content: `read ${artifact}` } }]);
-    jsonl(join(b, "reader.jsonl"), [{ type: "session", id: "reader", cwd: "/old" }, { type: "message", timestamp: "2020-01-02T00:00:00Z", message: { role: "user", content: `read ${artifact}` } }]);
+    const reader = [{ type: "session", id: "reader", cwd: "/old" }, { type: "message", timestamp: "2020-01-02T00:00:00Z", message: { role: "user", content: "read" } }];
+    jsonl(join(a, "reader.jsonl"), reader);
+    jsonl(join(b, "reader.jsonl"), reader);
     f.configure([source("a", a), source("b", b)]);
-    const rows = await f.catalog.list(), writer = rows.find((row) => row.session_id === "writer")!, readerA = rows.find((row) => row.source_id === "a" && row.session_id === "reader")!, readerB = rows.find((row) => row.source_id === "b")!;
-    const automatic = await f.catalog.lineages();
-    expect(automatic.edges.map((edge) => [edge.upstream_id, edge.downstream_id])).toEqual([[writer.id, readerA.id]]);
-    await f.catalog.addManualLineage(writer.id, readerB.id); await f.catalog.updateMark(readerB.id, { note: "offline survives", star: true });
-    const manualBefore = readFileSync(join(f.dataDirectory, "manual-lineages.json"), "utf8"), marksBefore = readFileSync(join(f.dataDirectory, "stars.json"), "utf8");
-    renameSync(b, b + "-offline"); await f.catalog.refreshLineage(); await f.catalog.lineages();
-    expect(readFileSync(join(f.dataDirectory, "manual-lineages.json"), "utf8")).toBe(manualBefore);
+    const readerB = (await f.catalog.list()).find((row) => row.source_id === "b")!;
+    await f.catalog.updateMark(readerB.id, { note: "offline survives", star: true });
+    const marksBefore = readFileSync(join(f.dataDirectory, "stars.json"), "utf8");
+    renameSync(b, b + "-offline"); await f.catalog.list({ fresh: true });
     expect(readFileSync(join(f.dataDirectory, "stars.json"), "utf8")).toBe(marksBefore);
     renameSync(b + "-offline", b);
     expect((await f.catalog.list({ fresh: true })).find((row) => row.id === readerB.id)?.star_note).toBe("offline survives");
-    expect((await f.catalog.lineages()).edges.some((edge) => edge.relation === "manual" && edge.downstream_id === readerB.id)).toBe(true);
   });
 
   test("uses safe pi fork mapping, longest directory boundary, quoting, and independent existing writable continuation", async () => {

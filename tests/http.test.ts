@@ -86,57 +86,10 @@ describe("Bun HTTP seam", () => {
     });
     const phrase = await (await fetch(base + "/api/search?q=" + encodeURIComponent("fixture-user-claude fixture-child-output"))).json();
     expect(phrase.total).toBe(0);
-    expect(await (await fetch(base + "/api/lineages")).json()).toEqual({ sessions: [], edges: [] });
     expect((await fetch(base + "/api/search")).status).toBe(400);
     expect((await fetch(base + "/api/search?q=fixture&limit=0")).status).toBe(400);
     expect((await fetch(base + "/api/search?q=fixture&limit=501")).status).toBe(200);
     expect((await fetch(base + "/api/search?q=fixture&limit=1.5")).status).toBe(400);
-  });
-
-  test("builds the global lineage index and returns a complete component for one session", async () => {
-    const { base } = await setup();
-    const indexed = await fetch(base + "/api/lineage/index", { method: "POST", body: "{}" });
-    expect(indexed.status).toBe(200);
-    expect(await indexed.json()).toMatchObject({ sessions: 3, scanned: 3, edges: 0 });
-
-    const response = await fetch(base + "/api/lineage?id=codex-b&refresh=0");
-    expect(response.status).toBe(200);
-    expect(await response.json()).toMatchObject({
-      sessions: [{ id: "codex-b", resume_command: "cd -- /tmp/beta && codex resume codex-b -m gpt-fixture -c 'model_reasoning_effort=\"high\"'" }],
-      edges: [],
-    });
-    expect((await fetch(base + "/api/lineage")).status).toBe(400);
-    expect((await fetch(base + "/api/lineage/index", { method: "POST", body: JSON.stringify({ force: "yes" }) })).status).toBe(400);
-  });
-
-  test("adds a validated manual upstream edge", async () => {
-    const { base } = await setup();
-    const added = await fetch(base + "/api/lineage/manual", { method: "POST", body: JSON.stringify({
-      upstream_id: "claude-a", downstream_id: "codex-b",
-    }) });
-    expect(added.status).toBe(200);
-    expect(await (await fetch(base + "/api/lineage?id=codex-b&refresh=0")).json()).toMatchObject({
-      sessions: [{ id: "claude-a" }, { id: "codex-b" }],
-      edges: [{ relation: "manual", upstream_id: "claude-a", downstream_id: "codex-b" }],
-    });
-    expect((await fetch(base + "/api/lineage/manual", { method: "POST", body: JSON.stringify({
-      upstream_id: "codex-b", downstream_id: "codex-b",
-    }) })).status).toBe(400);
-    expect((await fetch(base + "/api/lineage/manual", { method: "POST", body: JSON.stringify({
-      upstream_id: "codex-b", downstream_id: "claude-a",
-    }) })).status).toBe(400);
-    expect((await fetch(base + "/api/lineage/manual", { method: "POST", body: JSON.stringify({
-      upstream_id: "missing", downstream_id: "codex-b",
-    }) })).status).toBe(404);
-
-    const removed = await fetch(base + "/api/lineage/manual", { method: "DELETE", body: JSON.stringify({
-      upstream_id: "claude-a", downstream_id: "codex-b",
-    }) });
-    expect(removed.status).toBe(200);
-    expect(await (await fetch(base + "/api/lineage?id=codex-b&refresh=0")).json()).toMatchObject({
-      sessions: [{ id: "codex-b" }], edges: [],
-    });
-    expect((await fetch(base + "/api/lineage/manual", { method: "DELETE", body: "{}" })).status).toBe(400);
   });
 
   test("returns safe JSON when detail parsing fails", async () => {
