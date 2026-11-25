@@ -38,6 +38,9 @@ const MODEL_CHIP_LIMIT = 20;
 const PREVIEW_DELAY_MS = 500;
 const PREVIEW_HIDE_DELAY_MS = 150;
 const markdown = new MarkdownIt({ breaks: true, html: false, linkify: true });
+markdown.linkify.set({ fuzzyLink: false });
+const baseValidateLink = markdown.validateLink.bind(markdown);
+markdown.validateLink = (url: string) => baseValidateLink(url) || /^file:\/\/(?:localhost)?\//i.test(url.trim());
 const statusMeta: Record<SessionStatus, { label: string; color: string }> = {
   "": { label: "无", color: "var(--ash)" },
   todo: { label: "todo", color: "var(--fog)" },
@@ -103,21 +106,23 @@ const filePreviewError = ref("");
 const filePreviewOpen = ref(false);
 let filePreviewRequest = 0;
 
-async function previewLocalLink(event: MouseEvent): Promise<void> {
+async function previewLocalLink(event: MouseEvent, sessionId = detail.value?.id): Promise<void> {
   const target = event.target;
-  if (!(target instanceof Element) || !detail.value || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+  if (!(target instanceof Element) || !sessionId || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
   const link = target.closest("a");
   const href = link?.getAttribute("href") ?? "";
-  if (!href || /^(?:[a-z][a-z0-9+.-]*:|\/\/|#)/i.test(href)
-    || !/\.(?:md|markdown|txt|sql|html?|json|xml|ya?ml|csv|log|sh|py|js|ts|java|properties)(?::\d+(?::\d+)?)?(?:#.*)?$/i.test(href)) return;
+  const isFileUrl = /^file:\/\/(?:localhost)?\//i.test(href);
+  if (!href || (!isFileUrl && /^(?:[a-z][a-z0-9+.-]*:|\/\/|#)/i.test(href))
+    || !/\.(?:md|markdown|txt|sql|html?|jsonl?|xml|ya?ml|toml|csv|log|sh|py|jsx?|tsx?|vue|css|java|properties)(?::\d+(?::\d+)?)?(?:#.*)?$/i.test(href)) return;
   event.preventDefault();
+  if (preview.value) hidePreview();
   const request = ++filePreviewRequest;
   filePreviewOpen.value = true;
   filePreview.value = undefined;
   filePreviewError.value = "";
   filePreviewLoading.value = true;
   try {
-    const params = new URLSearchParams({ id: detail.value.id, href });
+    const params = new URLSearchParams({ id: sessionId, href });
     const response = await fetch(`/api/file-preview?${params}`);
     const result: unknown = await response.json();
     if (request !== filePreviewRequest) return;
@@ -941,7 +946,7 @@ onBeforeUnmount(() => {
           <p v-else-if="detail.primary_action?.kind === 'path'">{{ sourceCopy.pathHelp }}</p>
           <div v-if="copies(detail).length > 1">{{ sourceCopy.otherCopies }}：<button v-for="copy in copies(detail).filter((row) => row.id !== detail!.id)" :key="copy.id" type="button" class="f act" @click="openDetail(copy.id)">{{ copy.source_label ?? sourceCopy.live }} · {{ copy.root_id ?? copy.tool }}</button></div>
         </div>
-        <div class="msglist" @click="previewLocalLink">
+        <div class="msglist" @click="previewLocalLink($event)">
           <div v-if="!detail.messages.length" class="empty">没有可展示的 user / assistant 文本消息</div>
           <article v-for="(message, index) in detail.messages" :key="index" class="bubble" :class="message.role">
             <div class="role">{{ message.role }}</div><div class="body markdown" v-html="markdown.render(message.text)" />
@@ -970,7 +975,7 @@ onBeforeUnmount(() => {
 
   <div v-if="error || notice" id="toast" class="show" :role="error ? 'alert' : 'status'">{{ error || notice }}</div>
 
-  <aside v-if="preview" id="tip" ref="previewElement" class="show" :style="preview.style" @mouseenter="keepPreview" @mouseleave="schedulePreviewHide">
+  <aside v-if="preview" id="tip" ref="previewElement" class="show" :style="preview.style" @mouseenter="keepPreview" @mouseleave="schedulePreviewHide" @click="preview.kind === 'transcript' && previewLocalLink($event, preview.detail?.id)">
     <template v-if="preview.kind === 'text'">{{ preview.text }}</template>
     <template v-else-if="preview.detail">
       <div class="tiptitle">{{ preview.detail.name || preview.detail.first_msg || preview.detail.id }}</div>

@@ -599,4 +599,38 @@ describe("dashboard", () => {
     expect(location.pathname + location.search).toBe("/");
     missing.unmount();
   });
+
+  test("opens file:// local document links in the preview dialog without auto-linking bare filenames", async () => {
+    const row = { ...makeRow(1), id: "agy-doc", tool: "agy" as const };
+    const docHref = "file:///Users/fixture/%E8%AF%A6%E7%BB%86%E8%A7%A3%E8%AF%BB%E8%AE%BF%E8%B0%88%E6%BC%94%E8%AE%B2.md#L10-L20";
+    fetchMock.mockImplementation(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.startsWith("/api/sessions")) return response({ generatedAt: new Date(0).toISOString(), home: "/home/fixture", sessions: [row] });
+      if (url.startsWith("/api/session?")) {
+        return response({
+          ...row,
+          messages: [{ role: "assistant", text: "读完 [详细解读访谈演讲.md](file:///Users/fixture/详细解读访谈演讲.md#L10-L20) 和 详细解读访谈演讲.md", timestamp: "" }],
+        } satisfies TranscriptView);
+      }
+      if (url.startsWith("/api/file-preview?")) {
+        return response({ path: "/Users/fixture/详细解读访谈演讲.md", extension: ".md", content: "# 访谈正文\n\n预览成功" });
+      }
+      return response({ ok: true });
+    });
+
+    const wrapper = mount(App, { attachTo: document.body });
+    await flushPromises();
+    await wrapper.get("[aria-label='打开详情页']").trigger("click");
+    await flushPromises();
+
+    const links = wrapper.findAll(".bubble .markdown a");
+    expect(links).toHaveLength(1);
+    expect(links[0]!.attributes("href")).toBe(docHref);
+
+    await links[0]!.trigger("click", { button: 0 });
+    await flushPromises();
+    expect(fetchMock).toHaveBeenCalledWith(`/api/file-preview?${new URLSearchParams({ id: "agy-doc", href: docHref })}`);
+    expect(wrapper.get(".file-preview").text()).toContain("访谈正文");
+    wrapper.unmount();
+  });
 });

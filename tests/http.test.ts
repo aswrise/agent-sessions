@@ -1,5 +1,6 @@
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
+import { pathToFileURL } from "node:url";
 import { afterEach, describe, expect, test } from "bun:test";
 import { SessionCatalog } from "../src/catalog.ts";
 import { formatResumeCommand } from "../src/resume.ts";
@@ -115,5 +116,33 @@ describe("Bun HTTP seam", () => {
     const response = await fetch(`http://127.0.0.1:${server.port}/star`, { method: "POST", body: JSON.stringify({ id: "claude-a", star: false }) });
     expect(response.status).toBe(500);
     expect(await response.json()).toEqual({ error: "操作失败" });
+  });
+
+  test("previews local file:// markdown links with UTF-8 paths and fragments, and rejects remote or unlinked targets", async () => {
+    const { base, home } = await setup();
+    const doc = join(home, "详细解读访谈演讲.md");
+    const secret = join(home, "unlinked.md");
+    writeFileSync(doc, "# 访谈解读\n\n正文内容");
+    writeFileSync(secret, "secret");
+    const fileHref = `${pathToFileURL(doc).href}#L10-L20`;
+    appendFileSync(join(home, ".claude/projects/-tmp-alpha/claude-a.jsonl"), JSON.stringify({
+      type: "assistant",
+      sessionId: "claude-a",
+      timestamp: "2026-11-25T10:00:00Z",
+      message: { role: "assistant", content: [{ type: "text", text: `见 [详细解读访谈演讲.md](${fileHref}) 与 [remote](file://evil-host/tmp/a.md) 与 [web](https://example.com/a.md)` }] },
+    }) + "\n");
+
+    const ok = await fetch(`${base}/api/file-preview?${new URLSearchParams({ id: "claude-a", href: fileHref })}`);
+    expect(ok.status).toBe(200);
+    expect(await ok.json()).toMatchObject({ path: doc, extension: ".md", content: "# 访谈解读\n\n正文内容" });
+
+    const unlinked = await fetch(`${base}/api/file-preview?${new URLSearchParams({ id: "claude-a", href: pathToFileURL(secret).href })}`);
+    expect(unlinked.status).toBe(403);
+
+    const remote = await fetch(`${base}/api/file-preview?${new URLSearchParams({ id: "claude-a", href: "file://evil-host/tmp/a.md" })}`);
+    expect(remote.status).toBe(403);
+
+    const web = await fetch(`${base}/api/file-preview?${new URLSearchParams({ id: "claude-a", href: "https://example.com/a.md" })}`);
+    expect(web.status).toBe(400);
   });
 });

@@ -1,5 +1,6 @@
 import { readFile, stat } from "node:fs/promises";
 import { extname, isAbsolute, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import MarkdownIt from "markdown-it";
 import { CatalogError, SessionCatalog } from "./catalog.ts";
 import { isStatus, type MarkPatch, type SearchEnvelope } from "./contracts.ts";
@@ -19,8 +20,11 @@ class RequestError extends Error {
   constructor(public status: number, message: string) { super(message); }
 }
 
-const links = new MarkdownIt();
-const previewExtensions = new Set([".md", ".markdown", ".txt", ".sql", ".html", ".htm", ".json", ".xml", ".yaml", ".yml", ".csv", ".log", ".sh", ".py", ".js", ".ts", ".java", ".properties"]);
+const links = new MarkdownIt({ breaks: true, html: false, linkify: true });
+links.linkify.set({ fuzzyLink: false });
+const baseValidateLink = links.validateLink.bind(links);
+links.validateLink = (url: string) => baseValidateLink(url) || /^file:\/\/(?:localhost)?\//i.test(url.trim());
+const previewExtensions = new Set([".md", ".markdown", ".txt", ".sql", ".html", ".htm", ".json", ".jsonl", ".xml", ".yaml", ".yml", ".toml", ".csv", ".log", ".sh", ".py", ".js", ".jsx", ".ts", ".tsx", ".vue", ".css", ".java", ".properties"]);
 
 const json = (value: unknown, status = 200) => Response.json(value, { status });
 const isRecord = (value: unknown): value is Record<string, unknown> =>
@@ -87,9 +91,20 @@ export function startServer(options: ServerOptions): Bun.Server<undefined> {
             token.children?.some((child) => child.type === "link_open" && child.attrGet("href") === href)));
           if (!linked) throw new RequestError(403, "文件链接不在当前会话中");
           let path: string;
-          try { path = decodeURIComponent(href.split("#", 1)[0] ?? "").replace(/:\d+(?::\d+)?$/, ""); }
-          catch { throw new RequestError(400, "文件路径无效"); }
-          if (/^[a-z][a-z0-9+.-]*:/i.test(path) || path.startsWith("//")) throw new RequestError(400, "仅支持本地文件");
+          const withoutFragment = href.split("#", 1)[0] ?? "";
+          if (/^file:\/\//i.test(withoutFragment)) {
+            let parsed: URL;
+            try { parsed = new URL(withoutFragment); }
+            catch { throw new RequestError(400, "文件路径无效"); }
+            if (parsed.protocol !== "file:" || (parsed.hostname !== "" && parsed.hostname.toLowerCase() !== "localhost"))
+              throw new RequestError(400, "仅支持本地文件");
+            try { path = fileURLToPath(parsed).replace(/:\d+(?::\d+)?$/, ""); }
+            catch { throw new RequestError(400, "文件路径无效"); }
+          } else {
+            try { path = decodeURIComponent(withoutFragment).replace(/:\d+(?::\d+)?$/, ""); }
+            catch { throw new RequestError(400, "文件路径无效"); }
+            if (/^[a-z][a-z0-9+.-]*:/i.test(path) || path.startsWith("//")) throw new RequestError(400, "仅支持本地文件");
+          }
           const extension = extname(path).toLowerCase();
           if (!previewExtensions.has(extension)) throw new RequestError(400, "不支持预览此文件类型");
           if (!isAbsolute(path) && (!session.cwd || session.cwd === "?" || !isAbsolute(session.cwd)))
