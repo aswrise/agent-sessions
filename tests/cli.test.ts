@@ -10,7 +10,7 @@ const executable = fileURLToPath(new URL("../sessions", import.meta.url));
 afterEach(() => cleanups.splice(0).forEach((cleanup) => cleanup()));
 
 function run(home: string, args: string[], path = process.env.PATH ?? "", env: Record<string, string> = {}) {
-  const { CLAUDE_CODE_SESSION_ID: _, ...inherited } = process.env;
+  const { CLAUDE_CODE_SESSION_ID: _, ANTIGRAVITY_CONVERSATION_ID: _a, ANTIGRAVITY_LS_ADDRESS: _b, ANTIGRAVITY_CSRF_TOKEN: _c, ...inherited } = process.env;
   const result = Bun.spawnSync([process.execPath, executable, ...args], {
     env: { ...inherited, HOME: home, USERPROFILE: home, PATH: path, NO_COLOR: "1", ...env },
   });
@@ -142,5 +142,30 @@ describe("CLI process seam", () => {
     const snapshot = join(fixture.home, ".local/share/session-snapshots/last-active.txt");
     mkdirSync(join(fixture.home, ".local/share/session-snapshots"), { recursive: true }); writeFileSync(snapshot, "fixture snapshot");
     expect(run(fixture.home, []).stdout.trim()).toBe("fixture snapshot");
+  });
+
+  test("lists agy sessions and excludes calling ANTIGRAVITY_CONVERSATION_ID unless --self", async () => {
+    const fixture = fixtureHome(); cleanups.push(fixture.cleanup);
+    const agyLogs = join(fixture.home, ".gemini/antigravity-cli/brain/agy-cli-1/.system_generated/logs");
+    mkdirSync(agyLogs, { recursive: true });
+    writeFileSync(join(agyLogs, "transcript_full.jsonl"), [
+      JSON.stringify({ step_index: 0, source: "USER_EXPLICIT", type: "USER_INPUT", status: "DONE", created_at: "2026-11-25T09:00:00Z", content: "<USER_REQUEST>\nhello agy-cli-needle\n</USER_REQUEST>" }),
+      JSON.stringify({ step_index: 1, source: "MODEL", type: "PLANNER_RESPONSE", status: "DONE", created_at: "2026-11-25T09:00:01Z", model: "gemini-4-neon-high", content: "agy reply" }),
+    ].join("\n") + "\n");
+    mkdirSync(join(fixture.home, ".gemini/antigravity-cli/annotations"), { recursive: true });
+    writeFileSync(join(fixture.home, ".gemini/antigravity-cli/annotations/agy-cli-1.pbtxt"), 'title:"Agy CLI Title"\n');
+
+    const listed = run(fixture.home, ["list", "agy", "--json"]);
+    expect(listed.exitCode).toBe(0);
+    expect(JSON.parse(listed.stdout).sessions).toMatchObject([{
+      id: "agy-cli-1",
+      tool: "agy",
+      name: "Agy CLI Title",
+      model: "gemini-4-neon-high",
+      resume_command: "cd -- '?' && agy -r agy-cli-1 --model gemini-4-neon-high",
+    }]);
+
+    expect(JSON.parse(run(fixture.home, ["find", "agy-cli-needle", "--json"], undefined, { ANTIGRAVITY_CONVERSATION_ID: "agy-cli-1" }).stdout).total).toBe(0);
+    expect(JSON.parse(run(fixture.home, ["find", "agy-cli-needle", "--self", "--json"], undefined, { ANTIGRAVITY_CONVERSATION_ID: "agy-cli-1" }).stdout).total).toBe(1);
   });
 });

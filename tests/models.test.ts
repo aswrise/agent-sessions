@@ -19,4 +19,11 @@ test("orders newer and stronger models first, with unknown models last", () => {
 
   expect(order(["codex-auto-review", "gpt-5.3-codex", "", "deepseek/deepseek-v4-flash", "openai-codex/gpt-5.5"]))
     .toEqual(["5.5", "5.3-codex", "codex-auto-review", "deepseek-v4-flash", "无模型"]);
+
+  expect(order([
+    "gemini-3.8-flash-high", "gemini-4-neon-medium", "gemini-4-neon-xhigh",
+    "gemini-4-carbon-high", "gemini-4-neon-high", "claude-opus-5-5-low", "claude-opus-5-5-high",
+  ])).toEqual([
+    "opus-5-5-high", "opus-5-5-low", "4-neon-xhigh", "4-neon-high", "4-neon-medium", "4-carbon-high", "3.8-flash-high",
+  ]);
 });

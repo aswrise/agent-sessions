@@ -1,3 +1,4 @@
+import { Database } from "bun:sqlite";
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -6,7 +7,7 @@ import { SessionCatalog } from "../src/catalog.ts";
 
 const TERMS = ["zeta7", "quux9", "say\"hi", "c:\\tmp9", "召回词", "Kappa3"];
 type Placement = "projected" | "injected" | "noise";
-type Tool = "claude" | "codex" | "pi";
+type Tool = "claude" | "codex" | "pi" | "agy";
 type GeneratedFile = { path: string; placed: Map<string, Set<Placement>>; unreadable?: true };
 type GeneratedOwner = { id?: string; orphan: boolean; threads: GeneratedFile[][] };
 
@@ -35,6 +36,7 @@ function generate(seed: number): { home: string; owners: GeneratedOwner[] } {
   const root = mkdtempSync(join(tmpdir(), "agent-sessions-recall-")), home = join(root, "home");
   roots.push(root);
   const owners: GeneratedOwner[] = [];
+  const agyParents: [string, string][] = [];
   let serial = 0;
   const write = (path: string, lines: string[]) => { mkdirSync(dirname(path), { recursive: true }); writeFileSync(path, lines.join("\n") + "\n"); };
   const plant = (file: GeneratedFile, placement: Placement) => {
@@ -65,6 +67,17 @@ function generate(seed: number): { home: string; owners: GeneratedOwner[] } {
       case "injected": return { type: "response_item", payload: { type: "message", role: "user", content: [{ type: "input_text", text: `<environment_context>${text}` }] } };
       case "noise": return { type: "event_msg", payload: { type: "item_completed", item: { type: "AgentMessage", text } } };
     }
+    if (tool === "agy") switch (slot) {
+      case "user": return { step_index: 0, source: "USER_EXPLICIT", type: "USER_INPUT", status: "DONE", content: `<USER_REQUEST>\n${text}\n</USER_REQUEST>\n<ADDITIONAL_METADATA>\nignore\n</ADDITIONAL_METADATA>` };
+      case "assistant": return { step_index: 1, source: "MODEL", type: "PLANNER_RESPONSE", status: "DONE", content: text };
+      case "thinking": return { step_index: 2, source: "MODEL", type: "PLANNER_RESPONSE", status: "DONE", thinking: text };
+      case "call": return { step_index: 3, source: "MODEL", type: "PLANNER_RESPONSE", status: "DONE", tool_calls: [{ name: "run_command", args: { CommandLine: text } }] };
+      case "output": return { step_index: 4, source: "MODEL", type: "GENERIC", status: "DONE", content: text };
+      case "injected": return random() < 0.5
+        ? { step_index: 5, source: "SYSTEM_SDK", type: "SYSTEM_MESSAGE", status: "DONE", content: `<EXTREMELY_IMPORTANT>${text}</EXTREMELY_IMPORTANT>` }
+        : { step_index: 5, source: "SYSTEM", type: "CHECKPOINT", status: "DONE", content: text };
+      case "noise": return { step_index: 6, source: "SYSTEM", type: "AMBIENT_NOISE", status: "DONE", data: text };
+    }
     switch (slot) {
       case "user": return { type: "message", message: { role: "user", content: [{ type: "text", text }] } };
       case "assistant": return { type: "message", message: { role: "assistant", content: [{ type: "text", text }] } };
@@ -76,8 +89,8 @@ function generate(seed: number): { home: string; owners: GeneratedOwner[] } {
     }
   }).map((record) => JSON.stringify(record));
   const padding = JSON.stringify({ padding: "p".repeat(2100) });
-  for (let index = 0; index < 10; index++) {
-    const tool = pick(["claude", "codex", "pi"] as const), id = `s${seed}x${serial++}`, owner: GeneratedOwner = { id, orphan: false, threads: [[]] };
+  for (let index = 0; index < 12; index++) {
+    const tool = pick(["claude", "codex", "pi", "agy"] as const), id = `s${seed}x${serial++}`, owner: GeneratedOwner = { id, orphan: false, threads: [[]] };
     const main: GeneratedFile = { path: "", placed: new Map() };
     owner.threads[0]!.push(main);
     if (tool === "claude") {
@@ -97,6 +110,9 @@ function generate(seed: number): { home: string; owners: GeneratedOwner[] } {
         owners.push({ id: `${id}o`, orphan: false, threads: [[older]] });
       }
       write(main.path, [JSON.stringify({ type: "session_meta", payload: meta }), ...records("codex", main), padding]);
+    } else if (tool === "agy") {
+      main.path = join(home, `.gemini/antigravity-cli/brain/${id}/.system_generated/logs/transcript_full.jsonl`);
+      write(main.path, [...records("agy", main), padding]);
     } else {
       main.path = join(home, ".pi/agent/sessions/-tmp-p", `${id}.jsonl`);
       write(main.path, [JSON.stringify({ type: "session", id, cwd: "/tmp/p" }), ...records("pi", main), padding]);
@@ -108,6 +124,11 @@ function generate(seed: number): { home: string; owners: GeneratedOwner[] } {
       if (tool === "codex") {
         file.path = join(home, ".codex/sessions/2026/07/14", `rollout-kid${serial++}.jsonl`);
         write(file.path, [JSON.stringify({ type: "session_meta", payload: { id: `kid${serial++}`, thread_source: "subagent", parent_thread_id: parent } }), ...records("codex", file)]);
+      } else if (tool === "agy") {
+        const kidId = `kid${serial++}`;
+        agyParents.push([kidId, parent]);
+        file.path = join(home, `.gemini/antigravity-cli/brain/${kidId}/.system_generated/logs/transcript_full.jsonl`);
+        write(file.path, records("agy", file));
       } else if (random() < 0.7) {
         file.path = join(home, ".claude/projects/-tmp-p", parent, "subagents", `agent-a${serial++}.jsonl`);
         write(file.path, records("claude", file).map((line) => line.replace(/^\{/, '{"isSidechain":true,')));
@@ -121,6 +142,15 @@ function generate(seed: number): { home: string; owners: GeneratedOwner[] } {
         if (tool === "codex" && !orphan) { owner.threads.pop(); owners.push({ orphan: true, threads: [[file]] }); }
       }
     }
+  }
+  if (agyParents.length) {
+    const dbPath = join(home, ".gemini/antigravity-cli/conversation_summaries.db");
+    mkdirSync(dirname(dbPath), { recursive: true });
+    const db = new Database(dbPath, { create: true });
+    db.run("CREATE TABLE conversation_summaries (conversation_id TEXT PRIMARY KEY, parent_conversation_id TEXT, workspace_uris TEXT)");
+    const insert = db.prepare("INSERT INTO conversation_summaries VALUES (?, ?, ?)");
+    for (const [kidId, parent] of agyParents) insert.run(kidId, parent, JSON.stringify(["file:///tmp/p"]));
+    db.close();
   }
   return { home, owners };
 }

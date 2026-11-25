@@ -20,6 +20,7 @@ function args({ tool, id, session_id, model = "", thinking_level = "" }: ResumeI
   id = session_id ?? id;
   if (tool === "codex") return ["codex", "resume", id, ...(model ? ["-m", model] : []), ...(thinking_level ? ["-c", `model_reasoning_effort=${JSON.stringify(thinking_level)}`] : [])];
   if (tool === "pi") return ["pi", "--session", id, ...(model ? ["--model", model] : [])];
+  if (tool === "agy") return ["agy", "-r", id, ...(model ? ["--model", model] : [])];
   return ["claude", "-r", id, ...(model ? ["--model", model] : []), ...(thinking_level ? ["--effort", thinking_level] : [])];
 }
 

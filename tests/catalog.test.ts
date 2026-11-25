@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { Database } from "bun:sqlite";
 import { appendFileSync, chmodSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { basename, join } from "node:path";
+import { pathToFileURL } from "node:url";
 import { afterEach, describe, expect, test } from "bun:test";
 import { CatalogError, SessionCatalog } from "../src/catalog.ts";
 import { fixtureHome } from "./fixture-home.ts";
@@ -541,5 +542,130 @@ describe("SessionCatalog search robustness", () => {
     const [window] = (await catalog.excerpt("codex-b", { around: ["clip-needle"], context: 0 })).windows;
     expect(window!.events[0]!.text).toContain("found-here");
     expect(window!.events[0]!.text.length).toBeLessThanOrEqual(302);
+  });
+
+  test("discovers agy sessions (<2KB), unwraps envelopes, reads WAL SQLite + pbtxt, projects events, and handles subagents", async () => {
+    const { home, catalog } = setup();
+    const agyRoot = join(home, ".gemini/antigravity-cli");
+    const writeLog = (id: string, name: string, records: unknown[]) => {
+      const dir = join(agyRoot, "brain", id, ".system_generated", "logs");
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(join(dir, name), records.map((r) => JSON.stringify(r)).join("\n") + "\n");
+    };
+    writeLog("agy-main", "transcript_full.jsonl", [
+      { step_index: 0, source: "USER_EXPLICIT", type: "USER_INPUT", status: "DONE", created_at: "2026-11-25T08:00:00Z", content: "<USER_REQUEST>\nmain agy question\n</USER_REQUEST>\n<ADDITIONAL_METADATA>\nmeta-only-needle\n</ADDITIONAL_METADATA>\n<USER_SETTINGS_CHANGE>\nignored\n</USER_SETTINGS_CHANGE>" },
+      { step_index: 1, source: "SYSTEM_SDK", type: "SYSTEM_MESSAGE", status: "DONE", created_at: "2026-11-25T08:00:01Z", content: "<EXTREMELY_IMPORTANT>hook-injected-needle</EXTREMELY_IMPORTANT>" },
+      { step_index: 2, source: "MODEL", type: "PLANNER_RESPONSE", status: "DONE", created_at: "2026-11-25T08:00:02Z", model: "gemini-4-neon-high", thinking: "pondering", content: "main agy answer", tool_calls: [{ name: "read_file", args: { Path: "/tmp/file.ts" } }] },
+      { step_index: 3, source: "MODEL", type: "GENERIC", status: "DONE", created_at: "2026-11-25T08:00:03Z", content: "tool-out-needle" },
+      { step_index: 4, source: "SYSTEM", type: "CHECKPOINT", status: "DONE", created_at: "2026-11-25T08:00:04Z", content: "checkpoint-injected-needle" },
+      { step_index: 5, source: "SYSTEM", type: "UNKNOWN_FUTURE_STEP", status: "DONE", created_at: "2026-11-25T08:00:05Z", content: "future-noise-needle" },
+    ]);
+    // Sibling compact file must be ignored when transcript_full.jsonl exists.
+    writeLog("agy-main", "transcript.jsonl", [
+      { step_index: 0, source: "USER_EXPLICIT", type: "USER_INPUT", status: "DONE", created_at: "2026-11-25T08:00:00Z", content: "compact-only-needle" },
+    ]);
+    // Fallback session with only transcript.jsonl (< 2KB)
+    writeLog("agy-compact", "transcript.jsonl", [
+      { step_index: 0, source: "USER_EXPLICIT", type: "USER_INPUT", status: "DONE", created_at: "2026-11-25T07:00:00Z", content: "compact fallback" },
+      { step_index: 1, source: "MODEL", type: "PLANNER_RESPONSE", status: "DONE", created_at: "2026-11-25T07:00:01Z", model: "gemini-3.8-flash-low", content: "ok" },
+    ]);
+    // Child and orphan subagent sessions
+    writeLog("agy-child", "transcript_full.jsonl", [
+      { step_index: 0, source: "USER_EXPLICIT", type: "USER_INPUT", status: "DONE", created_at: "2026-11-25T08:01:00Z", content: "child task" },
+      { step_index: 1, source: "MODEL", type: "GENERIC", status: "DONE", created_at: "2026-11-25T08:01:02Z", content: "agy-child-needle" },
+    ]);
+    writeLog("agy-orphan", "transcript_full.jsonl", [
+      { step_index: 0, source: "MODEL", type: "GENERIC", status: "DONE", created_at: "2026-11-25T08:02:00Z", content: "agy-orphan-needle" },
+    ]);
+
+    const db = new Database(join(agyRoot, "conversation_summaries.db"), { create: true });
+    db.run("PRAGMA journal_mode = WAL");
+    db.run("CREATE TABLE conversation_summaries (conversation_id TEXT PRIMARY KEY, title TEXT, workspace_uris TEXT, parent_conversation_id TEXT, agent_name TEXT)");
+    db.run("CREATE TABLE conversation_parents (conversation_id TEXT PRIMARY KEY, parent_id TEXT NOT NULL)");
+    const ws = join(home, "work/repo");
+    mkdirSync(ws, { recursive: true });
+    db.query("INSERT INTO conversation_summaries VALUES (?, ?, ?, ?, ?)").run("agy-main", "DB Title", JSON.stringify([pathToFileURL(ws).href]), "", "");
+    db.query("INSERT INTO conversation_summaries VALUES (?, ?, ?, ?, ?)").run("agy-child", "Child Title", JSON.stringify([pathToFileURL(ws).href]), "agy-main", "Codebase Researcher");
+    db.query("INSERT INTO conversation_parents VALUES (?, ?)").run("agy-orphan", "missing-parent");
+    db.close();
+
+    mkdirSync(join(agyRoot, "annotations"), { recursive: true });
+    // Octal UTF-8 for "中" is \344\270\255
+    writeFileSync(join(agyRoot, "annotations/agy-main.pbtxt"), 'title:"Agy \\344\\270\\255 Title"  plan_execute:true\n');
+
+    const rows = (await catalog.list({ fresh: true })).filter((row) => row.tool === "agy");
+    expect(rows.map((row) => row.id).sort()).toEqual(["agy-compact", "agy-main"]);
+    const main = rows.find((row) => row.id === "agy-main")!;
+    expect(main).toMatchObject({
+      tool: "agy",
+      cwd: ws,
+      name: "Agy 中 Title",
+      first_msg: "main agy question",
+      model: "gemini-4-neon-high",
+    });
+
+    const detail = await catalog.detail("agy-main");
+    expect(detail.messages.map(({ role, text }) => ({ role, text }))).toEqual([
+      { role: "user", text: "main agy question" },
+      { role: "assistant", text: "main agy answer" },
+    ]);
+
+    // Envelopes/injected records do not leak into search results, while tool outputs and child threads match.
+    expect((await catalog.find({ terms: ["meta-only-needle"] })).results).toEqual([]);
+    expect((await catalog.find({ terms: ["hook-injected-needle"] })).coverage).toMatchObject({ injected_only_files: 1, unclassified_files: 0 });
+    expect((await catalog.find({ terms: ["checkpoint-injected-needle"] })).coverage).toMatchObject({ injected_only_files: 1, unclassified_files: 0 });
+    expect((await catalog.find({ terms: ["future-noise-needle"] })).coverage).toMatchObject({ unclassified_files: 1 });
+    expect((await catalog.find({ terms: ["compact-only-needle"] })).results).toEqual([]);
+    expect((await catalog.find({ terms: ["agy-child-needle"] })).results.map(({ id, match }) => ({ id, threads: match.threads }))).toEqual([
+      { id: "agy-main", threads: [{ thread: "agy-child", label: "Codebase Researcher", hits: 1 }] },
+    ]);
+    expect((await catalog.find({ terms: ["agy-orphan-needle"] })).coverage).toMatchObject({ orphan_files: 1 });
+  });
+
+  test("renames agy sessions natively on disk (pbtxt + sqlite) and optionally via ConversationService", async () => {
+    const { home } = setup();
+    const agyRoot = join(home, ".gemini/antigravity-cli");
+    const dir = join(agyRoot, "brain/agy-rename-1/.system_generated/logs");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "transcript_full.jsonl"), JSON.stringify({
+      step_index: 0, source: "USER_EXPLICIT", type: "USER_INPUT", status: "DONE", created_at: "2026-11-25T08:00:00Z", content: "hello",
+    }) + "\n");
+    mkdirSync(join(agyRoot, "annotations"), { recursive: true });
+    writeFileSync(join(agyRoot, "annotations/agy-rename-1.pbtxt"), 'title:"Old Title"  plan_execute:true\n');
+    const db = new Database(join(agyRoot, "conversation_summaries.db"), { create: true });
+    db.run("CREATE TABLE conversation_summaries (conversation_id TEXT PRIMARY KEY, title TEXT, workspace_uris TEXT)");
+    db.query("INSERT INTO conversation_summaries VALUES (?, ?, ?)").run("agy-rename-1", "Old Title", JSON.stringify([pathToFileURL(home).href]));
+    db.close();
+
+    const diskCatalog = new SessionCatalog({ home, agyLsAddress: null, agyCsrfToken: null });
+    await diskCatalog.updateMark("agy-rename-1", { star: true });
+    const marksFile = join(home, ".local/share/session-snapshots/stars.json");
+    writeFileSync(marksFile, JSON.stringify({ "agy-rename-1": { starred: true, name: "Stale Local Name" } }));
+
+    await diskCatalog.rename("agy-rename-1", 'New "Quoted" Title');
+    expect(readFileSync(join(agyRoot, "annotations/agy-rename-1.pbtxt"), "utf8")).toBe('title:"New \\"Quoted\\" Title"  plan_execute:true\n');
+    const checkDb = new Database(join(agyRoot, "conversation_summaries.db"), { readonly: true });
+    expect(checkDb.query("SELECT title FROM conversation_summaries WHERE conversation_id = ?").get("agy-rename-1")).toEqual({ title: 'New "Quoted" Title' });
+    checkDb.close();
+    expect(JSON.parse(readFileSync(marksFile, "utf8"))["agy-rename-1"].name).toBeUndefined();
+    expect((await diskCatalog.list({ fresh: true })).find((row) => row.id === "agy-rename-1")?.name).toBe('New "Quoted" Title');
+
+    const rpcCalls: unknown[] = [];
+    const mockLs = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      async fetch(req) {
+        if (new URL(req.url).pathname === "/product.v1.ConversationService/UpdateConversation"
+          && req.headers.get("x-antigravity-csrf-token") === "test-csrf") {
+          rpcCalls.push(await req.json());
+          return Response.json({ ok: true });
+        }
+        return new Response("nope", { status: 403 });
+      },
+    });
+    cleanups.push(() => mockLs.stop(true));
+    const rpcCatalog = new SessionCatalog({ home, agyLsAddress: `127.0.0.1:${mockLs.port}`, agyCsrfToken: "test-csrf" });
+    await rpcCatalog.rename("agy-rename-1", "RPC Renamed");
+    expect(rpcCalls).toEqual([{ conversationId: "agy-rename-1", annotations: { title: "RPC Renamed" } }]);
   });
 });

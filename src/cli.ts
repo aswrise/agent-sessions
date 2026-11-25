@@ -12,8 +12,8 @@ const HELP = `Agent Sessions
 
 Usage:
   sessions                         print the active-session snapshot
-  sessions list [-n 20] [claude|codex|pi] [--json]
-  sessions find <term>... [--since 7d|24h|2026-11-01] [--until ...] [--tool claude,codex,pi]
+  sessions list [-n 20] [claude|codex|pi|agy] [--json]
+  sessions find <term>... [--since 7d|24h|2026-11-01] [--until ...] [--tool claude,codex,pi,agy]
                 [--cwd <path>] [--self] [-n 20] [--json]
   sessions show <id-prefix> [--json]
   sessions show <id-prefix> <term>... [-C 2] [--chars 300] [-n 8] [--json]
@@ -27,8 +27,8 @@ Usage:
 find:  every term must occur in the Session (meta fields, tool calls and output,
        child threads included); case-insensitive literal substrings. Results
        rank ★ (title, note, first message or user text hit) first, then
-       assistant-only, then the rest. The calling Claude Code Session
-       (CLAUDE_CODE_SESSION_ID) is left out unless --self.
+       assistant-only, then the rest. The calling Session
+       (CLAUDE_CODE_SESSION_ID or ANTIGRAVITY_CONVERSATION_ID) is left out unless --self.
        A bare --since/--until date is a local day; --until includes that day.
 show:  with terms, prints only windows around hits; --at reads a range by
        ordinal, in a child thread with <thread>:. --chars 0 keeps text whole.
@@ -193,7 +193,7 @@ export async function main(argv = process.argv.slice(2), options: { html?: strin
     }
     if (command === "find") {
       const since = epoch(args, "--since"), until = epoch(args, "--until"), cwd = option(args, "--cwd"), tools = option(args, "--tool");
-      const self = flag(args, "--self"), caller = process.env.CLAUDE_CODE_SESSION_ID;
+      const self = flag(args, "--self"), caller = process.env.CLAUDE_CODE_SESSION_ID || process.env.ANTIGRAVITY_CONVERSATION_ID;
       const parsedTools = tools?.split(",").map((tool) => { if (!isTool(tool)) throw new Error(`未知工具: ${tool}`); return tool; });
       if (!args.length) throw new Error("find 需要至少一个词");
       const query: SessionQuery = { terms: args, ...(since === undefined ? {} : { since }), ...(until === undefined ? {} : { until }),

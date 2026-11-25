@@ -22,7 +22,7 @@ export const sourceCopy = {
     sourceId: "来源 ID 无效或重复，请使用唯一的字母数字 ID，可含 ._-，不要使用 live",
     labels: "来源 label 和 scope 必须是字符串",
     roots: "来源需要非空 roots 数组",
-    root: "根目录 ID 无效或重复，或 tool 不是 claude、codex、pi",
+    root: "根目录 ID 无效或重复，或 tool 不是 claude、codex、pi、agy",
     mappings: "cwdMappings 必须是数组",
     mappingFrom: "映射 from 必须是绝对目录",
     source: "来源无效",

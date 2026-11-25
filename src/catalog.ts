@@ -19,7 +19,9 @@ import {
 } from "node:fs";
 import type { Dirent, Stats } from "node:fs";
 import { open } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { fileURLToPath } from "node:url";
 import packageJson from "../package.json" with { type: "json" };
 import { isStatus, type EventKind, type SearchCoverage, type SearchResult, type SessionEvent, type MarkPatch, type Session, type SessionStatus, type SourceDiagnostic, type Tool, type Transcript, type TranscriptMessage } from "./contracts.ts";
 import { homeDirectory, userDataDirectory } from "./paths.ts";
@@ -43,6 +45,7 @@ const TAIL_NEEDLES: Record<Tool, Buffer[]> = {
   claude: [Buffer.from('"model":"'), Buffer.from('"effort"')],
   codex: [Buffer.from('"model":"'), Buffer.from('"turn_context"')],
   pi: [Buffer.from('"modelId":"')],
+  agy: [Buffer.from('"model":"')],
 };
 
 let cacheVersion: string | undefined;
@@ -125,6 +128,8 @@ export interface CatalogOptions {
   platform?: NodeJS.Platform;
   rgPath?: string | null;
   codexPath?: string | null;
+  agyLsAddress?: string | null;
+  agyCsrfToken?: string | null;
   now?: () => Date;
   sourcesFile?: string;
 }
@@ -292,6 +297,7 @@ export class CatalogError extends Error {
 interface Adapter {
   readonly tool: Tool;
   readonly root: string;
+  readonly minSize?: number;
   readonly discoveredCount: number;
   discover(): string[];
   parse(path: string): ParsedMetadata | null;
@@ -614,12 +620,14 @@ function parseMetadata(adapter: Adapter, path: string): Metadata | null {
 }
 
 /** An archive adapter's parse inputs, cloneable into a worker; Claude titles are filled in by the caller. */
-export type ArchiveParseJob = { tool: Tool; root: string; paths: string[]; indexed?: [string, ParsedMetadata | null][]; subagents?: [string, string][] };
+export type AgySummaryMeta = { cwd: string; title: string; parentId: string; agentName: string };
+export type ArchiveParseJob = { tool: Tool; root: string; paths: string[]; indexed?: [string, ParsedMetadata | null][]; subagents?: [string, string][]; agyMeta?: [string, AgySummaryMeta][] };
 
 export function parseArchiveJob(job: ArchiveParseJob): (Metadata | null)[] {
   const adapter = job.tool === "claude" ? new ClaudeAdapter(job.root, null, true)
     : job.tool === "pi" ? new PiAdapter(job.root, true)
-      : CodexAdapter.archiveParser(job.root, job.indexed ?? [], job.subagents ?? []);
+      : job.tool === "agy" ? AgyAdapter.archiveParser(job.root, job.agyMeta ?? [])
+        : CodexAdapter.archiveParser(job.root, job.indexed ?? [], job.subagents ?? []);
   return job.paths.map((path) => parseMetadata(adapter, path));
 }
 
@@ -692,7 +700,7 @@ abstract class JsonlAdapter implements Adapter {
       if (!this.projectable(line)) continue;
       const record = parseRecord(line);
       if (!record || !keep(record)) continue;
-      const timestamp = stringValue(record.timestamp);
+      const timestamp = stringValue(record.timestamp) || stringValue(record.created_at);
       for (const event of this.project(record)) output.push({ ...event, timestamp });
     }
     return output;
@@ -1230,6 +1238,373 @@ class PiAdapter extends JsonlAdapter {
   }
 }
 
+function unescapePbtxtString(raw: string): string {
+  const bytes: number[] = [];
+  for (let i = 0; i < raw.length; i++) {
+    const ch = raw[i]!;
+    if (ch !== "\\") {
+      const cp = raw.codePointAt(i)!;
+      for (const byte of Buffer.from(String.fromCodePoint(cp), "utf8")) bytes.push(byte);
+      if (cp > 0xffff) i++;
+      continue;
+    }
+    const next = raw[++i];
+    if (next === undefined) break;
+    if (next === "n") bytes.push(10);
+    else if (next === "r") bytes.push(13);
+    else if (next === "t") bytes.push(9);
+    else if (next === "a") bytes.push(7);
+    else if (next === "b") bytes.push(8);
+    else if (next === "f") bytes.push(12);
+    else if (next === "v") bytes.push(11);
+    else if (next === "\\" || next === '"' || next === "'") bytes.push(next.charCodeAt(0));
+    else if (/[0-7]/.test(next)) {
+      const match = /^[0-7]{1,3}/.exec(raw.slice(i))!;
+      bytes.push(parseInt(match[0], 8) & 0xff);
+      i += match[0].length - 1;
+    } else if (next === "x") {
+      const match = /^[0-9a-fA-F]{1,2}/.exec(raw.slice(i + 1));
+      if (match) { bytes.push(parseInt(match[0], 16) & 0xff); i += match[0].length; }
+    } else if (next === "u" || next === "U") {
+      const len = next === "u" ? 4 : 8;
+      const hex = raw.slice(i + 1, i + 1 + len);
+      if (hex.length === len && /^[0-9a-fA-F]+$/.test(hex)) {
+        for (const byte of Buffer.from(String.fromCodePoint(parseInt(hex, 16)), "utf8")) bytes.push(byte);
+        i += len;
+      }
+    } else {
+      for (const byte of Buffer.from(next, "utf8")) bytes.push(byte);
+    }
+  }
+  return Buffer.from(bytes).toString("utf8");
+}
+
+function escapePbtxtString(value: string): string {
+  return value.replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/\n/g, "\\n").replace(/\r/g, "\\r").replace(/\t/g, "\\t");
+}
+
+function agyConversationId(path: string): string {
+  const logs = dirname(path), sys = dirname(logs), parent = dirname(sys);
+  if (basename(logs) === "logs" && basename(sys) === ".system_generated" && basename(parent) && parent !== sys) return basename(parent);
+  return basename(dirname(path));
+}
+
+function agyWorkspaceCwd(rawUris: unknown): string {
+  let uris: unknown = rawUris;
+  if (typeof rawUris === "string") {
+    try { uris = JSON.parse(rawUris); } catch { return ""; }
+  }
+  if (!Array.isArray(uris)) return "";
+  for (const item of uris) {
+    if (typeof item !== "string" || !item) continue;
+    if (item.startsWith("file://")) {
+      try { return fileURLToPath(item); } catch { continue; }
+    }
+    if (isAbsolute(item)) return item;
+  }
+  return "";
+}
+
+function unwrapAgyUserInput(raw: string): string {
+  const match = /<USER_REQUEST>\s*([\s\S]*?)\s*<\/USER_REQUEST>/.exec(raw);
+  if (match) return match[1]!.trim();
+  if (raw.startsWith("<USER_REQUEST>")) return raw.slice("<USER_REQUEST>".length).replace(/<\/USER_REQUEST>[\s\S]*$/, "").trim();
+  return raw.trim();
+}
+
+function preferFullAgyLogs(paths: string[]): string[] {
+  const fullDirs = new Set(paths.filter((path) => basename(path) === "transcript_full.jsonl").map((path) => dirname(path)));
+  return paths.filter((path) => {
+    const name = basename(path);
+    return name === "transcript_full.jsonl" || name === "transcript.jsonl" && !fullDirs.has(dirname(path));
+  });
+}
+
+class AgyAdapter extends JsonlAdapter {
+  readonly tool = "agy" as const;
+  readonly minSize = 1;
+
+  static archiveParser(root: string, meta: [string, AgySummaryMeta][]): AgyAdapter {
+    const adapter = new AgyAdapter(root, null, null, true);
+    adapter.meta = new Map(meta);
+    return adapter;
+  }
+
+  private dbFile: string;
+  private annotationsDir: string;
+  private meta = new Map<string, AgySummaryMeta>();
+  private names = new Map<string, string>();
+  private namesSignature = "";
+  private namesLoaded = false;
+
+  constructor(
+    root: string,
+    private lsAddress: string | null = null,
+    private csrfToken: string | null = null,
+    private archive = false,
+    private snapshotDirectory = "",
+  ) {
+    super(root, archive);
+    this.dbFile = join(root, "conversation_summaries.db");
+    this.annotationsDir = join(root, "annotations");
+  }
+
+  override parseJob(paths: string[]): ArchiveParseJob {
+    return { ...super.parseJob(paths), agyMeta: [...this.meta] };
+  }
+
+  discover(): string[] {
+    const candidates = this.files(this.archive ? "**/transcript*.jsonl" : "brain/*/.system_generated/logs/transcript*.jsonl");
+    return preferFullAgyLogs(candidates);
+  }
+
+  parse(path: string): ParsedMetadata | null {
+    const id = agyConversationId(path);
+    const entry = this.meta.get(id);
+    if (entry?.parentId) return null;
+    let first = "", recognized = false, birth: number | undefined;
+    for (const line of readHeadLines(path, MAX_HEAD_LINES)) {
+      const record = parseRecord(line);
+      if (!record) continue;
+      if (typeof record.type === "string" && (typeof record.step_index === "number" || typeof record.source === "string")) recognized = true;
+      birth ??= isoToEpoch(record.created_at);
+      if (!first && record.type === "USER_INPUT" && record.source !== "SYSTEM" && record.source !== "SYSTEM_SDK") {
+        const text = unwrapAgyUserInput(stringValue(record.content));
+        if (text && !isInjected("user", text)) first = text;
+      }
+      if (recognized && birth !== undefined && first) break;
+    }
+    if (!recognized) return null;
+    return {
+      id,
+      cwd: entry?.cwd || "?",
+      first_msg: first,
+      birth,
+      upstream_name: this.archive ? entry?.title ?? "" : "",
+    };
+  }
+
+  override metadataSignature(path: string): string {
+    const entry = this.meta.get(agyConversationId(path));
+    return entry ? JSON.stringify(entry) : "";
+  }
+
+  loadNames(): Map<string, string> {
+    if (this.archive && [this.dbFile, `${this.dbFile}-wal`, `${this.dbFile}-shm`, this.annotationsDir]
+      .some((path) => existsSync(path) && !this.allowed(path))) {
+      this.meta.clear();
+      this.names.clear();
+      this.namesSignature = "unavailable";
+      return new Map();
+    }
+    const dbSig = [this.dbFile, `${this.dbFile}-wal`].map((path) => {
+      try { const stat = statSync(path); return `${stat.ctimeMs}:${stat.mtimeMs}:${stat.size}`; } catch { return ""; }
+    });
+    let annFiles: string[] = [];
+    if (existsSync(this.annotationsDir)) {
+      try {
+        annFiles = readdirSync(this.annotationsDir).filter((name) => name.endsWith(".pbtxt")).sort();
+      } catch {}
+    }
+    const annSig = annFiles.map((name) => {
+      const path = join(this.annotationsDir, name);
+      if (this.archive && !this.allowed(path)) return "";
+      try { const stat = statSync(path); return `${name}:${stat.ctimeMs}:${stat.mtimeMs}:${stat.size}`; } catch { return ""; }
+    });
+    const signature = [...dbSig, ...annSig].join("|");
+    if (this.namesLoaded && signature === this.namesSignature) return this.names;
+
+    const meta = new Map<string, AgySummaryMeta>();
+    const ensure = (id: string): AgySummaryMeta => {
+      let existing = meta.get(id);
+      if (!existing) meta.set(id, existing = { cwd: "", title: "", parentId: "", agentName: "" });
+      return existing;
+    };
+
+    if (existsSync(this.dbFile)) {
+      let database: Database | undefined;
+      let snapshot: string | undefined;
+      try {
+        const baseDir = this.snapshotDirectory || tmpdir();
+        mkdirSync(baseDir, { recursive: true });
+        snapshot = mkdtempSync(join(baseDir, ".agy-metadata-"));
+        const dbCopy = join(snapshot, "summaries.db");
+        copyFileSync(this.dbFile, dbCopy);
+        if (existsSync(`${this.dbFile}-wal`)) copyFileSync(`${this.dbFile}-wal`, `${dbCopy}-wal`);
+        database = new Database(dbCopy);
+        const tables = new Set((database.query("SELECT name FROM sqlite_master WHERE type='table'").all() as Json[]).map((row) => stringValue(row.name)));
+        if (tables.has("conversation_summaries")) {
+          const columns = new Set((database.query("SELECT name FROM pragma_table_info('conversation_summaries')").all() as Json[]).map((row) => stringValue(row.name)));
+          const optional = (name: string) => columns.has(name) ? name : `NULL AS ${name}`;
+          const rows = database.query(`SELECT conversation_id, ${optional("title")}, ${optional("workspace_uris")}, ${optional("parent_conversation_id")}, ${optional("agent_name")} FROM conversation_summaries`).all() as Json[];
+          for (const row of rows) {
+            const id = stringValue(row.conversation_id);
+            if (!id) continue;
+            const entry = ensure(id);
+            const title = stringValue(row.title);
+            const cwd = agyWorkspaceCwd(row.workspace_uris);
+            const parentId = stringValue(row.parent_conversation_id);
+            const agentName = stringValue(row.agent_name);
+            if (title) entry.title = title;
+            if (cwd) entry.cwd = cwd;
+            if (parentId && parentId !== id) entry.parentId = parentId;
+            if (agentName) entry.agentName = agentName;
+          }
+        }
+        if (tables.has("conversation_parents")) {
+          const rows = database.query("SELECT conversation_id, parent_id FROM conversation_parents").all() as Json[];
+          for (const row of rows) {
+            const id = stringValue(row.conversation_id), parentId = stringValue(row.parent_id);
+            if (id && parentId && parentId !== id) ensure(id).parentId ||= parentId;
+          }
+        }
+      } catch {
+        if (this.archive) {
+          this.meta.clear();
+          this.names.clear();
+          this.namesSignature = signature;
+          return this.names;
+        }
+        if (this.namesLoaded) return this.names;
+      } finally {
+        try { database?.close(); } finally { if (snapshot) rmSync(snapshot, { recursive: true, force: true }); }
+      }
+    }
+
+    for (const file of annFiles) {
+      const path = join(this.annotationsDir, file);
+      if (this.archive && !this.allowed(path)) continue;
+      try {
+        const text = readFileSync(path, "utf8");
+        const match = /\btitle\s*:\s*"((?:[^"\\]|\\.)*)"/.exec(text);
+        if (!match) continue;
+        const id = basename(file, ".pbtxt"), title = unescapePbtxtString(match[1]!);
+        if (title) ensure(id).title = title;
+      } catch {}
+    }
+
+    const names = new Map<string, string>();
+    for (const [id, entry] of meta) if (entry.title) names.set(id, entry.title);
+    this.meta = meta;
+    this.names = names;
+    this.namesSignature = signature;
+    this.namesLoaded = true;
+    return this.names;
+  }
+
+  protected override projectable(line: string): boolean {
+    return line.includes('"type":');
+  }
+
+  project(record: Json): Projected[] {
+    const type = stringValue(record.type);
+    if (type === "USER_INPUT") {
+      const raw = stringValue(record.content);
+      if (record.source === "SYSTEM" || record.source === "SYSTEM_SDK") {
+        const trimmed = raw.trim();
+        return trimmed ? [{ kind: "user", text: trimmed, injected: true }] : [];
+      }
+      const text = unwrapAgyUserInput(raw);
+      return text ? [{ kind: "user", text, ...(isInjected("user", text) ? { injected: true as const } : {}) }] : [];
+    }
+    if (type === "SYSTEM_MESSAGE" || type === "CHECKPOINT") {
+      const text = stringValue(record.content).trim();
+      return text ? [{ kind: "user", text, injected: true }] : [];
+    }
+    if (type === "PLANNER_RESPONSE") {
+      const events: Projected[] = [];
+      const thinking = stringValue(record.thinking).trim();
+      if (thinking) events.push({ kind: "thinking", text: thinking });
+      const content = stringValue(record.content).trim();
+      if (content) events.push({ kind: "assistant", text: content });
+      if (Array.isArray(record.tool_calls)) {
+        for (const call of record.tool_calls) {
+          if (!isRecord(call)) continue;
+          const name = stringValue(call.name);
+          const args = typeof call.args === "string" ? call.args : flatten(call.args);
+          const text = name && args ? `${name}: ${args}` : name || args;
+          if (text.trim()) events.push(...toolEvent("tool_call", name, text));
+        }
+      }
+      return events;
+    }
+    if (type === "GENERIC" || type === "ERROR_MESSAGE") {
+      const content = stringValue(record.content).trim(), err = stringValue(record.error).trim();
+      const text = content && err && !content.includes(err) ? `${content}\n${err}` : content || err;
+      return toolEvent("tool_output", type === "ERROR_MESSAGE" ? "error" : "", text);
+    }
+    return [];
+  }
+
+  override async children(): Promise<Children> {
+    const unreadable: Unreadable[] = [];
+    const searchRoot = this.archive ? this.root : join(this.root, "brain");
+    const keep = this.archive
+      ? (parts: string[]) => parts.at(-1) === "transcript_full.jsonl" || parts.at(-1) === "transcript.jsonl"
+      : (parts: string[]) => parts.length === 4 && parts[1] === ".system_generated" && parts[2] === "logs"
+        && (parts[3] === "transcript_full.jsonl" || parts[3] === "transcript.jsonl");
+    const paths = preferFullAgyLogs(walk(searchRoot, keep, unreadable)).filter((path) => this.allowed(path));
+    const files: ChildFile[] = [];
+    for (const path of paths) {
+      const thread = agyConversationId(path);
+      const parentOriginalId = this.meta.get(thread)?.parentId;
+      if (parentOriginalId) files.push({ kind: "agent", path, thread, parentOriginalId });
+    }
+    return { files, unreadable };
+  }
+
+  override label(file: ChildFile): string {
+    const entry = this.meta.get(file.thread);
+    return entry?.agentName || entry?.title || file.thread;
+  }
+
+  async rename(id: string, name: string, locatedPath?: string): Promise<void> {
+    const path = locatedPath ?? this.findFile(id);
+    if (!path) throw new CatalogError("not_found", `找不到 agy session 文件: ${id}`);
+    if (this.lsAddress && this.csrfToken) {
+      try {
+        const response = await fetch(`http://${this.lsAddress}/product.v1.ConversationService/UpdateConversation`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "Connect-Protocol-Version": "1",
+            "x-antigravity-csrf-token": this.csrfToken,
+          },
+          body: JSON.stringify({ conversationId: id, annotations: { title: name } }),
+          signal: AbortSignal.timeout(3000),
+        });
+        if (response.ok) {
+          this.namesLoaded = false;
+          this.namesSignature = "";
+          return;
+        }
+      } catch {}
+    }
+    const pbtxtPath = join(this.annotationsDir, `${id}.pbtxt`);
+    const field = `title:"${escapePbtxtString(name)}"`;
+    const existing = existsSync(pbtxtPath) ? readFileSync(pbtxtPath, "utf8") : "";
+    const updated = /\btitle\s*:\s*"(?:[^"\\]|\\.)*"/.test(existing)
+      ? existing.replace(/\btitle\s*:\s*"(?:[^"\\]|\\.)*"/, field)
+      : existing.trim() ? `${field}  ${existing.trimStart()}` : `${field}\n`;
+    atomicWrite(pbtxtPath, updated);
+    if (existsSync(this.dbFile)) {
+      let database: Database | undefined;
+      try {
+        database = new Database(this.dbFile);
+        database.run("PRAGMA busy_timeout = 3000");
+        const exists = database.query("SELECT 1 FROM sqlite_master WHERE type='table' AND name='conversation_summaries'").get();
+        if (exists) database.query("UPDATE conversation_summaries SET title = ? WHERE conversation_id = ?").run(name, id);
+      } catch (cause) {
+        throw new CatalogError("invalid", `agy Session 名称更新失败: ${cause instanceof Error ? cause.message : String(cause)}`);
+      } finally {
+        database?.close();
+      }
+    }
+    this.namesLoaded = false;
+    this.namesSignature = "";
+  }
+}
+
 function atomicWrite(path: string, text: string): void {
   mkdirSync(dirname(path), { recursive: true });
   const temporary = `${path}.${process.pid}.${crypto.randomUUID()}.tmp`;
@@ -1278,24 +1653,30 @@ export class SessionCatalog {
 
   constructor(options: CatalogOptions = {}) {
     const home = options.home ?? homeDirectory();
+    const environment = options.environment ?? process.env;
     const claude = join(home, ".claude", "projects");
     const codex = join(home, ".codex");
     const pi = join(home, ".pi", "agent", "sessions");
+    const agy = join(home, ".gemini", "antigravity-cli");
     const rg = options.rgPath === undefined ? Bun.which("rg") : options.rgPath;
+    const dataDirectory = options.dataDirectory ?? userDataDirectory(home, options.environment, options.platform);
+    const useHostEnv = options.home === undefined || options.environment !== undefined;
+    const agyLsAddress = options.agyLsAddress !== undefined ? options.agyLsAddress : (useHostEnv ? environment.ANTIGRAVITY_LS_ADDRESS ?? null : null);
+    const agyCsrfToken = options.agyCsrfToken !== undefined ? options.agyCsrfToken : (useHostEnv ? environment.ANTIGRAVITY_CSRF_TOKEN ?? null : null);
     this.home = home;
     this.platform = options.platform ?? process.platform;
     this.codexPath = options.codexPath === undefined ? Bun.which("codex") : options.codexPath;
+    this.dataDirectory = dataDirectory;
     this.liveBindings = [
       new ClaudeAdapter(claude, rg),
       new CodexAdapter(join(codex, "sessions"), join(codex, "session_index.jsonl"), join(codex, "state_5.sqlite"),
         this.codexPath),
       new PiAdapter(pi),
+      new AgyAdapter(agy, agyLsAddress, agyCsrfToken, false, dataDirectory),
     ].map((adapter) => ({ adapter, rootId: adapter.tool }));
     this.bindings = this.liveBindings;
-    const dataDirectory = options.dataDirectory ?? userDataDirectory(home, options.environment, options.platform);
-    this.dataDirectory = dataDirectory;
-    this.sourcesFile = options.sourcesFile ?? (options.environment ?? process.env).AGENT_SESSIONS_SOURCES_FILE ?? join(userDataDirectory(home, options.environment, options.platform), "sources.json");
-    this.explicitSourcesFile = options.sourcesFile !== undefined || (options.environment ?? process.env).AGENT_SESSIONS_SOURCES_FILE !== undefined;
+    this.sourcesFile = options.sourcesFile ?? environment.AGENT_SESSIONS_SOURCES_FILE ?? join(userDataDirectory(home, options.environment, options.platform), "sources.json");
+    this.explicitSourcesFile = options.sourcesFile !== undefined || environment.AGENT_SESSIONS_SOURCES_FILE !== undefined;
     this.marksFile = join(dataDirectory, "stars.json");
     this.metadataFile = join(dataDirectory, "metadata-cache.json");
     this.now = options.now ?? (() => new Date());
@@ -1479,7 +1860,7 @@ export class SessionCatalog {
     const location = this.location(id);
     if (location.source) throw new CatalogError("invalid", sourceCopy.errors.readonly);
     await location.adapter.rename(location.originalId, name.trim(), location.path);
-    if (session.tool === "codex") {
+    if (session.tool === "codex" || session.tool === "agy") {
       const marks = this.loadMarks(), mark = marks[id];
       if (mark?.name) {
         delete mark.name;
@@ -1502,6 +1883,7 @@ export class SessionCatalog {
       if (!binding) {
         const adapter = root.tool === "claude" ? new ClaudeAdapter(root.path, this.rgPath === undefined ? Bun.which("rg") : this.rgPath, true)
           : root.tool === "pi" ? new PiAdapter(root.path, true)
+          : root.tool === "agy" ? new AgyAdapter(root.path, null, null, true, this.dataDirectory)
           : new CodexAdapter(root.path, join(root.path, "session_index.jsonl"), join(root.path, "state_5.sqlite"), null, true, this.dataDirectory);
         binding = { adapter, source, rootId: root.id };
       } else binding.source = source;
@@ -1586,7 +1968,7 @@ export class SessionCatalog {
           const real = realPath(path);
           if (source && seenPaths.has(real)) { report.skipped!++; continue; }
           const stat = statSync(real);
-          if (!stat.isFile() || !source && stat.size < MIN_SIZE) { report.skipped!++; continue; }
+          if (!stat.isFile() || !source && stat.size < (adapter.minSize ?? MIN_SIZE)) { report.skipped!++; continue; }
           seenPaths.add(real);
           files.push({ ...binding, path: resolve(path), stat });
         }
@@ -1628,7 +2010,7 @@ export class SessionCatalog {
       const mark = marks[id];
       const rootName = file.source && rootCounts.get(file.adapter)!.get(metadata.id)! > 1 ? "" : names.get(file.adapter)?.get(metadata.id);
       const upstream = metadata.upstream_name || rootName || "";
-      const name = file.adapter.tool === "codex" ? upstream || mark?.name || "" : mark?.name || upstream;
+      const name = file.adapter.tool === "codex" || file.adapter.tool === "agy" ? upstream || mark?.name || "" : mark?.name || upstream;
       rows.push({
         id,
         ...(file.source ? { session_id: metadata.id, source_id: file.source.id, source_label: file.source.label,

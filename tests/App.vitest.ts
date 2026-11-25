@@ -344,7 +344,7 @@ describe("dashboard", () => {
       const name = wrapper.get(".name-text");
       expect(name.text()).toBe(label);
       await name.trigger("mouseenter");
-      await vi.advanceTimersByTimeAsync(181); await flushPromises();
+      await vi.advanceTimersByTimeAsync(501); await flushPromises();
       expect(wrapper.get("#tip").text()).toContain("Pi user message");
       expect(wrapper.get("#tip").text()).toContain("Pi assistant reply");
       expect(wrapper.findAll("#tip .tipmsg")).toHaveLength(2);
@@ -370,7 +370,7 @@ describe("dashboard", () => {
     expect(wrapper.get<HTMLInputElement>("#q").element.value).toBe("");
 
     await wrapper.find(".line2.msg").trigger("mouseenter");
-    await vi.advanceTimersByTimeAsync(181); await flushPromises();
+    await vi.advanceTimersByTimeAsync(501); await flushPromises();
     expect(wrapper.get("#tip").text()).toContain("Readable fixture");
     expect(wrapper.get("#tip .markdown h2").text()).toBe("Readable fixture");
 
@@ -381,7 +381,7 @@ describe("dashboard", () => {
     expect(wrapper.get("table").classes()).toContain("compact");
     // 首条消息藏起来后，Transcript 预览改从名称格进入
     await wrapper.get(".name-text").trigger("mouseenter");
-    await vi.advanceTimersByTimeAsync(181); await flushPromises();
+    await vi.advanceTimersByTimeAsync(501); await flushPromises();
     expect(wrapper.get("#tip").text()).toContain("Readable fixture");
     await wrapper.get("#density").trigger("click");
     expect(localStorage.getItem("compact")).toBe("0");
@@ -413,11 +413,11 @@ describe("dashboard", () => {
     const message = wrapper.get(".line2.msg");
 
     await message.trigger("mouseenter");
-    await vi.advanceTimersByTimeAsync(181);
+    await vi.advanceTimersByTimeAsync(501);
     await message.trigger("mouseleave");
-    await vi.advanceTimersByTimeAsync(101);
+    await vi.advanceTimersByTimeAsync(151);
     await message.trigger("mouseenter");
-    await vi.advanceTimersByTimeAsync(181);
+    await vi.advanceTimersByTimeAsync(501);
 
     expect(fetchMock.mock.calls.filter(([input]) => String(input).startsWith("/api/session?id=")).length).toBe(1);
     finishDetail(response({ ...makeRow(1), messages: [] } satisfies TranscriptView));
@@ -464,7 +464,7 @@ describe("dashboard", () => {
     await flushPromises();
 
     await wrapper.get(".line2.msg").trigger("mouseenter");
-    await vi.advanceTimersByTimeAsync(181);
+    await vi.advanceTimersByTimeAsync(501);
     await flushPromises();
     expect(wrapper.get("#tip").text()).toContain("before refresh");
     await wrapper.get("#reload").trigger("click");
@@ -484,11 +484,12 @@ describe("dashboard", () => {
     const message = wrapper.get(".line2.msg");
 
     await message.trigger("mouseenter");
-    await vi.advanceTimersByTimeAsync(100);
+    await vi.advanceTimersByTimeAsync(350);
     await message.trigger("mouseleave");
-    await vi.advanceTimersByTimeAsync(200);
+    await vi.advanceTimersByTimeAsync(300);
 
     expect(fetchMock.mock.calls.filter(([input]) => String(input).startsWith("/api/session?id=")).length).toBe(0);
+    expect(wrapper.find("#tip").exists()).toBe(false);
     wrapper.unmount();
   });
 
@@ -499,15 +500,52 @@ describe("dashboard", () => {
     const messages = wrapper.findAll(".line2.msg");
 
     await messages[0]!.trigger("mouseenter");
-    await vi.advanceTimersByTimeAsync(181);
+    await vi.advanceTimersByTimeAsync(501);
     await flushPromises();
     expect(fetchMock.mock.calls.filter(([input]) => String(input).startsWith("/api/session?id=")).length).toBe(1);
+    expect(wrapper.find("#tip").exists()).toBe(true);
 
     await messages[1]!.trigger("mouseenter");
-    await vi.advanceTimersByTimeAsync(179);
+    expect(wrapper.find("#tip").exists()).toBe(false);
+    await vi.advanceTimersByTimeAsync(499);
     expect(fetchMock.mock.calls.filter(([input]) => String(input).startsWith("/api/session?id=")).length).toBe(1);
     await vi.advanceTimersByTimeAsync(1);
     expect(fetchMock.mock.calls.filter(([input]) => String(input).startsWith("/api/session?id=")).length).toBe(2);
+    wrapper.unmount();
+  });
+
+  test("dismisses and suppresses hover previews when starting to rename, and supports agy tab and rename toast", async () => {
+    vi.useFakeTimers();
+    const agyRow: SessionView = { ...makeRow(1), id: "agy-1", tool: "agy", model: "gemini-4-neon-high" };
+    fetchMock.mockImplementation(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.startsWith("/api/sessions")) return response({ generatedAt: new Date(0).toISOString(), home: "/home/fixture", sessions: [agyRow] });
+      if (url.startsWith("/api/session?")) return response({ ...agyRow, messages: [{ role: "user", text: "hi", timestamp: "" }] });
+      return response({ ok: true });
+    });
+    const wrapper = mount(App, { attachTo: document.body });
+    await flushPromises();
+    expect(wrapper.findAll(".tabs button").some((button) => button.text().startsWith("agy"))).toBe(true);
+    expect(wrapper.get(".tool-pill.agy").text()).toBe("agy");
+
+    const row = wrapper.get("tbody tr.row");
+    await row.get(".line2.msg").trigger("mouseenter");
+    await vi.advanceTimersByTimeAsync(501);
+    await flushPromises();
+    expect(wrapper.find("#tip").exists()).toBe(true);
+
+    await row.get(".nm").trigger("mousedown");
+    expect(wrapper.find("#tip").exists()).toBe(false);
+    await row.get(".nm").trigger("click");
+    await row.get(".line2.msg").trigger("mouseenter");
+    await vi.advanceTimersByTimeAsync(600);
+    expect(wrapper.find("#tip").exists()).toBe(false);
+
+    const input = row.get<HTMLInputElement>("input[aria-label='名称']");
+    await input.setValue("Renamed Agy");
+    await input.trigger("keydown", { key: "Enter" });
+    await flushPromises();
+    expect(wrapper.get("#toast").text()).toBe("已同步 agy Session 名称");
     wrapper.unmount();
   });
 
@@ -543,7 +581,7 @@ describe("dashboard", () => {
     Object.defineProperty(nameText.element, "scrollWidth", { configurable: true, value: 200 });
     Object.defineProperty(nameText.element, "clientWidth", { configurable: true, value: 50 });
     await nameText.trigger("mouseenter");
-    await vi.advanceTimersByTimeAsync(181);
+    await vi.advanceTimersByTimeAsync(501);
     expect(wrapper.get("#tip").text()).toBe("Session 100");
     wrapper.unmount();
   });

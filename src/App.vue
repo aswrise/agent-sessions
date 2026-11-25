@@ -35,6 +35,8 @@ type PreviewState =
 
 const PAGE_SIZE = 100;
 const MODEL_CHIP_LIMIT = 20;
+const PREVIEW_DELAY_MS = 500;
+const PREVIEW_HIDE_DELAY_MS = 150;
 const markdown = new MarkdownIt({ breaks: true, html: false, linkify: true });
 const statusMeta: Record<SessionStatus, { label: string; color: string }> = {
   "": { label: "无", color: "var(--ash)" },
@@ -180,6 +182,7 @@ const tabs = computed<{ value: Tab; label: string }[]>(() => [
   { value: "claude", label: "claude" },
   { value: "codex", label: "codex" },
   { value: "pi", label: "pi" },
+  { value: "agy", label: "agy" },
   { value: "__star__", label: "★ 标记" },
   { value: "__arch__", label: "归档" },
 ]);
@@ -189,6 +192,7 @@ const tabCounts = computed<Record<Tab, number>>(() => ({
   claude: rows.value.filter((row) => !row.archived && row.tool === "claude").length,
   codex: rows.value.filter((row) => !row.archived && row.tool === "codex").length,
   pi: rows.value.filter((row) => !row.archived && row.tool === "pi").length,
+  agy: rows.value.filter((row) => !row.archived && row.tool === "agy").length,
   __star__: rows.value.filter((row) => !row.archived && row.starred).length,
   __arch__: rows.value.filter((row) => row.archived).length,
 }));
@@ -427,6 +431,7 @@ async function toggleArchive(row: SessionView): Promise<void> {
 
 function startEdit(row: SessionView, field: Editing["field"]): void {
   if (pending.value.has(row.id) || field === "name" && row.source_kind === "archive") return;
+  hidePreview();
   editing.value = { id: row.id, field };
   editValue.value = row[field];
   nextTick(() => {
@@ -445,7 +450,9 @@ async function finishEdit(row: SessionView, field: Editing["field"], save: boole
   if (field === "name" && !value) { showToast("名称不能为空", true); return; }
   const route = field === "name" ? "/rename" : "/star";
   const body = field === "name" ? { name: value } : { note: value };
-  const success = field === "name" && row.tool === "codex" ? "已同步 Codex Session 名称" : "已保存";
+  const success = field === "name" && (row.tool === "codex" || row.tool === "agy")
+    ? `已同步 ${row.tool === "codex" ? "Codex" : "agy"} Session 名称`
+    : "已保存";
   await persist(row, route, body, () => { row[field] = value; }, success);
 }
 
@@ -623,10 +630,10 @@ async function placePreview(): Promise<void> {
   if (!preview.value || !previewElement.value) return;
   const box = preview.value.anchor.getBoundingClientRect();
   const width = Math.min(820, innerWidth - 24);
-  let top = box.bottom - 4;
+  let top = box.bottom + 6;
   let origin = "top left";
   if (top + previewElement.value.offsetHeight > innerHeight - 8) {
-    top = Math.max(8, box.top - previewElement.value.offsetHeight + 4);
+    top = Math.max(8, box.top - previewElement.value.offsetHeight - 6);
     origin = "bottom left";
   }
   preview.value.style = {
@@ -642,26 +649,33 @@ function revealPreview(value: PreviewState): void {
 }
 
 function showTextPreview(event: MouseEvent, key: string, text: string): void {
+  if (editing.value) return;
   const cell = event.currentTarget as HTMLElement;
   if (cell.scrollWidth <= cell.clientWidth + 1) { hidePreview(); return; }
   clearTimeout(previewHideTimer);
   clearTimeout(previewShowTimer);
+  if (preview.value?.key === key) return;
+  if (preview.value) preview.value = undefined;
   const value: PreviewState = { key, kind: "text", text, anchor: cell, style: {} };
-  if (preview.value) revealPreview(value);
-  else previewShowTimer = setTimeout(() => revealPreview(value), 180);
+  previewShowTimer = setTimeout(() => {
+    previewShowTimer = undefined;
+    if (!editing.value) revealPreview(value);
+  }, PREVIEW_DELAY_MS);
 }
 
 function showTranscriptPreview(row: SessionView, event: MouseEvent): void {
+  if (editing.value) return;
   const anchor = event.currentTarget as HTMLElement;
   const key = `transcript:${row.id}`;
   clearTimeout(previewHideTimer);
   clearTimeout(previewShowTimer);
+  if (preview.value?.key === key) return;
+  if (preview.value) preview.value = undefined;
   const state: PreviewState = { key, kind: "transcript", loading: true, anchor, style: {} };
-  if (preview.value) revealPreview(state);
   previewShowTimer = setTimeout(() => {
     previewShowTimer = undefined;
-    if (!preview.value) revealPreview(state);
-    if (preview.value?.key !== key) return;
+    if (editing.value) return;
+    revealPreview(state);
     void fetchDetail(row.id).then((value) => {
       if (preview.value?.key === key && preview.value.kind === "transcript") {
         preview.value = { ...preview.value, detail: value, loading: false };
@@ -671,14 +685,14 @@ function showTranscriptPreview(row: SessionView, event: MouseEvent): void {
       if (preview.value?.key === key && preview.value.kind === "transcript")
         preview.value = { ...preview.value, loading: false };
     });
-  }, 180);
+  }, PREVIEW_DELAY_MS);
 }
 
 function schedulePreviewHide(): void {
   clearTimeout(previewShowTimer);
   previewShowTimer = undefined;
   clearTimeout(previewHideTimer);
-  previewHideTimer = setTimeout(hidePreview, 100);
+  previewHideTimer = setTimeout(hidePreview, PREVIEW_HIDE_DELAY_MS);
 }
 
 function keepPreview(): void {
@@ -871,11 +885,11 @@ onBeforeUnmount(() => {
               <div class="line1">
                 <span v-if="row.source_kind === 'archive'" class="source-label" :title="`${row.source_id}/${row.root_id} · ${row.session_id}`">{{ row.source_label }}{{ row.source_scope ? ` · ${row.source_scope}` : '' }}</span>
                 <span v-if="copies(row).length > 1" class="source-label">{{ sourceCopy.copies(copies(row).length) }}</span>
-                <span class="nm" :aria-disabled="row.source_kind === 'archive'" :title="row.source_kind === 'archive' ? sourceCopy.readonlyName : undefined" @click.stop="startEdit(row, 'name')">
+                <span class="nm" :aria-disabled="row.source_kind === 'archive'" :title="row.source_kind === 'archive' ? sourceCopy.readonlyName : undefined" @mousedown="hidePreview" @click.stop="startEdit(row, 'name')">
                   <input v-if="editing?.id === row.id && editing.field === 'name'" v-model="editValue" class="cell-input" :data-edit="`${row.id}:name`" aria-label="名称" @click.stop @keydown="editKeydown(row, 'name', $event)" @blur="finishEdit(row, 'name', true)" />
                   <span v-else class="name-text" @mouseenter="previewSession(row, $event)" @mouseleave="schedulePreviewHide">{{ row.name || (compact ? row.first_msg || row.session_id || row.id : '') }}</span>
                 </span>
-                <span class="note-slot" :title="row.star_note || '添加备注'" @click.stop="startEdit(row, 'star_note')">
+                <span class="note-slot" :title="row.star_note || '添加备注'" @mousedown="hidePreview" @click.stop="startEdit(row, 'star_note')">
                   <input v-if="editing?.id === row.id && editing.field === 'star_note'" v-model="editValue" class="cell-input" :data-edit="`${row.id}:star_note`" aria-label="备注" @click.stop @keydown="editKeydown(row, 'star_note', $event)" @blur="finishEdit(row, 'star_note', true)" />
                   <template v-else>{{ row.star_note }}</template>
                 </span>
@@ -1114,6 +1128,7 @@ td.opscell{padding-right:6px}
 .tool-pill.codex{color:#aab5ff;background:rgba(139,156,255,.1)}
 .tool-pill.claude{color:#e9a884;background:rgba(222,137,91,.1)}
 .tool-pill.pi{color:#76d5b0;background:rgba(77,190,147,.1)}
+.tool-pill.agy{color:#7dd3fc;background:rgba(56,189,248,.11)}
 td.starcell{padding-left:3px;padding-right:3px;text-align:center}
 .rowbtn{display:inline-grid;place-items:center;min-width:28px;height:28px;padding:0 7px;border:0;border-radius:7px;
   background:transparent;color:var(--ash);font:inherit;font-size:11px;cursor:pointer;

@@ -470,4 +470,41 @@ describe("configured archive sources", () => {
     expect(JSON.parse(found.stdout.toString())).toMatchObject({ total: 2, results: [{ primary_action: { kind: "path" } }] });
     const text = run("list", "-n", "1").stdout.toString(); expect(text).toContain("↳ " + envelope.sessions[0].source_path); expect(text).not.toContain("pi --session archive:");
   });
+
+  test("reads agy archive snapshots (full root and brain-only root), runs workers, and rejects archive rename", async () => {
+    const f = setup(), agySnap = join(f.root, "agy-snap"), brainOnly = join(f.root, "agy-brain");
+    const writeAgy = (dir: string, id: string, title: string, text: string) => {
+      const logs = join(dir, id, ".system_generated", "logs");
+      jsonl(join(logs, "transcript_full.jsonl"), [
+        { step_index: 0, source: "USER_EXPLICIT", type: "USER_INPUT", status: "DONE", created_at: "2026-11-25T08:00:00Z", content: `<USER_REQUEST>\n${text}\n</USER_REQUEST>` },
+        { step_index: 1, source: "MODEL", type: "PLANNER_RESPONSE", status: "DONE", created_at: "2026-11-25T08:00:02Z", model: "gemini-4-neon-high", content: `reply ${text}` },
+      ]);
+      // Add a truncated compact sibling that should be ignored when transcript_full.jsonl is present.
+      jsonl(join(logs, "transcript.jsonl"), [
+        { step_index: 0, source: "USER_EXPLICIT", type: "USER_INPUT", status: "DONE", created_at: "2026-11-25T08:00:00Z", content: "truncated" },
+      ]);
+    };
+    writeAgy(join(agySnap, "brain"), "agy-arch-1", "Archive Title", "agy-archive-needle");
+    mkdirSync(join(agySnap, "annotations"), { recursive: true });
+    writeFileSync(join(agySnap, "annotations/agy-arch-1.pbtxt"), 'title:"Annotation Override"\n');
+    const db = new Database(join(agySnap, "conversation_summaries.db"), { create: true });
+    db.run("CREATE TABLE conversation_summaries (conversation_id TEXT PRIMARY KEY, title TEXT, workspace_uris TEXT, parent_conversation_id TEXT, agent_name TEXT)");
+    db.query("INSERT INTO conversation_summaries VALUES (?, ?, ?, ?, ?)").run("agy-arch-1", "DB Title", JSON.stringify(["file:///old/agy/ws"]), "", "");
+    db.close();
+
+    for (let index = 0; index < 300; index++) writeAgy(brainOnly, `b-${index}`, "", `bulk-${index}`);
+    f.configure([source("snap", agySnap, "agy"), source("brain", brainOnly, "agy")]);
+    const rows = await f.catalog.list({ fresh: true });
+    const snapRow = rows.find((row) => row.session_id === "agy-arch-1")!;
+    expect(snapRow).toMatchObject({
+      tool: "agy",
+      name: "Annotation Override",
+      cwd: "/old/agy/ws",
+      model: "gemini-4-neon-high",
+      primary_action: { kind: "path", value: join(agySnap, "brain/agy-arch-1/.system_generated/logs/transcript_full.jsonl") },
+    });
+    expect(rows.filter((row) => row.source_id === "brain")).toHaveLength(300);
+    expect((await f.catalog.find({ terms: ["agy-archive-needle"] })).results.map((row) => row.id)).toEqual([snapRow.id]);
+    await expect(f.catalog.rename(snapRow.id, "Noop")).rejects.toThrow("只读");
+  });
 });

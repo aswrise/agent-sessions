@@ -15,7 +15,7 @@ _Avoid_: Raw events, debug log
 ## Architecture
 
 `SessionCatalog` is the deep module shared by the CLI and HTTP server. It owns
-Claude, Codex, and pi adapters, normalized Session/Transcript values, file
+Claude, Codex, pi, and agy adapters, normalized Session/Transcript values, file
 metadata caching, marks, search, and tool-specific rename behavior. The Vue
 application only consumes validated JSON contracts and owns presentation state.
 Source Session files and Codex SQLite inputs remain read-only.

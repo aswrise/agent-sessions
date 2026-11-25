@@ -1,6 +1,6 @@
 import { sourceCopy } from "./sourceCopy.ts";
 
-export const TOOLS = ["claude", "codex", "pi"] as const;
+export const TOOLS = ["claude", "codex", "pi", "agy"] as const;
 export type Tool = (typeof TOOLS)[number];
 
 export const STATUSES = ["", "todo", "in progress", "review", "blocked", "done", "archived"] as const;
