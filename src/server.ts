@@ -1,5 +1,9 @@
+import { readFile, stat } from "node:fs/promises";
+import { extname, isAbsolute, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+import MarkdownIt from "markdown-it";
 import { CatalogError, SessionCatalog } from "./catalog.ts";
-import { parseDashboardSettings, isStatus, type MarkPatch } from "./contracts.ts";
+import { parseDashboardSettings, isStatus, type MarkPatch, type SearchEnvelope } from "./contracts.ts";
 import { withResumeCommand } from "./resume.ts";
 import { homeDirectory } from "./paths.ts";
 
@@ -15,6 +19,12 @@ type ServerOptions = {
 class RequestError extends Error {
   constructor(public status: number, message: string) { super(message); }
 }
+
+const links = new MarkdownIt({ breaks: true, html: false, linkify: true });
+links.linkify.set({ fuzzyLink: false });
+const baseValidateLink = links.validateLink.bind(links);
+links.validateLink = (url: string) => baseValidateLink(url) || /^file:\/\/(?:localhost)?\//i.test(url.trim());
+const previewExtensions = new Set([".md", ".markdown", ".txt", ".sql", ".html", ".htm", ".json", ".jsonl", ".xml", ".yaml", ".yml", ".toml", ".csv", ".log", ".sh", ".py", ".js", ".jsx", ".ts", ".tsx", ".vue", ".css", ".java", ".properties"]);
 
 const json = (value: unknown, status = 200) => Response.json(value, { status });
 const isRecord = (value: unknown): value is Record<string, unknown> =>
@@ -61,44 +71,64 @@ export function startServer(options: ServerOptions): Bun.Server<undefined> {
           return json(catalog.setSettings(settings));
         }
         if (request.method === "GET" && url.pathname === "/api/sessions") {
-          const sessions = await catalog.list({ fresh: url.searchParams.get("fresh") === "1" });
-          return json({ generatedAt: new Date().toISOString(), home, sessions: sessions.map((session) => withResumeCommand(session, platform)) });
+          const scope = url.searchParams.get("scope") ?? undefined;
+          if (scope !== undefined && scope !== "live" && scope !== "archive") throw new RequestError(400, "scope 必须是 live 或 archive");
+          const sessions = await catalog.list({ ...(scope ? { scope } : {}), fresh: scope !== "archive" || url.searchParams.get("fresh") === "1" });
+          return json({ generatedAt: new Date().toISOString(), home, sessions: sessions.map((session) => withResumeCommand(session, platform)), diagnostics: catalog.sourceDiagnostics() });
         }
         if (request.method === "GET" && url.pathname === "/api/search") {
           const query = url.searchParams.get("q")?.trim();
           if (!query) throw new RequestError(400, "缺少 q");
           const rawLimit = url.searchParams.get("limit"), limit = rawLimit === null ? Number.MAX_SAFE_INTEGER : Number(rawLimit);
           if (!Number.isSafeInteger(limit) || limit < 1) throw new RequestError(400, "limit 必须是正整数");
-          const result = await catalog.find(query, limit);
-          return json({ ...result, results: result.results.map((session) => withResumeCommand(session, platform)) });
+          const result = await catalog.find({ terms: [query] }, limit);
+          const envelope: SearchEnvelope = { ...result, results: result.results.map((session) => withResumeCommand(session, platform)) };
+          return json(envelope);
         }
         if (request.method === "GET" && url.pathname === "/api/session") {
           const id = url.searchParams.get("id");
           if (!id) throw new RequestError(400, "缺少 id");
           return json(withResumeCommand(await catalog.detail(id), platform));
         }
-        if (request.method === "GET" && url.pathname === "/api/lineage") {
-          const id = url.searchParams.get("id");
-          if (!id) throw new RequestError(400, "缺少 id");
-          const lineage = await catalog.lineage(id, url.searchParams.get("refresh") !== "0");
-          return json({ ...lineage, sessions: lineage.sessions.map((session) => withResumeCommand(session, platform)) });
-        }
-        if (request.method === "GET" && url.pathname === "/api/lineages") {
-          const lineage = await catalog.lineages();
-          return json({ ...lineage, sessions: lineage.sessions.map((session) => withResumeCommand(session, platform)) });
-        }
-        if (request.method === "POST" && url.pathname === "/api/lineage/index") {
-          const value = await body(request);
-          if (value.force !== undefined && typeof value.force !== "boolean") throw new RequestError(400, "force 必须是 boolean");
-          return json(await catalog.refreshLineage(value.force === true));
-        }
-        if ((request.method === "POST" || request.method === "DELETE") && url.pathname === "/api/lineage/manual") {
-          const value = await body(request), upstreamId = value.upstream_id, downstreamId = value.downstream_id;
-          if (typeof upstreamId !== "string" || !upstreamId || typeof downstreamId !== "string" || !downstreamId)
-            throw new RequestError(400, "缺少 upstream_id 或 downstream_id");
-          if (request.method === "POST") await catalog.addManualLineage(upstreamId, downstreamId);
-          else catalog.removeManualLineage(upstreamId, downstreamId);
-          return json({ ok: true });
+        if (request.method === "GET" && url.pathname === "/api/file-preview") {
+          if (request.headers.get("sec-fetch-site") === "cross-site") throw new RequestError(403, "不允许跨站读取文件");
+          const id = url.searchParams.get("id"), href = url.searchParams.get("href");
+          if (!id || !href) throw new RequestError(400, "缺少会话或文件路径");
+          const session = await catalog.detail(id);
+          const linked = session.messages.some((message) => links.parse(message.text, {}).some((token) =>
+            token.children?.some((child) => child.type === "link_open" && child.attrGet("href") === href)));
+          if (!linked) throw new RequestError(403, "文件链接不在当前会话中");
+          let path: string;
+          const withoutFragment = href.split("#", 1)[0] ?? "";
+          if (/^file:\/\//i.test(withoutFragment)) {
+            let parsed: URL;
+            try { parsed = new URL(withoutFragment); }
+            catch { throw new RequestError(400, "文件路径无效"); }
+            if (parsed.protocol !== "file:" || (parsed.hostname !== "" && parsed.hostname.toLowerCase() !== "localhost"))
+              throw new RequestError(400, "仅支持本地文件");
+            try { path = fileURLToPath(parsed).replace(/:\d+(?::\d+)?$/, ""); }
+            catch { throw new RequestError(400, "文件路径无效"); }
+          } else {
+            try { path = decodeURIComponent(withoutFragment).replace(/:\d+(?::\d+)?$/, ""); }
+            catch { throw new RequestError(400, "文件路径无效"); }
+            if (/^[a-z][a-z0-9+.-]*:/i.test(path) || path.startsWith("//")) throw new RequestError(400, "仅支持本地文件");
+          }
+          const extension = extname(path).toLowerCase();
+          if (!previewExtensions.has(extension)) throw new RequestError(400, "不支持预览此文件类型");
+          if (!isAbsolute(path) && (!session.cwd || session.cwd === "?" || !isAbsolute(session.cwd)))
+            throw new RequestError(400, "会话工作目录不可用");
+          const file = isAbsolute(path) ? path : resolve(session.cwd, path);
+          try {
+            const info = await stat(file);
+            if (!info.isFile()) throw new RequestError(400, "路径不是文件");
+            if (info.size > 2 * 1024 * 1024) throw new RequestError(400, "文件超过 2 MB，无法预览");
+            const content = await readFile(file, "utf8");
+            if (content.includes("\0")) throw new RequestError(400, "无法预览二进制文件");
+            return json({ path: file, extension, content });
+          } catch (error) {
+            if (error instanceof RequestError) throw error;
+            throw new RequestError(404, "文件不存在或无法读取");
+          }
         }
         if (request.method === "POST" && url.pathname === "/star") {
           const value = await body(request), id = value.id;
@@ -115,6 +145,10 @@ export function startServer(options: ServerOptions): Bun.Server<undefined> {
           if (value.archive !== undefined) {
             if (typeof value.archive !== "boolean") throw new RequestError(400, "archive 必须是 boolean");
             patch.archive = value.archive;
+          }
+          if (value.pin !== undefined) {
+            if (typeof value.pin !== "boolean") throw new RequestError(400, "pin 必须是 boolean");
+            patch.pin = value.pin;
           }
           if (value.status !== undefined) {
             if (!isStatus(value.status)) throw new RequestError(400, "status 无效");

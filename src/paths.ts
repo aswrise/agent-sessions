@@ -14,7 +14,6 @@ export function userDataDirectory(home: string, env = process.env, platform: Nod
     : posix.join(home, ".local", "share", "session-snapshots");
 }
 
-// Codex 会把旧 rollout 压成 .jsonl.zst
 export function readText(path: string): string {
   const data = readFileSync(path);
   return (path.endsWith(".zst") ? Bun.zstdDecompressSync(data) : data).toString("utf8");

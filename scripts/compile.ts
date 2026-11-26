@@ -13,7 +13,7 @@ mkdirSync(dirname(outfile), { recursive: true });
 for (const command of [
   [process.execPath, "run", "build:ui"],
   [process.execPath, "scripts/embed.ts"],
-  [process.execPath, "build", "--compile", `--target=${target}`, "build/standalone.ts", `--outfile=${outfile}`],
+  [process.execPath, "build", "--compile", `--target=${target}`, "build/standalone.ts", "src/metadataWorker.ts", `--outfile=${outfile}`],
 ]) {
   const result = Bun.spawnSync(command, { stdout: "inherit", stderr: "inherit" });
   if (result.exitCode) process.exit(result.exitCode);

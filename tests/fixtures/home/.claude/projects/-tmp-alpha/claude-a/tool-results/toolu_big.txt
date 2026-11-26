@@ -1,0 +1,3 @@
+line zero
+fixture-offloaded-result
+line two

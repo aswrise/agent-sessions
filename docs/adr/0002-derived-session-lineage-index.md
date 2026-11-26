@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted
+Superseded: the Session Lineage feature has been removed.
 
 ## Context
 

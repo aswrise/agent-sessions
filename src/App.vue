@@ -1,31 +1,26 @@
 <script setup lang="ts">
 import MarkdownIt from "markdown-it";
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
-import LineageGraph from "./LineageGraph.vue";
-import LineagePreview from "./LineagePreview.vue";
-import { lineageComponents } from "./lineageLayout.ts";
 import { compareModels, shortModel } from "./models.ts";
+import { sourceCopy } from "./sourceCopy.ts";
 import {
   isTool,
   parseDashboardSettings,
   type DashboardSettings,
-  parseLineageRefresh,
-  parseLineageView,
   parseSearchEnvelope,
   parseSessionsEnvelope,
   parseTranscriptView,
   STATUSES,
   type SessionStatus,
+  type SourceDiagnostic,
   type SessionView,
-  type LineageView,
   type Tool,
   type TranscriptView,
 } from "./contracts.ts";
 
-type Tab = "" | Tool | "__star__" | "__chain__" | "__arch__";
+type Tab = "" | Tool | "__star__" | "__arch__";
 type SearchMode = "normal" | "deep";
-type ViewMode = "sessions" | "lineage";
-type SortKey = keyof Pick<SessionView, "starred" | "mtime" | "model" | "name" | "status" | "cwd">;
+type SortKey = keyof Pick<SessionView, "starred" | "mtime" | "model" | "name" | "size_kb" | "cwd">;
 type MenuItem = { value: string; label: string };
 type MenuState = {
   key: string;
@@ -39,12 +34,15 @@ type Editing = { id: string; field: "name" | "star_note" };
 type PreviewState =
   | { key: string; kind: "text"; text: string; anchor: HTMLElement; style: Record<string, string> }
   | { key: string; kind: "transcript"; detail?: TranscriptView; loading: boolean; anchor: HTMLElement; style: Record<string, string> };
-type ChainInfo = { chainKey: string; size: number; view: LineageView };
-type LineagePreviewState = { row: SessionView; info: ChainInfo; anchor: HTMLElement; pinned: boolean; style: Record<string, string> };
 
 const PAGE_SIZE = 100;
 const MODEL_CHIP_LIMIT = 20;
+const PREVIEW_DELAY_MS = 500;
+const PREVIEW_HIDE_DELAY_MS = 150;
 const markdown = new MarkdownIt({ breaks: true, html: false, linkify: true });
+markdown.linkify.set({ fuzzyLink: false });
+const baseValidateLink = markdown.validateLink.bind(markdown);
+markdown.validateLink = (url: string) => baseValidateLink(url) || /^file:\/\/(?:localhost)?\//i.test(url.trim());
 const statusMeta: Record<SessionStatus, { label: string; color: string }> = {
   "": { label: "无", color: "var(--ash)" },
   todo: { label: "todo", color: "var(--fog)" },
@@ -61,9 +59,21 @@ const generatedAt = ref("");
 const home = ref("");
 const loading = ref(true);
 const refreshing = ref(false);
+const diagnostics = ref<SourceDiagnostic[]>([]);
+const hasSourceErrors = computed(() => diagnostics.value.some((item) => item.level === "error"));
+const copyGroups = computed(() => {
+  const groups = new Map<string, SessionView[]>();
+  for (const row of rows.value) {
+    const key = JSON.stringify([row.tool, row.session_id ?? row.id]);
+    const group = groups.get(key) ?? [];
+    group.push(row);
+    groups.set(key, group);
+  }
+  return groups;
+});
+const copies = (row: SessionView) => copyGroups.value.get(JSON.stringify([row.tool, row.session_id ?? row.id])) ?? [];
 const error = ref("");
 const notice = ref("");
-const viewMode = ref<ViewMode>("sessions");
 const tab = ref<Tab>("");
 const keyword = ref("");
 const effectiveKeyword = ref("");
@@ -91,25 +101,62 @@ const pending = ref(new Set<string>());
 const copiedPathId = ref("");
 const detail = ref<TranscriptView>();
 const detailLoading = ref(false);
+type FilePreview = { path: string; extension: string; content: string };
+const filePreview = ref<FilePreview>();
+const filePreviewLoading = ref(false);
+const filePreviewError = ref("");
+const filePreviewOpen = ref(false);
+let filePreviewRequest = 0;
+
+async function previewLocalLink(event: MouseEvent, sessionId = detail.value?.id): Promise<void> {
+  const target = event.target;
+  if (!(target instanceof Element) || !sessionId || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+  const link = target.closest("a");
+  const href = link?.getAttribute("href") ?? "";
+  const isFileUrl = /^file:\/\/(?:localhost)?\//i.test(href);
+  if (!href || (!isFileUrl && /^(?:[a-z][a-z0-9+.-]*:|\/\/|#)/i.test(href))
+    || !/\.(?:md|markdown|txt|sql|html?|jsonl?|xml|ya?ml|toml|csv|log|sh|py|jsx?|tsx?|vue|css|java|properties)(?::\d+(?::\d+)?)?(?:#.*)?$/i.test(href)) return;
+  event.preventDefault();
+  if (preview.value) hidePreview();
+  const request = ++filePreviewRequest;
+  filePreviewOpen.value = true;
+  filePreview.value = undefined;
+  filePreviewError.value = "";
+  filePreviewLoading.value = true;
+  try {
+    const params = new URLSearchParams({ id: sessionId, href });
+    const response = await fetch(`/api/file-preview?${params}`);
+    const result: unknown = await response.json();
+    if (request !== filePreviewRequest) return;
+    if (!response.ok) {
+      filePreviewError.value = typeof result === "object" && result !== null && "error" in result && typeof result.error === "string" ? result.error : "加载失败";
+    } else if (typeof result === "object" && result !== null && "path" in result && typeof result.path === "string"
+      && "extension" in result && typeof result.extension === "string" && "content" in result && typeof result.content === "string") {
+      filePreview.value = { path: result.path, extension: result.extension, content: result.content };
+    } else filePreviewError.value = "文件预览响应无效";
+  } catch {
+    if (request === filePreviewRequest) filePreviewError.value = "加载失败";
+  } finally {
+    if (request === filePreviewRequest) filePreviewLoading.value = false;
+  }
+}
+
+function htmlPreview(content: string): string {
+  return `<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src data:">${content}`;
+}
+
+function closeFilePreview(): void {
+  filePreviewRequest++;
+  filePreviewOpen.value = false;
+}
+
 const detailError = ref("");
-const lineage = ref<LineageView>();
-const lineageLoading = ref(false);
-const manualLineageOpen = ref(false);
-const manualUpstreamId = ref("");
-const addingManualLineage = ref(false);
-const removingManualUpstreamId = ref("");
-const indexingLineage = ref(false);
-const globalLineage = ref<LineageView>();
-const globalLineageLoading = ref(false);
-const globalLineageFocus = ref("");
 const editing = ref<Editing>();
 const editValue = ref("");
 const menu = ref<MenuState>();
 const menuElement = ref<HTMLElement>();
 const preview = ref<PreviewState>();
 const previewElement = ref<HTMLElement>();
-const lineagePreview = ref<LineagePreviewState>();
-const lineagePreviewElement = ref<HTMLElement>();
 const previewCache = new Map<string, TranscriptView>();
 const previewRequests = new Map<string, Promise<TranscriptView>>();
 let transcriptRevision = 0;
@@ -119,10 +166,6 @@ let toastTimer: ReturnType<typeof setTimeout> | undefined;
 let copiedPathTimer: ReturnType<typeof setTimeout> | undefined;
 let previewShowTimer: ReturnType<typeof setTimeout> | undefined;
 let previewHideTimer: ReturnType<typeof setTimeout> | undefined;
-let lineagePreviewShowTimer: ReturnType<typeof setTimeout> | undefined;
-let lineagePreviewHideTimer: ReturnType<typeof setTimeout> | undefined;
-let globalLineageRequest: Promise<void> | undefined;
-let suppressLineageFocusOpen = false;
 
 function savedWidths(): number[] {
   try {
@@ -207,33 +250,13 @@ async function saveSettings(targetDate: string): Promise<void> {
 
 function refreshSettings(): void { void loadSettings(); }
 
-const chainInfo = computed(() => {
-  const result = new Map<string, ChainInfo>();
-  if (!globalLineage.value?.edges.length) return result;
-  for (const view of lineageComponents(globalLineage.value)) {
-    if (!view.edges.length) continue;
-    const chainKey = view.sessions.map(({ id }) => id).sort().join(":");
-    const info = { chainKey, size: view.sessions.length, view };
-    for (const session of view.sessions) result.set(session.id, info);
-  }
-  return result;
-});
-const manualUpstreams = computed(() => {
-  const view = lineage.value, downstreamId = detail.value?.id;
-  if (!view || !downstreamId) return [];
-  return view.edges.flatMap((edge) => {
-    if (edge.relation !== "manual" || edge.downstream_id !== downstreamId) return [];
-    const session = view.sessions.find(({ id }) => id === edge.upstream_id);
-    return [{ id: edge.upstream_id, label: session?.name || session?.first_msg || edge.upstream_id }];
-  });
-});
 const tabs = computed<{ value: Tab; label: string }[]>(() => [
   { value: "", label: "全部" },
   { value: "claude", label: "claude" },
   { value: "codex", label: "codex" },
   { value: "pi", label: "pi" },
+  { value: "agy", label: "agy" },
   { value: "__star__", label: "★ 标记" },
-  ...(chainInfo.value.size ? [{ value: "__chain__" as const, label: "⛓ 有链" }] : []),
   { value: "__arch__", label: "归档" },
 ]);
 
@@ -242,8 +265,8 @@ const tabCounts = computed<Record<Tab, number>>(() => ({
   claude: rows.value.filter((row) => !row.archived && row.tool === "claude").length,
   codex: rows.value.filter((row) => !row.archived && row.tool === "codex").length,
   pi: rows.value.filter((row) => !row.archived && row.tool === "pi").length,
+  agy: rows.value.filter((row) => !row.archived && row.tool === "agy").length,
   __star__: rows.value.filter((row) => !row.archived && row.starred).length,
-  __chain__: rows.value.filter((row) => !row.archived && chainInfo.value.has(row.id)).length,
   __arch__: rows.value.filter((row) => row.archived).length,
 }));
 
@@ -275,8 +298,12 @@ function toEpoch(value: string, end = false): number | undefined {
   return value ? new Date(`${value}T${end ? "23:59:59" : "00:00:00"}`).getTime() / 1000 : undefined;
 }
 
+function dependsOnResumeCutoff(row: SessionView | TranscriptView): boolean {
+  return row.tool === "claude" && (row.primary_action?.kind ?? "resume") === "resume";
+}
+
 function resumeBlockedReason(row: SessionView | TranscriptView): string {
-  if (row.tool !== "claude") return "";
+  if (!dependsOnResumeCutoff(row)) return "";
   if (settingsBusy.value === "saving" || !settings.value) return "恢复设置尚未确认，请稍后重试或复制源文件路径";
   if (settingsError.value || settingsDirty.value) return "恢复设置未保存或加载失败，请重试或复制源文件路径";
   const cutoff = toEpoch(settings.value.claudeResumeCutoff);
@@ -298,7 +325,6 @@ const filtered = computed(() => {
   const result = rows.value.filter((row) => {
     if (tab.value === "__arch__" ? !row.archived : row.archived) return false;
     if (tab.value === "__star__" && !row.starred) return false;
-    if (tab.value === "__chain__" && !chainInfo.value.has(row.id)) return false;
     if (isTool(tab.value) && row.tool !== tab.value) return false;
     if (model.value && row.model !== model.value) return false;
     if (path.value && row.cwd !== path.value) return false;
@@ -307,14 +333,14 @@ const filtered = computed(() => {
     if (fromCreate && row.birth < fromCreate || toCreate && row.birth > toCreate) return false;
     if (!Number.isNaN(min) && row.size_kb < min * 1024 || !Number.isNaN(max) && row.size_kb > max * 1024) return false;
     if (searchMode.value === "deep" && deepSearched.value) return deepIds.value.has(row.id);
-    return !query || `${row.name} ${row.star_note} ${row.first_msg}`.toLowerCase().includes(query);
+    return !query || `${row.id} ${row.session_id ?? ""} ${row.source_path} ${row.name} ${row.star_note} ${row.first_msg}`.toLowerCase().includes(query);
   });
-  if (!sortKey.value) return result.sort((left, right) => right.mtime - left.mtime);
-  return result.sort((left, right) => {
+  const sorted = !sortKey.value ? result.sort((left, right) => right.mtime - left.mtime) : result.sort((left, right) => {
     const a = left[sortKey.value as SortKey];
     const b = right[sortKey.value as SortKey];
     return (a < b ? -1 : a > b ? 1 : 0) * (sortAscending.value ? 1 : -1);
   });
+  return [...sorted.filter((row) => row.pinned), ...sorted.filter((row) => !row.pinned)];
 });
 const pages = computed(() => Math.ceil(filtered.value.length / PAGE_SIZE));
 const visible = computed(() => filtered.value.slice((page.value - 1) * PAGE_SIZE, page.value * PAGE_SIZE));
@@ -324,7 +350,7 @@ const footerText = computed(() => {
   const start = (page.value - 1) * PAGE_SIZE;
   const range = pages.value > 1 ? `显示第 ${start + 1}-${start + visible.value.length} 行，共 ${total} 个匹配` : `${total} 个匹配`;
   const deep = searchMode.value === "deep" && deepSearched.value && deepTotal.value > total ? `，深度检索共 ${deepTotal.value} 个` : "";
-  return `${range}${deep}。点击行复制恢复命令，悬停行显示操作，首条消息悬停预览对话`;
+  return `${range}${deep}。${sourceCopy.footer}`;
 });
 
 watch(keyword, (value) => {
@@ -370,62 +396,45 @@ function showToast(message: string, failed = false): void {
   toastTimer = setTimeout(() => { error.value = ""; notice.value = ""; }, 1200);
 }
 
+const isArchive = (row: SessionView) => row.source_kind === "archive";
+let archiveRows: SessionView[] | undefined;
+let archiveLoad: Promise<void> | undefined;
+
 async function load(fresh = false): Promise<void> {
   const keepRows = fresh && rows.value.length > 0;
   if (keepRows) refreshing.value = true;
   else loading.value = true;
   error.value = "";
   try {
-    const response = await fetch(`/api/sessions${fresh ? "?fresh=1" : ""}`);
+    const response = await fetch("/api/sessions?scope=live");
     if (!response.ok) throw new Error("加载失败");
     const envelope = parseSessionsEnvelope(await response.json());
     if (fresh) { transcriptRevision++; previewCache.clear(); }
-    rows.value = envelope.sessions;
+    rows.value = [...envelope.sessions.filter((row) => !isArchive(row)), ...archiveRows ?? []];
     generatedAt.value = envelope.generatedAt;
     home.value = envelope.home;
+    diagnostics.value = envelope.diagnostics ?? [];
   } catch (cause) {
     error.value = cause instanceof Error ? cause.message : "加载失败";
   } finally {
     if (keepRows) refreshing.value = false;
     else loading.value = false;
   }
+  archiveLoad ??= loadArchive();
 }
 
-async function indexLineage(): Promise<void> {
-  indexingLineage.value = true;
+// Archive snapshots rarely change, so they load once after the live list renders and survive refreshes.
+async function loadArchive(): Promise<void> {
   try {
-    const response = await fetch("/api/lineage/index", { method: "POST", body: "{}" });
+    const response = await fetch("/api/sessions?scope=archive");
     if (!response.ok) throw new Error();
-    const result = parseLineageRefresh(await response.json());
-    showToast(`已分析 ${result.sessions} 个 Session，发现 ${result.edges} 条关系`);
-    await loadGlobalLineage(viewMode.value !== "lineage", true);
+    const envelope = parseSessionsEnvelope(await response.json());
+    archiveRows = envelope.sessions.filter(isArchive);
+    rows.value = [...rows.value.filter((row) => !isArchive(row)), ...archiveRows];
+    diagnostics.value = envelope.diagnostics ?? [];
   } catch {
-    showToast("关系分析失败", true);
-  } finally {
-    indexingLineage.value = false;
+    archiveLoad = undefined;
   }
-}
-
-async function loadGlobalLineage(silent = false, force = false): Promise<void> {
-  if (!force && globalLineage.value) return;
-  if (globalLineageRequest) {
-    await globalLineageRequest;
-    if (!force) return;
-  }
-  globalLineageLoading.value = true;
-  globalLineageRequest = (async () => {
-    try {
-      const response = await fetch("/api/lineages");
-      if (!response.ok) throw new Error();
-      globalLineage.value = parseLineageView(await response.json());
-    } catch {
-      if (!silent) showToast("关系图加载失败", true);
-    } finally {
-      globalLineageLoading.value = false;
-      globalLineageRequest = undefined;
-    }
-  })();
-  return globalLineageRequest;
 }
 
 function resetDeepSearch(): void {
@@ -499,13 +508,19 @@ async function toggleStar(row: SessionView): Promise<void> {
   await persist(row, "/star", { star: starred }, () => { row.starred = starred; }, starred ? "已标记" : "已取消");
 }
 
+async function togglePin(row: SessionView): Promise<void> {
+  const pinned = !row.pinned;
+  await persist(row, "/star", { pin: pinned }, () => { row.pinned = pinned; }, pinned ? "已置顶" : "已取消置顶");
+}
+
 async function toggleArchive(row: SessionView): Promise<void> {
   const archived = !row.archived;
   await persist(row, "/star", { archive: archived }, () => { row.archived = archived; }, archived ? "已归档" : "已解除归档");
 }
 
 function startEdit(row: SessionView, field: Editing["field"]): void {
-  if (pending.value.has(row.id)) return;
+  if (pending.value.has(row.id) || field === "name" && row.source_kind === "archive") return;
+  hidePreview();
   editing.value = { id: row.id, field };
   editValue.value = row[field];
   nextTick(() => {
@@ -524,7 +539,9 @@ async function finishEdit(row: SessionView, field: Editing["field"], save: boole
   if (field === "name" && !value) { showToast("名称不能为空", true); return; }
   const route = field === "name" ? "/rename" : "/star";
   const body = field === "name" ? { name: value } : { note: value };
-  const success = field === "name" && row.tool === "codex" ? "已同步 Codex Session 名称" : "已保存";
+  const success = field === "name" && (row.tool === "codex" || row.tool === "agy")
+    ? `已同步 ${row.tool === "codex" ? "Codex" : "agy"} Session 名称`
+    : "已保存";
   await persist(row, route, body, () => { row[field] = value; }, success);
 }
 
@@ -549,19 +566,26 @@ function sort(key: SortKey): void {
 }
 
 async function copy(row: SessionView | TranscriptView): Promise<void> {
-  if (row.tool === "claude") {
-    if (settingsBusy.value || !settings.value || settingsError.value || settingsDirty.value) {
-      showToast(resumeBlockedReason(row) || "恢复设置尚未确认，请稍后重试或复制源文件路径");
-      return;
-    }
-    if (!await loadSettings()) return;
-    if (resumeCopyBlocked(row)) { showToast(resumeBlockedReason(row)); return; }
+  if (!dependsOnResumeCutoff(row)) return copyAction(row);
+  if (settingsBusy.value || !settings.value || settingsError.value || settingsDirty.value) {
+    showToast(resumeBlockedReason(row) || "恢复设置尚未确认，请稍后重试或复制源文件路径");
+    return;
   }
+  if (!await loadSettings()) return;
+  if (resumeCopyBlocked(row)) { showToast(resumeBlockedReason(row)); return; }
+  return copyAction(row);
+}
+
+async function copyAction(row: SessionView | TranscriptView): Promise<void> {
   try {
-    await navigator.clipboard.writeText(row.resume_command);
+    await navigator.clipboard.writeText(row.primary_action?.value ?? row.resume_command ?? "");
     clipboardError.value = "";
-    showToast("已复制恢复命令");
+    showToast(sourceCopy.actions[row.primary_action?.kind ?? "resume"].success);
   } catch { clipboardError.value = "复制失败，请允许剪贴板访问后重试"; }
+}
+
+function copyLabel(row: SessionView | TranscriptView): string {
+  return sourceCopy.actions[row.primary_action?.kind ?? "resume"].label;
 }
 
 async function copySourcePath(row: SessionView | TranscriptView): Promise<void> {
@@ -615,7 +639,6 @@ async function placeMenu(): Promise<void> {
 function openMenu(key: string, anchor: HTMLElement, items: MenuItem[], value: string, select: MenuState["select"]): void {
   if (menu.value?.key === key) { closeMenu(true); return; }
   closeMenu();
-  closeLineagePreview();
   menu.value = { key, anchor, items, value, select, style: {} };
   void placeMenu();
 }
@@ -684,115 +707,27 @@ async function fetchDetail(id: string): Promise<TranscriptView> {
 }
 
 async function openDetail(id: string, push = true): Promise<void> {
-  manualLineageOpen.value = false;
-  manualUpstreamId.value = "";
   detail.value = undefined;
-  lineage.value = undefined;
-  lineageLoading.value = false;
   detailError.value = "";
   detailLoading.value = true;
   hidePreview();
-  closeLineagePreview();
   closeMenu();
   if (push) history.pushState(null, "", `/?session=${encodeURIComponent(id)}`);
-  void loadLineage(id);
   try { detail.value = await fetchDetail(id); }
   catch { detailError.value = "加载失败"; }
   finally { detailLoading.value = false; }
 }
 
-async function loadLineage(id: string): Promise<void> {
-  lineageLoading.value = true;
-  lineage.value = undefined;
-  try {
-    const response = await fetch(`/api/lineage?id=${encodeURIComponent(id)}`);
-    if (!response.ok) throw new Error();
-    lineage.value = parseLineageView(await response.json());
-  } catch {
-    showToast("关系链分析失败", true);
-  } finally {
-    lineageLoading.value = false;
-  }
-}
-
-async function addManualLineage(): Promise<void> {
-  const downstreamId = detail.value?.id, upstreamId = manualUpstreamId.value.trim();
-  if (!downstreamId || !rows.value.some((row) => row.id === upstreamId && row.id !== downstreamId)) {
-    showToast("请选择有效的上游 Session", true);
-    return;
-  }
-  addingManualLineage.value = true;
-  try {
-    const response = await fetch("/api/lineage/manual", {
-      method: "POST", body: JSON.stringify({ upstream_id: upstreamId, downstream_id: downstreamId }),
-    });
-    if (!response.ok) throw new Error();
-    manualLineageOpen.value = false;
-    manualUpstreamId.value = "";
-    await Promise.all([loadLineage(downstreamId), loadGlobalLineage(true, true)]);
-    showToast("已添加手动上游");
-  } catch {
-    showToast("添加手动上游失败", true);
-  } finally {
-    addingManualLineage.value = false;
-  }
-}
-
-async function removeManualLineage(upstreamId: string): Promise<void> {
-  const downstreamId = detail.value?.id;
-  if (!downstreamId) return;
-  removingManualUpstreamId.value = upstreamId;
-  try {
-    const response = await fetch("/api/lineage/manual", {
-      method: "DELETE", body: JSON.stringify({ upstream_id: upstreamId, downstream_id: downstreamId }),
-    });
-    if (!response.ok) throw new Error();
-    await Promise.all([loadLineage(downstreamId), loadGlobalLineage(true, true)]);
-    showToast("已取消手动关联");
-  } catch {
-    showToast("取消手动关联失败", true);
-  } finally {
-    removingManualUpstreamId.value = "";
-  }
-}
-
 function showSessions(push = true): void {
-  closeLineagePreview();
-  viewMode.value = "sessions";
   detail.value = undefined;
   detailError.value = "";
   detailLoading.value = false;
   if (push) history.pushState(null, "", "/");
 }
 
-function showLineages(push = true, focusId = ""): void {
-  closeLineagePreview();
-  viewMode.value = "lineage";
-  globalLineageFocus.value = focusId;
-  detail.value = undefined;
-  detailError.value = "";
-  detailLoading.value = false;
-  if (push) history.pushState(null, "", "/?view=lineage");
-  void loadGlobalLineage();
-}
-
-async function locateLineage(id: string): Promise<void> {
-  showLineages(true, id);
-  await loadGlobalLineage();
-  await nextTick();
-  try { document.querySelector<HTMLElement>("#lineageOverview .dag-node.focus")?.closest<HTMLElement>(".dag-card")?.scrollIntoView({ block: "start" }); } catch {}
-}
-
-function showList(push = true): void {
-  lineage.value = undefined;
-  lineageLoading.value = false;
-  if (viewMode.value === "lineage") showLineages(push); else showSessions(push);
-}
-
 function syncHistory(): void {
   const params = new URLSearchParams(location.search), id = params.get("session");
   if (id) void openDetail(id, false);
-  else if (params.get("view") === "lineage") showLineages(false);
   else showSessions(false);
 }
 
@@ -801,10 +736,10 @@ async function placePreview(): Promise<void> {
   if (!preview.value || !previewElement.value) return;
   const box = preview.value.anchor.getBoundingClientRect();
   const width = Math.min(820, innerWidth - 24);
-  let top = box.bottom - 4;
+  let top = box.bottom + 6;
   let origin = "top left";
   if (top + previewElement.value.offsetHeight > innerHeight - 8) {
-    top = Math.max(8, box.top - previewElement.value.offsetHeight + 4);
+    top = Math.max(8, box.top - previewElement.value.offsetHeight - 6);
     origin = "bottom left";
   }
   preview.value.style = {
@@ -820,28 +755,33 @@ function revealPreview(value: PreviewState): void {
 }
 
 function showTextPreview(event: MouseEvent, key: string, text: string): void {
-  closeLineagePreview();
+  if (editing.value) return;
   const cell = event.currentTarget as HTMLElement;
   if (cell.scrollWidth <= cell.clientWidth + 1) { hidePreview(); return; }
   clearTimeout(previewHideTimer);
   clearTimeout(previewShowTimer);
+  if (preview.value?.key === key) return;
+  if (preview.value) preview.value = undefined;
   const value: PreviewState = { key, kind: "text", text, anchor: cell, style: {} };
-  if (preview.value) revealPreview(value);
-  else previewShowTimer = setTimeout(() => revealPreview(value), 180);
+  previewShowTimer = setTimeout(() => {
+    previewShowTimer = undefined;
+    if (!editing.value) revealPreview(value);
+  }, PREVIEW_DELAY_MS);
 }
 
 function showTranscriptPreview(row: SessionView, event: MouseEvent): void {
-  closeLineagePreview();
+  if (editing.value) return;
   const anchor = event.currentTarget as HTMLElement;
   const key = `transcript:${row.id}`;
   clearTimeout(previewHideTimer);
   clearTimeout(previewShowTimer);
+  if (preview.value?.key === key) return;
+  if (preview.value) preview.value = undefined;
   const state: PreviewState = { key, kind: "transcript", loading: true, anchor, style: {} };
-  if (preview.value) revealPreview(state);
   previewShowTimer = setTimeout(() => {
     previewShowTimer = undefined;
-    if (!preview.value) revealPreview(state);
-    if (preview.value?.key !== key) return;
+    if (editing.value) return;
+    revealPreview(state);
     void fetchDetail(row.id).then((value) => {
       if (preview.value?.key === key && preview.value.kind === "transcript") {
         preview.value = { ...preview.value, detail: value, loading: false };
@@ -851,14 +791,14 @@ function showTranscriptPreview(row: SessionView, event: MouseEvent): void {
       if (preview.value?.key === key && preview.value.kind === "transcript")
         preview.value = { ...preview.value, loading: false };
     });
-  }, 180);
+  }, PREVIEW_DELAY_MS);
 }
 
 function schedulePreviewHide(): void {
   clearTimeout(previewShowTimer);
   previewShowTimer = undefined;
   clearTimeout(previewHideTimer);
-  previewHideTimer = setTimeout(hidePreview, 100);
+  previewHideTimer = setTimeout(hidePreview, PREVIEW_HIDE_DELAY_MS);
 }
 
 function keepPreview(): void {
@@ -870,98 +810,6 @@ function hidePreview(): void {
   clearTimeout(previewHideTimer);
   previewShowTimer = undefined;
   preview.value = undefined;
-}
-
-async function placeLineagePreview(): Promise<void> {
-  await nextTick();
-  if (!lineagePreview.value || !lineagePreviewElement.value) return;
-  const box = lineagePreview.value.anchor.getBoundingClientRect();
-  const width = Math.min(700, innerWidth - 24);
-  let top = box.bottom + 6;
-  let origin = "top left";
-  if (top + lineagePreviewElement.value.offsetHeight > innerHeight - 8) {
-    top = Math.max(8, box.top - lineagePreviewElement.value.offsetHeight - 6);
-    origin = "bottom left";
-  }
-  lineagePreview.value.style = {
-    width: `${width}px`, left: `${Math.max(12, Math.min(box.left, innerWidth - width - 12))}px`,
-    top: `${top}px`, transformOrigin: origin,
-  };
-}
-
-function revealLineagePreview(row: SessionView, anchor: HTMLElement, pinned = false): void {
-  const info = chainInfo.value.get(row.id);
-  if (!info) return;
-  hidePreview();
-  closeMenu();
-  lineagePreview.value = { row, info, anchor, pinned, style: {} };
-  void placeLineagePreview();
-}
-
-function scheduleLineagePreview(row: SessionView, event: MouseEvent): void {
-  if (lineagePreview.value?.pinned) return;
-  hidePreview();
-  const anchor = event.currentTarget as HTMLElement;
-  clearTimeout(lineagePreviewHideTimer);
-  clearTimeout(lineagePreviewShowTimer);
-  if (lineagePreview.value) revealLineagePreview(row, anchor);
-  else lineagePreviewShowTimer = setTimeout(() => revealLineagePreview(row, anchor), 180);
-}
-
-function scheduleLineagePreviewHide(): void {
-  clearTimeout(lineagePreviewShowTimer);
-  clearTimeout(lineagePreviewHideTimer);
-  if (!lineagePreview.value?.pinned) lineagePreviewHideTimer = setTimeout(closeLineagePreview, 100);
-}
-
-function keepLineagePreview(): void {
-  clearTimeout(lineagePreviewHideTimer);
-}
-
-function closeLineagePreview(refocus = false): void {
-  clearTimeout(lineagePreviewShowTimer);
-  clearTimeout(lineagePreviewHideTimer);
-  lineagePreviewShowTimer = undefined;
-  const anchor = lineagePreview.value?.anchor;
-  lineagePreview.value = undefined;
-  if (refocus && anchor && document.activeElement !== anchor) {
-    suppressLineageFocusOpen = true;
-    void nextTick(() => anchor.focus());
-  }
-}
-
-function focusCurrentLineageNode(): void {
-  void nextTick(() => lineagePreviewElement.value?.querySelector<HTMLElement>(".lineage-mini-node.current")?.focus());
-}
-
-function focusLineagePreview(row: SessionView, event: FocusEvent): void {
-  if (suppressLineageFocusOpen) { suppressLineageFocusOpen = false; return; }
-  revealLineagePreview(row, event.currentTarget as HTMLElement);
-}
-
-function toggleLineagePreview(row: SessionView, event: MouseEvent): void {
-  const anchor = event.currentTarget as HTMLElement;
-  if (lineagePreview.value?.row.id === row.id && lineagePreview.value.pinned) { closeLineagePreview(); return; }
-  revealLineagePreview(row, anchor, true);
-  if (event.detail === 0) focusCurrentLineageNode();
-}
-
-function enterPinnedLineagePreview(event: KeyboardEvent): void {
-  if (!lineagePreview.value?.pinned) return;
-  event.preventDefault();
-  focusCurrentLineageNode();
-}
-
-function lineagePreviewKeydown(event: KeyboardEvent): void {
-  if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); closeLineagePreview(true); return; }
-  if (event.key !== "Tab" || !lineagePreview.value?.pinned || !lineagePreviewElement.value) return;
-  const controls = [...lineagePreviewElement.value.querySelectorAll<HTMLElement>("button:not(:disabled)")];
-  if (!controls.length) return;
-  const index = controls.indexOf(document.activeElement as HTMLElement);
-  if (index < 0 || (!event.shiftKey && index === controls.length - 1) || (event.shiftKey && index === 0)) {
-    event.preventDefault();
-    controls[event.shiftKey ? controls.length - 1 : 0]?.focus();
-  }
 }
 
 function resize(index: number, event: PointerEvent): void {
@@ -980,6 +828,9 @@ function resize(index: number, event: PointerEvent): void {
     window.removeEventListener("pointermove", move);
     window.removeEventListener("pointerup", up);
     handle.classList.remove("on");
+    const swallow = (click: Event) => click.stopPropagation();
+    window.addEventListener("click", swallow, { capture: true, once: true });
+    setTimeout(() => window.removeEventListener("click", swallow, true), 0);
     localStorage.setItem("colw7", JSON.stringify(widths.value.map((width) => width || null)));
   };
   window.addEventListener("pointermove", move);
@@ -1010,10 +861,7 @@ function toggleTheme(): void {
 
 function keydown(event: KeyboardEvent): void {
   const editingControl = ["INPUT", "TEXTAREA", "SELECT"].includes((event.target as HTMLElement).tagName);
-  if (event.key === "Escape" && lineagePreview.value) {
-    event.preventDefault();
-    closeLineagePreview(true);
-  } else if (event.key === "/" && !editingControl) {
+  if (event.key === "/" && !editingControl) {
     event.preventDefault();
     document.querySelector<HTMLInputElement>("#q")?.focus();
   } else if (event.key === "Escape" && document.activeElement?.id === "q") {
@@ -1022,18 +870,17 @@ function keydown(event: KeyboardEvent): void {
     resetDeepSearch();
     page.value = 1;
     (document.activeElement as HTMLElement).blur();
-  } else if (event.key === "Escape" && (detail.value || detailError.value)) showList();
+  } else if (event.key === "Escape" && filePreviewOpen.value) closeFilePreview();
+  else if (event.key === "Escape" && (detail.value || detailError.value)) showSessions();
 }
 
 function documentClick(event: MouseEvent): void {
   const target = event.target as Node;
   if (menu.value && !menuElement.value?.contains(target) && !menu.value.anchor.contains(target)) closeMenu();
-  if (lineagePreview.value && !lineagePreviewElement.value?.contains(target) && !lineagePreview.value.anchor.contains(target)) closeLineagePreview();
 }
 
 function closeFloatingOnScroll(event: Event): void {
   if (event.target !== previewElement.value) hidePreview();
-  if (!(event.target instanceof Node) || !lineagePreviewElement.value?.contains(event.target)) closeLineagePreview();
   if (event.target !== menuElement.value) closeMenu();
 }
 
@@ -1047,7 +894,6 @@ onMounted(async () => {
   const sessions = load(new URLSearchParams(location.search).get("fresh") === "1");
   void loadSettings();
   await sessions;
-  void loadGlobalLineage(true);
   syncHistory();
 });
 
@@ -1059,8 +905,6 @@ onBeforeUnmount(() => {
   clearTimeout(copiedPathTimer);
   clearTimeout(previewShowTimer);
   clearTimeout(previewHideTimer);
-  clearTimeout(lineagePreviewShowTimer);
-  clearTimeout(lineagePreviewHideTimer);
   window.removeEventListener("popstate", syncHistory);
   window.removeEventListener("keydown", keydown);
   window.removeEventListener("scroll", closeFloatingOnScroll, true);
@@ -1074,14 +918,10 @@ onBeforeUnmount(() => {
       <span class="mark" aria-hidden="true">◆</span>
       <div><h1>Agent Sessions</h1><p class="tagline">找到上下文，继续工作。</p></div>
     </div>
-    <nav v-if="!detail && !detailError && !detailLoading" class="view-switch" aria-label="主视图">
-      <button id="showSessions" type="button" :class="{ active: viewMode === 'sessions' }" :aria-pressed="viewMode === 'sessions'" @click="showSessions()">Sessions</button>
-      <button id="showLineages" type="button" :class="{ active: viewMode === 'lineage' }" :aria-pressed="viewMode === 'lineage'" @click="showLineages()">关系图</button>
-    </nav>
     <span class="meta"><strong>{{ rows.length }}</strong> 个会话 · 更新于 {{ formatGeneratedAt(generatedAt) }}</span>
   </header>
 
-  <div v-if="!detail && !detailError && !detailLoading && viewMode === 'sessions'" id="chrome" class="chrome">
+  <div v-if="!detail && !detailError && !detailLoading" id="chrome" class="chrome">
     <div class="bar">
       <div class="search-modes" role="group" aria-label="检索范围">
         <button id="searchModeNormal" type="button" class="f" :class="{ on: searchMode === 'normal' }" :aria-pressed="searchMode === 'normal'" @click="setSearchMode('normal')">普通</button>
@@ -1089,7 +929,7 @@ onBeforeUnmount(() => {
       </div>
       <label class="searchbox">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="11" cy="11" r="7" /><path d="m16.5 16.5 4 4" /></svg>
-        <input id="q" v-model="keyword" type="search" :placeholder="searchMode === 'deep' ? '搜索完整 Transcript，按 Enter…' : '搜索名称、备注或首条消息…'" aria-label="搜索会话" @keydown.enter.prevent="runDeepSearch" />
+        <input id="q" v-model="keyword" type="search" :placeholder="searchMode === 'deep' ? '搜索完整 Transcript，按 Enter…' : '搜索名称、备注、首条消息或 Session ID…'" aria-label="搜索会话" @keydown.enter.prevent="runDeepSearch" />
         <kbd aria-hidden="true">/</kbd>
       </label>
       <button v-if="searchMode === 'deep'" id="deepSearch" type="button" class="f act" :disabled="deepSearching || !keyword.trim()" @click="runDeepSearch">{{ deepSearching ? "检索中…" : "检索" }}</button>
@@ -1143,20 +983,8 @@ onBeforeUnmount(() => {
   </div>
 
   <main>
-    <section v-if="!detail && !detailError && !detailLoading && viewMode === 'lineage'" id="lineageOverview" aria-label="全部关系链">
-      <div class="lineage-toolbar">
-        <div><h2>Session 关系图</h2><p>按文件传递方向从左到右排列；悬停节点可聚焦直接上下游。</p></div>
-        <button id="lineageIndex" type="button" class="f act" :disabled="indexingLineage" @click="indexLineage">{{ indexingLineage ? "分析中…" : "重新分析" }}</button>
-      </div>
-      <div v-if="globalLineageLoading && !globalLineage" class="empty">正在读取关系缓存...</div>
-      <div v-else-if="!globalLineage?.edges.length" class="lineage-zero">
-        <strong>缓存中还没有关系链</strong><span>先分析一次，之后打开关系图和 Session 详情都会直接读取持久缓存。</span>
-        <button type="button" class="f act" :disabled="indexingLineage" @click="indexLineage">开始分析</button>
-      </div>
-      <LineageGraph v-else :view="globalLineage" :focus-id="globalLineageFocus" @select="openDetail" />
-    </section>
-
-    <section v-else-if="!detail && !detailError && !detailLoading" id="list" aria-label="Session 列表">
+    <details v-if="diagnostics.length" class="source-diagnostics" :open="hasSourceErrors"><summary>{{ hasSourceErrors ? sourceCopy.scanProblem : sourceCopy.scanInfo }}</summary><p v-for="item in diagnostics" :key="`${item.source_id}/${item.root_id}`">[{{ item.source_id }}{{ item.root_id ? `/${item.root_id}` : '' }}] {{ item.message }}</p></details>
+    <section v-if="!detail && !detailError && !detailLoading" id="list" aria-label="Session 列表">
       <table :class="{ compact }">
         <colgroup>
           <col v-for="(className, index) in ['c-star','c-date','c-model','','c-stat','c-path','c-ops']" :key="index" :class="className" :style="widths[index] ? { width: `${widths[index]}px` } : undefined" />
@@ -1164,7 +992,7 @@ onBeforeUnmount(() => {
         <thead><tr>
           <th v-for="(column, index) in [
             { key: 'starred', label: '★', className: 'action-head' }, { key: 'mtime', label: '更新' }, { key: 'model', label: '模型' },
-            { key: 'name', label: '会话' }, { key: 'status', label: '状态' }, { key: 'cwd', label: '路径' },
+            { key: 'name', label: '会话' }, { key: 'size_kb', label: '大小' }, { key: 'cwd', label: '路径' },
           ]" :key="column.key" :class="['className' in column ? column.className : '', sortKey === column.key ? (sortAscending ? 's-asc' : 's-desc') : '']" @click="sort(column.key as SortKey)">
             {{ column.label }}<span class="rs" @pointerdown="resize(index, $event)" />
           </th>
@@ -1173,7 +1001,7 @@ onBeforeUnmount(() => {
         <tbody>
           <tr v-if="loading"><td colspan="7"><div class="empty">加载中...</div></td></tr>
           <tr v-else-if="!filtered.length"><td colspan="7"><div class="empty">没有匹配的 session，试试更短的关键词或切换筛选</div></td></tr>
-          <tr v-for="row in visible" v-else :key="row.id" class="row" :class="{ starred: row.starred, archived: row.archived, pending: pending.has(row.id) }" tabindex="0" @click="copy(row)" @keydown.enter.self="copy(row)">
+          <tr v-for="row in visible" v-else :key="row.id" class="row" :class="{ starred: row.starred, pinned: row.pinned, archived: row.archived, pending: pending.has(row.id) }" :title="copyLabel(row)" tabindex="0" @click="copy(row)" @keydown.enter.self="copy(row)">
             <td class="starcell"><button type="button" class="rowbtn starbtn" :disabled="pending.has(row.id)" :aria-label="row.starred ? '取消标记' : '标记重要'" :title="row.starred ? '取消标记' : '标记重要'" @click.stop="toggleStar(row)">{{ row.starred ? "★" : "☆" }}</button></td>
             <td class="dt" @mouseenter="showTextPreview($event, `${row.id}:mtime`, `更新 ${formatDate(row.mtime)}　创建 ${formatDate(row.birth)}　${formatSize(row.size_kb)}`)" @mouseleave="schedulePreviewHide">{{ formatDate(row.mtime) }}</td>
             <td class="modelcell" @mouseenter="showTextPreview($event, `${row.id}:model`, row.model || '无模型')" @mouseleave="schedulePreviewHide">
@@ -1181,31 +1009,29 @@ onBeforeUnmount(() => {
             </td>
             <td class="sessioncell">
               <div class="line1">
-                <span class="nm" title="点击修改会话名" @click.stop="startEdit(row, 'name')">
+                <span v-if="row.source_kind === 'archive'" class="source-label" :title="`${row.source_id}/${row.root_id} · ${row.session_id}`">{{ row.source_label }}{{ row.source_scope ? ` · ${row.source_scope}` : '' }}</span>
+                <span v-if="copies(row).length > 1" class="source-label">{{ sourceCopy.copies(copies(row).length) }}</span>
+                <span class="nm" :aria-disabled="row.source_kind === 'archive'" :title="row.source_kind === 'archive' ? sourceCopy.readonlyName : undefined" @mousedown="hidePreview" @click.stop="startEdit(row, 'name')">
                   <input v-if="editing?.id === row.id && editing.field === 'name'" v-model="editValue" class="cell-input" :data-edit="`${row.id}:name`" aria-label="名称" @click.stop @keydown="editKeydown(row, 'name', $event)" @blur="finishEdit(row, 'name', true)" />
-                  <span v-else class="name-text" @mouseenter="previewSession(row, $event)" @mouseleave="schedulePreviewHide">{{ row.name || "未命名会话" }}</span>
+                  <span v-else class="name-text" @mouseenter="previewSession(row, $event)" @mouseleave="schedulePreviewHide">{{ row.name || (compact ? row.first_msg || row.session_id || row.id : '未命名会话') }}</span>
                 </span>
                 <span v-if="resumeCopyBlocked(row)" class="resume-blocked" :title="resumeBlockedReason(row)">恢复已禁用</span>
-                <span class="note-slot" :title="row.star_note || '添加备注'" @click.stop="startEdit(row, 'star_note')">
+                <span class="note-slot" :title="row.star_note || '添加备注'" @mousedown="hidePreview" @click.stop="startEdit(row, 'star_note')">
                   <input v-if="editing?.id === row.id && editing.field === 'star_note'" v-model="editValue" class="cell-input" :data-edit="`${row.id}:star_note`" aria-label="备注" @click.stop @keydown="editKeydown(row, 'star_note', $event)" @blur="finishEdit(row, 'star_note', true)" />
                   <template v-else>{{ row.star_note }}</template>
                 </span>
               </div>
               <div v-if="!compact" class="line2 msg" @mouseenter="showTranscriptPreview(row, $event)" @mouseleave="schedulePreviewHide">{{ messageText(row) }}</div>
             </td>
-            <td><button type="button" class="status statusbtn" aria-haspopup="listbox" :aria-expanded="menu?.key === `status:${row.id}`" :style="{ '--sc': statusMeta[row.status].color }" @click.stop="openRowStatus(row, $event)"><span :class="{ none: !row.status }">{{ statusMeta[row.status].label }}</span></button></td>
+            <td class="sz">{{ formatSize(row.size_kb) }}</td>
             <td class="p" @mouseenter="showTextPreview($event, `${row.id}:path`, shortPath(row.cwd))" @mouseleave="schedulePreviewHide">{{ shortPath(row.cwd) }}</td>
             <td class="opscell">
               <div class="ops">
-                <button v-if="chainInfo.get(row.id)" type="button" class="iconbtn chainbtn" :aria-label="`所在关系链，共 ${chainInfo.get(row.id)!.size} 个 Session，查看整条链`"
-                  :title="`所在关系链，共 ${chainInfo.get(row.id)!.size} 个 Session，查看整条链`" aria-haspopup="dialog" aria-controls="lineage-preview"
-                  :aria-expanded="lineagePreview?.row.id === row.id" @mouseenter="scheduleLineagePreview(row, $event)" @mouseleave="scheduleLineagePreviewHide"
-                  @focus="focusLineagePreview(row, $event)" @blur="scheduleLineagePreviewHide" @click.stop="toggleLineagePreview(row, $event)" @keydown.stop @keydown.tab="enterPinnedLineagePreview" @keydown.esc.prevent="closeLineagePreview(true)">
-                  <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><path d="M6.4 5.1 5.2 3.9a2.4 2.4 0 0 0-3.4 3.4l1.7 1.7a2.4 2.4 0 0 0 3.4 0l1.2-1.2M9.6 10.9l1.2 1.2a2.4 2.4 0 0 0 3.4-3.4L12.5 7a2.4 2.4 0 0 0-3.4 0L7.9 8.2" /></svg>
-                  <span class="n">{{ chainInfo.get(row.id)!.size }}</span>
-                </button>
                 <button type="button" class="iconbtn hoveronly" title="打开详情页" aria-label="打开详情页" @click.stop="openDetail(row.id)">
                   <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M1.5 8S3.9 3.6 8 3.6 14.5 8 14.5 8 12.1 12.4 8 12.4 1.5 8 1.5 8Z" /><circle cx="8" cy="8" r="2" /></svg>
+                </button>
+                <button type="button" class="iconbtn pinbtn" :class="{ hoveronly: !row.pinned }" :disabled="pending.has(row.id)" :title="row.pinned ? '取消置顶' : '置顶'" :aria-label="row.pinned ? '取消置顶' : '置顶'" @click.stop="togglePin(row)">
+                  <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round" aria-hidden="true"><path d="M5.4 2.2h5.2M6.4 2.2v3.6L4.2 8.6h7.6L9.6 5.8V2.2M8 8.6v5.2" /></svg>
                 </button>
                 <button type="button" class="iconbtn hoveronly" :disabled="pending.has(row.id)" :title="row.archived ? '解除归档' : '归档（在“已归档”视图可找回）'" :aria-label="row.archived ? '解除归档' : '归档'" @click.stop="toggleArchive(row)">
                   <svg v-if="row.archived" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M8 13.2V4.4M4.6 7.4 8 4 11.4 7.4M2.6 13.4h10.8" /></svg>
@@ -1230,37 +1056,20 @@ onBeforeUnmount(() => {
 
     <section v-else id="detail" aria-label="Transcript 详情">
       <div v-if="detailLoading" class="empty">加载中...</div>
-      <div v-else-if="detailError" class="empty">{{ detailError }} <button type="button" class="f act" @click="showList()">返回</button></div>
+      <div v-else-if="detailError" class="empty">{{ detailError }} <button type="button" class="f act" @click="showSessions()">返回</button></div>
       <template v-else-if="detail">
         <div class="detail-top">
-          <button type="button" class="f act" @click="showList()">返回</button>
-          <button type="button" class="f act" :disabled="resumeCopyBlocked(detail) || (detail.tool === 'claude' && !!settingsBusy)" @click="copy(detail)">复制恢复命令</button>
-          <button type="button" class="f act" @click="copySourcePath(detail)">{{ copiedPathId === detail.id ? "已复制源文件路径" : "复制源文件路径" }}</button>
+          <button type="button" class="f act" @click="showSessions()">返回</button>
+          <button type="button" class="f act" :disabled="resumeCopyBlocked(detail) || (dependsOnResumeCutoff(detail) && !!settingsBusy)" @click="copy(detail)">{{ copyLabel(detail) }}</button>
+          <button type="button" class="f act" @click="copySourcePath(detail)">{{ copiedPathId === detail.id ? "已复制源文件路径" : sourceCopy.copySourcePath }}</button>
           <span v-if="resumeCopyBlocked(detail)" class="resume-blocked">{{ resumeBlockedReason(detail) }}</span>
-          <button id="addManualLineage" type="button" class="f act" :aria-expanded="manualLineageOpen" @click="manualLineageOpen = !manualLineageOpen">补充上游</button>
           <div class="detail-title">{{ detail.name || detail.first_msg || detail.id }}</div>
-          <div class="detail-meta mono">{{ detail.tool }} · {{ detail.model || "无模型" }} · {{ shortPath(detail.cwd) }} · {{ formatSize(detail.size_kb) }}</div>
-          <form v-if="manualLineageOpen" id="manualLineageForm" class="manual-lineage-form" @submit.prevent="addManualLineage">
-            <label for="manualUpstream">上游 Session</label>
-            <input id="manualUpstream" v-model="manualUpstreamId" list="manualUpstreamOptions" type="text" placeholder="输入名称或 ID 后选择" autocomplete="off" />
-            <datalist id="manualUpstreamOptions">
-              <option v-for="row in rows.filter((row) => row.id !== detail!.id)" :key="row.id" :value="row.id" :label="row.name || row.first_msg || row.id" />
-            </datalist>
-            <button type="submit" class="f act" :disabled="addingManualLineage || !manualUpstreamId.trim()">{{ addingManualLineage ? "添加中…" : "添加" }}</button>
-            <button type="button" class="f" :disabled="addingManualLineage" @click="manualLineageOpen = false; manualUpstreamId = ''">取消</button>
-          </form>
-          <div v-if="manualUpstreams.length" class="manual-lineages">
-            <span v-for="upstream in manualUpstreams" :key="upstream.id" class="manual-lineage">
-              <span :title="upstream.id">手动上游：{{ upstream.label }}</span>
-              <button type="button" class="f remove-manual-lineage" :disabled="!!removingManualUpstreamId" @click="removeManualLineage(upstream.id)">{{ removingManualUpstreamId === upstream.id ? "取消中…" : "取消关联" }}</button>
-            </span>
-          </div>
+          <div class="detail-meta mono">{{ detail.tool }} · {{ detail.model || "无模型" }} · {{ shortPath(detail.cwd) }} · {{ formatSize(detail.size_kb) }}<template v-if="detail.source_kind === 'archive'"> · {{ detail.source_label }} · {{ detail.session_id }}</template></div>
+          <p v-if="detail.primary_action?.kind === 'fork'">{{ sourceCopy.forkHelp }}</p>
+          <p v-else-if="detail.primary_action?.kind === 'path'">{{ sourceCopy.pathHelp }}</p>
+          <div v-if="copies(detail).length > 1">{{ sourceCopy.otherCopies }}：<button v-for="copy in copies(detail).filter((row) => row.id !== detail!.id)" :key="copy.id" type="button" class="f act" @click="openDetail(copy.id)">{{ copy.source_label ?? sourceCopy.live }} · {{ copy.root_id ?? copy.tool }}</button></div>
         </div>
-        <div v-if="lineageLoading" class="lineage-loading">正在读取关系缓存...</div>
-        <section v-else-if="lineage" class="detail-lineage" aria-label="Session 关系链">
-          <LineageGraph :view="lineage" :focus-id="detail.id" @select="openDetail" />
-        </section>
-        <div class="msglist">
+        <div class="msglist" @click="previewLocalLink($event)">
           <div v-if="!detail.messages.length" class="empty">没有可展示的 user / assistant 文本消息</div>
           <article v-for="(message, index) in detail.messages" :key="index" class="bubble" :class="message.role">
             <div class="role">{{ message.role }}</div><div class="body markdown" v-html="markdown.render(message.text)" />
@@ -1270,6 +1079,19 @@ onBeforeUnmount(() => {
     </section>
   </main>
 
+  <div v-if="filePreviewOpen" class="file-preview-backdrop" @click.self="closeFilePreview">
+    <section class="file-preview" role="dialog" aria-modal="true" aria-label="本地文件预览">
+      <header class="file-preview-header"><strong>{{ filePreview?.path || "本地文件预览" }}</strong><button type="button" class="f act" @click="closeFilePreview">关闭</button></header>
+      <div v-if="filePreviewLoading" class="file-preview-content">加载中...</div>
+      <div v-else-if="filePreviewError" class="file-preview-content" role="alert">{{ filePreviewError }}</div>
+      <template v-else-if="filePreview">
+        <iframe v-if="['.html', '.htm'].includes(filePreview.extension)" class="file-preview-frame" title="HTML 文件预览" sandbox="" :srcdoc="htmlPreview(filePreview.content)" />
+        <div v-else-if="['.md', '.markdown'].includes(filePreview.extension)" class="file-preview-content markdown" v-html="markdown.render(filePreview.content)" />
+        <pre v-else class="file-preview-content file-preview-text">{{ filePreview.content }}</pre>
+      </template>
+    </section>
+  </div>
+
   <div v-if="menu" ref="menuElement" class="menu show" role="listbox" tabindex="-1" :style="menu.style" @click.stop @keydown="menuKeydown">
     <button v-for="item in menu.items" :key="item.value" type="button" class="menu-option" role="option" :aria-selected="item.value === menu.value" @click="chooseMenu(item)"><span>{{ item.label }}</span><span class="check">✓</span></button>
   </div>
@@ -1277,7 +1099,7 @@ onBeforeUnmount(() => {
   <div v-if="clipboardError" role="alert">{{ clipboardError }}</div>
   <div v-if="error || notice" id="toast" class="show" :role="error ? 'alert' : 'status'">{{ error || notice }}</div>
 
-  <aside v-if="preview" id="tip" ref="previewElement" class="show" :style="preview.style" @mouseenter="keepPreview" @mouseleave="schedulePreviewHide">
+  <aside v-if="preview" id="tip" ref="previewElement" class="show" :style="preview.style" @mouseenter="keepPreview" @mouseleave="schedulePreviewHide" @click="preview.kind === 'transcript' && previewLocalLink($event, preview.detail?.id)">
     <template v-if="preview.kind === 'text'">{{ preview.text }}</template>
     <template v-else-if="preview.detail">
       <div class="tiptitle">{{ preview.detail.name || preview.detail.first_msg || preview.detail.id }}</div>
@@ -1289,10 +1111,6 @@ onBeforeUnmount(() => {
     <template v-else>{{ preview.loading ? "加载对话预览..." : "加载失败" }}</template>
   </aside>
 
-  <aside v-if="lineagePreview" id="lineage-preview" ref="lineagePreviewElement" class="show" :style="lineagePreview.style" role="dialog" aria-label="Session 关系链预览"
-    @click.stop @mouseenter="keepLineagePreview" @mouseleave="scheduleLineagePreviewHide" @keydown="lineagePreviewKeydown">
-    <LineagePreview :view="lineagePreview.info.view" :current-id="lineagePreview.row.id" :pinned="lineagePreview.pinned" @select="openDetail" @locate="locateLineage(lineagePreview.row.id)" />
-  </aside>
 </template>
 
 <style>
@@ -1325,8 +1143,6 @@ header{display:flex;align-items:center;justify-content:space-between;gap:24px;fl
   font-size:15px;box-shadow:inset 0 1px 0 rgba(255,255,255,.08)}
 h1{font-size:19px;line-height:1.2;font-weight:650;letter-spacing:-.025em;margin:0;color:var(--paper)}
 .tagline{margin:3px 0 0;color:var(--ash);font-size:12px;letter-spacing:.005em}
-.view-switch{display:flex;align-items:center;gap:3px;padding:3px;border:1px solid var(--obsidian);border-radius:10px;background:var(--carbon)}
-.view-switch button{padding:6px 12px;border:0;border-radius:7px;background:transparent;color:var(--ash);font-size:12px;cursor:pointer;transition:transform 140ms var(--ease-out),background-color 140ms ease,color 140ms ease}.view-switch button.active{background:var(--chip);color:var(--paper);box-shadow:0 1px 3px rgba(0,0,0,.18)}.view-switch button:active{transform:scale(.97)}.view-switch button:focus-visible{outline:2px solid var(--lime);outline-offset:2px}
 .meta{color:var(--ash);font-size:12px;padding:7px 10px;border:1px solid var(--obsidian);
   border-radius:8px;background:var(--carbon)}
 .meta strong{color:var(--paper);font-weight:600;font-variant-numeric:tabular-nums}
@@ -1360,12 +1176,16 @@ input[type=search]:focus{border-color:color-mix(in srgb,var(--lime) 65%,var(--gr
 .filter-count{display:inline-grid;place-items:center;min-width:17px;height:17px;margin-left:5px;padding:0 5px;
   border-radius:999px;background:var(--lime);color:var(--void);font-size:10px;font-weight:700}
 main{max-width:1760px;margin:0 auto;padding:0 32px 56px}
+.source-diagnostics{margin:12px 0;color:var(--ash);font-size:12px;overflow-wrap:anywhere}
+.source-diagnostics summary{cursor:pointer}
+.source-label{max-width:140px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:11px;color:var(--ash)}
+.nm[aria-disabled="true"]{cursor:default}
+.nm[aria-disabled="true"]:empty::after{content:""}
 #list{overflow-x:auto;border:1px solid var(--obsidian);border-radius:14px;background:var(--carbon);
   box-shadow:0 16px 40px rgba(0,0,0,.08)}
-#lineageOverview{display:grid;gap:14px}.lineage-toolbar{display:flex;align-items:center;justify-content:space-between;gap:20px;padding:16px 18px;border:1px solid var(--obsidian);border-radius:14px;background:var(--carbon)}.lineage-toolbar h2{margin:0;color:var(--paper);font-size:15px;font-weight:650}.lineage-toolbar p{margin:3px 0 0;color:var(--ash);font-size:11px}.lineage-zero{display:grid;justify-items:center;gap:8px;padding:72px 20px;border:1px dashed var(--graphite);border-radius:14px;color:var(--ash);text-align:center}.lineage-zero strong{color:var(--mist);font-size:14px}.lineage-zero span{max-width:520px;font-size:12px}.detail-lineage{margin-top:12px}.lineage-loading{margin-top:12px;padding:28px;border:1px solid var(--obsidian);border-radius:12px;background:var(--carbon);color:var(--ash);text-align:center}
 table{width:100%;min-width:1040px;border-collapse:collapse;table-layout:fixed}
 col.c-star{width:36px}col.c-date{width:92px}col.c-model{width:158px}
-col.c-stat{width:116px}col.c-path{width:190px}col.c-ops{width:128px}
+col.c-stat{width:72px}col.c-path{width:190px}col.c-ops{width:176px}
 .select-button{display:inline-flex;align-items:center;justify-content:space-between;gap:8px;max-width:240px;height:34px;
   padding:0 10px;border:1px solid var(--input-line);border-radius:9px;background:var(--input-bg);
   color:var(--fog);font:inherit;font-size:12px;cursor:pointer;white-space:nowrap}
@@ -1424,16 +1244,14 @@ table.compact td{height:40px}
   color:var(--ash);font-size:11px;cursor:text}
 .note-slot:empty::after{content:"+ 备注";color:var(--smoke);transition:opacity 120ms ease}
 td.opscell{padding-right:6px}
-.ops{display:flex;align-items:center;justify-content:flex-end;gap:1px}
+.ops{display:flex;align-items:center;justify-content:flex-end;gap:3px}
 .iconbtn{display:inline-grid;grid-auto-flow:column;place-items:center;gap:3px;min-width:28px;height:28px;padding:0 6px;
   border:0;border-radius:7px;background:transparent;color:var(--ash);font:inherit;cursor:pointer;
   transition:transform 120ms var(--ease-out),background-color 120ms ease,color 120ms ease,opacity 130ms ease}
 .iconbtn svg{width:14px;height:14px}
-.iconbtn .n{font:600 10px/1 ui-monospace,monospace;font-variant-numeric:tabular-nums}
 .iconbtn:active{transform:scale(.94)}
 .iconbtn:disabled{cursor:wait}
 .iconbtn:focus-visible{outline:2px solid var(--lime);outline-offset:-1px}
-.chainbtn{color:var(--lime)}
 .iconbtn.copied{color:#6fd49b;opacity:1}
 .hoveronly{transition:opacity 130ms ease}
 .tool-pill{display:inline-flex;align-items:center;padding:2px 6px;border-radius:5px;
@@ -1441,6 +1259,7 @@ td.opscell{padding-right:6px}
 .tool-pill.codex{color:#aab5ff;background:rgba(139,156,255,.1)}
 .tool-pill.claude{color:#e9a884;background:rgba(222,137,91,.1)}
 .tool-pill.pi{color:#76d5b0;background:rgba(77,190,147,.1)}
+.tool-pill.agy{color:#7dd3fc;background:rgba(56,189,248,.11)}
 td.starcell{padding-left:3px;padding-right:3px;text-align:center}
 .rowbtn{display:inline-grid;place-items:center;min-width:28px;height:28px;padding:0 7px;border:0;border-radius:7px;
   background:transparent;color:var(--ash);font:inherit;font-size:11px;cursor:pointer;
@@ -1457,19 +1276,20 @@ tr.starred .starbtn{color:var(--lime)}
   border-radius:6px;background:var(--input-bg);color:var(--paper);font:inherit;outline:none;
   box-shadow:0 0 0 3px color-mix(in srgb,var(--lime) 12%,transparent)}
 tr.archived td{opacity:.6}
+tr.row.pinned td:first-child{box-shadow:inset 2px 0 0 color-mix(in srgb,var(--lime) 70%,transparent)}
+tr.pinned .pinbtn{color:var(--lime)}
 .detail-top{display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:18px;
   border:1px solid var(--obsidian);border-radius:14px;background:var(--carbon)}
 .detail-title{font-size:16px;font-weight:620;color:var(--paper);min-width:0;flex:1}
 .detail-meta{color:var(--ash);font-size:12px;width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.manual-lineage-form{display:flex;align-items:center;gap:8px;width:100%}.manual-lineage-form label{color:var(--ash);font-size:11px;white-space:nowrap}.manual-lineage-form input{min-width:220px;flex:1;height:34px;padding:0 10px;border:1px solid var(--input-line);border-radius:8px;background:var(--input-bg);color:var(--paper);font:11px ui-monospace,monospace;outline:none}.manual-lineage-form input:focus{border-color:var(--lime)}
-.manual-lineages{display:flex;gap:8px;flex-wrap:wrap;width:100%}.manual-lineage{display:inline-flex;align-items:center;gap:8px;padding:4px 5px 4px 9px;border:1px dashed color-mix(in srgb,var(--lime) 28%,var(--obsidian));border-radius:9px;color:var(--mist);font-size:11px}
-.msglist{display:grid;gap:14px;padding:20px 0 48px;max-width:1040px;margin:0 auto}
+.msglist{display:grid;grid-template-columns:minmax(0,1fr);gap:14px;padding:20px 0 48px;max-width:1040px;margin:0 auto}
 .bubble{max-width:88%;border:1px solid var(--obsidian);border-radius:14px 14px 14px 4px;
   padding:13px 15px;background:var(--carbon);box-shadow:0 5px 18px rgba(0,0,0,.06)}
 .bubble.user{margin-left:auto;border-radius:14px 14px 4px 14px;
   background:color-mix(in srgb,var(--lime) 10%,var(--carbon));border-color:color-mix(in srgb,var(--lime) 20%,var(--obsidian))}
 .role{font-size:10px;font-weight:650;text-transform:uppercase;letter-spacing:.07em;color:var(--ash);margin-bottom:7px}
 .body{word-break:break-word;color:var(--mist);line-height:1.65}
+.sz{font:11px ui-monospace,"Cascadia Code",Consolas,monospace;opacity:.6}
 .status{display:inline-grid;max-width:100%;padding:0;border:0;background:none;font:inherit;vertical-align:middle;cursor:pointer}
 .status span{display:inline-flex;align-items:center;gap:6px;min-width:0;height:22px;
   padding:0 7px;border:1px solid color-mix(in srgb,var(--sc) 28%,transparent);
@@ -1507,8 +1327,6 @@ tr.archived td{opacity:.6}
   white-space:pre-wrap;word-break:break-all;box-shadow:0 18px 55px rgba(0,0,0,.36);
   transition:opacity 110ms var(--ease-out),transform 110ms var(--ease-out)}
 #tip.show{visibility:visible;opacity:1;transform:scale(1);pointer-events:auto}
-#lineage-preview{position:fixed;z-index:10;display:flex;flex-direction:column;max-width:min(700px,calc(100vw - 24px));max-height:min(78vh,720px);overflow:hidden;border:1px solid var(--graphite);border-radius:12px;background:var(--material);backdrop-filter:blur(24px) saturate(150%);box-shadow:0 20px 64px rgba(0,0,0,.4),inset 0 1px rgba(255,255,255,.055);opacity:1;transform:scale(1);transition:opacity 140ms var(--ease-out),transform 140ms var(--ease-out)}
-@starting-style{#lineage-preview{opacity:0;transform:scale(.97)}}
 .tiptitle{font-weight:600;color:var(--paper);margin-bottom:8px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .tipmsg{padding:9px 11px;margin-top:8px;border:1px solid var(--obsidian);border-radius:10px 10px 10px 3px;
   background:var(--carbon);white-space:normal;word-break:break-word}
@@ -1533,7 +1351,6 @@ tr.archived td{opacity:.6}
 .markdown table{width:auto;min-width:0;table-layout:auto}.markdown th,.markdown td{height:auto;padding:5px 7px;white-space:normal}
 @media (hover:hover) and (pointer:fine){
   .f:hover{background:var(--chip);color:var(--paper)}
-  .view-switch button:hover{color:var(--paper)}
   th:hover{color:var(--mist)}
   tr.row:hover td{background:var(--hover)}
   .rowbtn:hover,.iconbtn:hover{background:var(--chip);color:var(--paper)}
@@ -1544,18 +1361,21 @@ tr.archived td{opacity:.6}
   .chip:hover{border-color:var(--smoke);color:var(--paper)}
 }
 @media (max-width:760px){
-  header{padding:24px 16px 18px}.view-switch{order:3}.meta{width:100%}.chrome{top:8px;margin:0 12px 14px}
+  header{padding:24px 16px 18px}.meta{width:100%}.chrome{top:8px;margin:0 12px 14px}
   main{padding:0 12px 36px}.searchbox{min-width:100%}.tabs{order:3;width:100%;overflow-x:auto}
 }
 @media (prefers-reduced-motion:reduce){
   html,body{transition:background-color 120ms ease,color 120ms ease}
-  .view-switch button,.f,.rowbtn,.iconbtn{transition:background-color 120ms ease,color 120ms ease,opacity 120ms ease}
-  .view-switch button:active,.f:active:not(:disabled),.rowbtn:active,.iconbtn:active{transform:none}
+  .f,.rowbtn,.iconbtn{transition:background-color 120ms ease,color 120ms ease,opacity 120ms ease}
+  .f:active:not(:disabled),.rowbtn:active,.iconbtn:active{transform:none}
   .select-button svg{transition:none}
   .menu,#tip{transform:none;transition:opacity 120ms ease}
-  #lineage-preview{transform:none;transition:opacity 120ms ease}
   #toast,#toast.show{transform:translateX(-50%);transition:opacity 120ms ease}
 }
-@media (prefers-reduced-transparency:reduce){.chrome,.menu,#tip,#lineage-preview{background:var(--carbon);backdrop-filter:none}}
-@media (prefers-contrast:more){.chrome,.menu,#tip,#lineage-preview,#list,.detail-top,.bubble{border-color:var(--fog)}}
+@media (prefers-reduced-transparency:reduce){.chrome,.menu,#tip{background:var(--carbon);backdrop-filter:none}}
+@media (prefers-contrast:more){.chrome,.menu,#tip,#list,.detail-top,.bubble{border-color:var(--fog)}}
+</style>
+
+<style>
+.file-preview-backdrop{position:fixed;inset:0;z-index:1000;background:rgba(0,0,0,.55);display:flex;align-items:center;justify-content:center;padding:24px}.file-preview{display:flex;flex-direction:column;width:min(1100px,100%);height:min(850px,90vh);background:var(--material);color:var(--paper);border:1px solid var(--graphite);border-radius:12px;overflow:hidden}.file-preview-header{display:flex;align-items:center;gap:16px;padding:14px 18px;border-bottom:1px solid var(--graphite)}.file-preview-header strong{flex:1;overflow-wrap:anywhere}.file-preview-content{flex:1;overflow:auto;padding:20px;margin:0}.file-preview-text{white-space:pre-wrap;overflow-wrap:anywhere;font:13px/1.6 ui-monospace,monospace}.file-preview-frame{flex:1;width:100%;border:0;background:white}
 </style>

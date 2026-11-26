@@ -1,8 +1,7 @@
 import { flushPromises, mount } from "@vue/test-utils";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import App from "../src/App.vue";
-import type { SessionView, TranscriptView } from "../src/contracts.ts";
-import { layoutLineages, LINEAGE_GRAPH_LAYOUT } from "../src/lineageLayout.ts";
+import { emptyCounts, type SessionView, type TranscriptView } from "../src/contracts.ts";
 
 const makeRow = (index: number): SessionView => ({
   id: `session-${index}`,
@@ -22,11 +21,8 @@ const makeRow = (index: number): SessionView => ({
   resume_command: `resume ${index}`,
 });
 
+const searchMatch = { tier: 1, counts: emptyCounts(), threads: [], best: [] };
 const response = (value: unknown, status = 200) => new Response(JSON.stringify(value), { status, headers: { "content-type": "application/json" } });
-const lineageEdge = (upstream_id: string, downstream_id: string, path = "/tmp/handoff.md") => ({
-  relation: "artifact" as const, upstream_id, downstream_id, path, produced_at: 1, referenced_at: 2,
-  producer_turn: 3, reference_turn: 0, reference_source: "user" as const, kind: "add" as const,
-});
 let savedSettings = { claudeResumeCutoff: "" };
 let fetchMock: ReturnType<typeof vi.fn>;
 
@@ -41,15 +37,7 @@ beforeEach(() => {
       return response(savedSettings);
     }
     if (url.startsWith("/api/sessions")) return response({ generatedAt: new Date(0).toISOString(), home: "/home/fixture", sessions: Array.from({ length: 101 }, (_, index) => makeRow(index)) });
-    if (url.startsWith("/api/search")) return response({ total: 1, results: [{ ...makeRow(42), snippet: "deep transcript needle" }] });
-    if (url === "/api/lineage/index") return response({ sessions: 101, scanned: 101, unchanged: 0, removed: 0, writes: 2, references: 2, edges: 1, elapsed_ms: 12 });
-    if (url.startsWith("/api/lineage")) return response({ sessions: [
-      { ...makeRow(99), name: "codex接管pi的submit混乱设计", birth: new Date(2026, 6, 15, 17, 40).getTime() / 1000 },
-      { ...makeRow(100), name: "草，你怎么能改 submit 接口呢？", birth: new Date(2026, 6, 16, 10, 43).getTime() / 1000 },
-    ], edges: [{
-      relation: "artifact", upstream_id: "session-99", downstream_id: "session-100", path: "/tmp/handoff.md",
-      produced_at: 1, referenced_at: 2, producer_turn: 3, reference_turn: 0, reference_source: "user", kind: "add",
-    }] });
+    if (url.startsWith("/api/search")) return response({ total: 1, results: [{ ...makeRow(42), snippet: "deep transcript needle", match: searchMatch }], coverage: {} });
     if (url.startsWith("/api/session")) {
       const id = new URL(url, "http://local").searchParams.get("id")!;
       if (id === "missing") return response({ error: "missing" }, 404);
@@ -67,6 +55,80 @@ beforeEach(() => {
 afterEach(() => { vi.useRealTimers(); vi.unstubAllGlobals(); document.body.innerHTML = ""; });
 
 describe("dashboard", () => {
+  test("renders live sessions before archive rows arrive and refreshes only live sessions", async () => {
+    const { resume_command: _, ...archived } = makeRow(2);
+    const archive: SessionView = { ...archived, id: "archive:old", session_id: "old", source_kind: "archive", source_id: "cp", source_label: "Company", root_id: "claude", primary_action: { kind: "path", value: "/archive/old.jsonl" } };
+    let finishArchive: (() => void) | undefined;
+    fetchMock.mockImplementation(async (input: RequestInfo | URL) => {
+      const url = String(input), envelope = (sessions: SessionView[]) => response({ generatedAt: new Date(0).toISOString(), home: "/home/fixture", sessions });
+      if (url === "/api/sessions?scope=live") return envelope([makeRow(1), archive]);
+      if (url === "/api/sessions?scope=archive") return new Promise<Response>((resolve) => { finishArchive = () => resolve(envelope([archive])); });
+      return response({ ok: true });
+    });
+    const wrapper = mount(App, { attachTo: document.body });
+    await flushPromises();
+    expect(wrapper.findAll("tbody tr.row").map((row) => row.find(".name-text").text())).toEqual(["Session 1"]);
+    finishArchive!(); await flushPromises();
+    expect(wrapper.findAll("tbody tr.row")).toHaveLength(2);
+    await wrapper.get("#reload").trigger("click"); await flushPromises();
+    expect(wrapper.findAll("tbody tr.row")).toHaveLength(2);
+    const calls = fetchMock.mock.calls.map(([input]) => String(input));
+    expect([calls.filter((url) => url.endsWith("scope=live")).length, calls.filter((url) => url.endsWith("scope=archive")).length]).toEqual([2, 1]);
+    wrapper.unmount();
+  });
+
+  test("loads all archive sources and copies correctly labeled actions without renaming archives", async () => {
+    const live = makeRow(1);
+    const pathRow: SessionView = { ...makeRow(2), id: "archive:path", session_id: live.id, tool: live.tool, source_kind: "archive", source_id: "cp", source_label: "Company", root_id: "claude", primary_action: { kind: "path", value: "/archive/session.jsonl" } };
+    delete pathRow.resume_command;
+    const forkRow: SessionView = { ...makeRow(3), id: "archive:fork", session_id: "pi-old", tool: "pi", source_kind: "archive", source_id: "review", source_label: "Review", root_id: "pi", primary_action: { kind: "fork", value: "cd /mapped && pi --fork /archive/pi.jsonl --session-dir /continuations" } };
+    delete forkRow.resume_command;
+    const sessions = [live, pathRow, forkRow];
+    fetchMock.mockImplementation(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.startsWith("/api/sessions")) return response({ generatedAt: new Date(0).toISOString(), home: "/home/fixture", sessions,
+        diagnostics: [{ source_id: "offline", level: "error", message: "source unavailable" }] });
+      if (url.startsWith("/api/session?")) {
+        const id = new URL(url, "http://local").searchParams.get("id");
+        return response({ ...sessions.find((row) => row.id === id), messages: [] });
+      }
+      if (url.startsWith("/api/search")) return response({ total: 3, results: sessions.map((row) => ({ ...row, snippet: "needle", match: searchMatch })), coverage: {} });
+      return response({ ok: true });
+    });
+    const wrapper = mount(App, { attachTo: document.body });
+    await flushPromises();
+    expect(wrapper.findAll("tbody tr.row")).toHaveLength(3);
+    expect(wrapper.get(".source-diagnostics").attributes("open")).toBeDefined();
+    expect(wrapper.get(".source-diagnostics").text()).toContain("source unavailable");
+    expect(wrapper.text()).toContain("同 ID 共 2 份");
+    const rowNamed = (name: string) => wrapper.findAll("tbody tr.row").find((row) => row.find(".name-text").text() === name)!;
+    expect(rowNamed("Session 2").get(".nm").attributes("aria-disabled")).toBe("true");
+    await rowNamed("Session 2").get(".nm").trigger("click");
+    expect(wrapper.find("input[aria-label='名称']").exists()).toBe(false);
+    await rowNamed("Session 2").trigger("click");
+    expect(navigator.clipboard.writeText).toHaveBeenLastCalledWith(pathRow.primary_action!.value);
+    expect(wrapper.get("#toast").text()).toBe("已复制归档路径");
+    await wrapper.get("#searchModeDeep").trigger("click");
+    await wrapper.get("#q").setValue("needle");
+    await wrapper.get("#deepSearch").trigger("click");
+    await flushPromises();
+    expect(wrapper.findAll("tbody tr.row")).toHaveLength(3);
+    await wrapper.get("#reload").trigger("click");
+    await flushPromises();
+    expect(wrapper.findAll("tbody tr.row")).toHaveLength(3);
+    await rowNamed("Session 3").trigger("click");
+    expect(navigator.clipboard.writeText).toHaveBeenLastCalledWith(forkRow.primary_action!.value);
+    expect(wrapper.get("#toast").text()).toBe("已复制新建分支命令");
+    await rowNamed("Session 3").get("[aria-label='打开详情页']").trigger("click");
+    await flushPromises();
+    expect(location.search).toContain("archive%3Afork");
+    const copyButton = wrapper.findAll("button").find((button) => button.text() === "复制新建分支命令")!;
+    await copyButton.trigger("click");
+    expect(navigator.clipboard.writeText).toHaveBeenLastCalledWith(forkRow.primary_action!.value);
+    expect(fetchMock.mock.calls.every(([, init]) => (init?.method ?? "GET") === "GET")).toBe(true);
+    wrapper.unmount();
+  });
+
   test("filters, sorts, and paginates the public list", async () => {
     const wrapper = mount(App, { attachTo: document.body });
     await flushPromises();
@@ -92,6 +154,9 @@ describe("dashboard", () => {
     vi.useFakeTimers();
     const keyword = wrapper.get<HTMLInputElement>("#q");
     await keyword.setValue("Session 42");
+    await vi.advanceTimersByTimeAsync(121);
+    expect(wrapper.findAll("tbody tr")).toHaveLength(1);
+    await keyword.setValue("SESSION-42");
     await vi.advanceTimersByTimeAsync(121);
     expect(wrapper.findAll("tbody tr")).toHaveLength(1);
     await keyword.setValue("");
@@ -209,316 +274,29 @@ describe("dashboard", () => {
     wrapper.unmount();
   });
 
-  test("shows the cached global DAG and loads the complete DAG automatically in Session detail", async () => {
-    const wrapper = mount(App, { attachTo: document.body });
-    await flushPromises();
-    await wrapper.get("#showLineages").trigger("click");
-    await flushPromises();
-    const graph = wrapper.get("[aria-label='全部关系链']");
-    const nodes = graph.findAll(".dag-node");
-    expect(nodes).toHaveLength(2);
-    expect(graph.findAll(".dag-link")).toHaveLength(1);
-    expect(graph.findAll(".dag-file")).toHaveLength(1);
-    expect(graph.get(".dag-file").text()).toContain("handoff.md");
-    expect(graph.get<HTMLElement>(".dag-canvas").element.style.width).toBe("838px");
-    expect(graph.get(".dag-canvas svg").attributes("viewBox")).toBe("0 0 838 168");
-    expect((nodes[1]!.element as HTMLElement).style.left).toBe("554px");
-    const fileLeft = Number.parseInt(graph.get<HTMLElement>(".dag-file").element.style.left);
-    const targetLeft = Number.parseInt((nodes[1]!.element as HTMLElement).style.left);
-    expect(targetLeft - fileLeft - 220).toBe(62);
-    expect(graph.get(".dag-link path").attributes("marker-end")).toContain("dag-open-arrow-");
-    expect(graph.get("marker path").attributes("fill")).toBe("none");
-    expect(graph.get(".dag-card-head").text()).toContain("2026-07-15 17:40");
-    expect(graph.get(".dag-card-head").text()).toContain("codex接管pi的submit混乱设计");
-    expect(graph.get(".dag-card-head").text()).toContain("17 小时 03 分钟");
-    expect(graph.get(".dag-card-head").text()).toContain("2026-07-16 10:43");
-    expect(graph.get(".dag-card-head").text()).toContain("草，你怎么能改 submit 接口呢？");
-    expect(graph.find(".dag-link text").exists()).toBe(false);
-    expect(graph.get(".dag-link path title").text()).toBe("/tmp/handoff.md");
-    expect((nodes[0]!.element as HTMLElement).style.getPropertyValue("--node-delay")).toBe("");
-    await nodes[0]!.trigger("mouseenter");
-    expect(nodes.every((node) => node.classes().includes("connected"))).toBe(true);
-    expect(nodes.some((node) => node.classes().includes("dim"))).toBe(false);
-    expect(graph.get(".dag-link").classes()).toContain("active");
-    await nodes[0]!.trigger("mouseleave");
-    expect(nodes.some((node) => node.classes().includes("connected"))).toBe(false);
-    expect(graph.get(".dag-link").classes()).not.toContain("active");
-    await graph.get(".dag-file").trigger("mouseenter");
-    expect(nodes.every((node) => node.classes().includes("connected"))).toBe(true);
-    expect(graph.get(".dag-file-source").classes()).toContain("active");
-    expect(graph.get(".dag-link").classes()).toContain("active");
-    await graph.get(".dag-file").trigger("mouseleave");
-    expect(nodes.some((node) => node.classes().includes("connected"))).toBe(false);
-    expect(graph.get(".dag-link").classes()).not.toContain("active");
-    await wrapper.get("#lineageIndex").trigger("click");
-    await flushPromises();
-    expect(wrapper.get("#toast").text()).toContain("发现 1 条关系");
-
-    await wrapper.get("#showSessions").trigger("click");
-    await wrapper.get("[aria-label='打开详情页']").trigger("click");
-    await flushPromises();
-    expect(wrapper.find("#sessionLineage").exists()).toBe(false);
-    expect(wrapper.get("[aria-label='Session 关系链']").findAll(".dag-node")).toHaveLength(2);
-    expect(fetchMock.mock.calls.some(([input]) => String(input) === "/api/lineage?id=session-100")).toBe(true);
-    wrapper.unmount();
-  });
-
-  test("merges one produced file into a shared node with separate downstream routes", async () => {
-    const sessions = [makeRow(1), makeRow(2), makeRow(3)];
-    fetchMock.mockImplementation(async (input: RequestInfo | URL) => {
-      const url = String(input);
-      if (url.startsWith("/api/sessions")) return response({ generatedAt: new Date(0).toISOString(), home: "/home/fixture", sessions });
-      if (url === "/api/lineages") return response({ sessions, edges: [
-        lineageEdge("session-1", "session-2", "/tmp/shared-handoff.md"),
-        lineageEdge("session-1", "session-3", "/tmp/shared-handoff.md"),
-      ] });
-      return response({ ok: true });
-    });
+  test("keeps pinned rows first under any sort and pins through /star", async () => {
+    const original = fetchMock.getMockImplementation() as (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
+    fetchMock.mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => String(input).startsWith("/api/sessions")
+      ? response({ generatedAt: new Date(0).toISOString(), home: "/home/fixture", sessions: Array.from({ length: 101 }, (_, index) => ({ ...makeRow(index), ...(index === 5 ? { pinned: true } : {}) })) })
+      : original(input, init));
     const wrapper = mount(App);
     await flushPromises();
-    await wrapper.get("#showLineages").trigger("click");
+    const names = () => wrapper.findAll("tbody .name-text").map((name) => name.text());
+    expect(names().slice(0, 2)).toEqual(["Session 5", "Session 100"]);
+    expect(wrapper.get("tbody tr").classes()).toContain("pinned");
+    await wrapper.findAll("th").find((th) => th.text().startsWith("会话"))!.trigger("click");
+    expect(names()[0]).toBe("Session 5");
+
+    await wrapper.findAll("th").find((th) => th.text().startsWith("更新"))!.trigger("click");
+    await wrapper.findAll("tbody tr")[1]!.get("button[aria-label='置顶']").trigger("click");
     await flushPromises();
-    const graph = wrapper.get("[aria-label='全部关系链']");
-    expect(graph.findAll(".dag-file")).toHaveLength(1);
-    expect(graph.get(".dag-file").text()).toContain("2 下游");
-    expect(graph.findAll(".dag-link")).toHaveLength(2);
-    expect(new Set(graph.findAll(".dag-link path").map((path) => path.attributes("d"))).size).toBe(2);
+    expect(fetchMock).toHaveBeenCalledWith("/star", expect.objectContaining({ body: expect.stringContaining('"pin":true') }));
+    expect(names().slice(0, 3)).toEqual(["Session 100", "Session 5", "Session 99"]);
+    expect(wrapper.findAll("tbody tr")[0]!.find("button[aria-label='取消置顶']").exists()).toBe(true);
     wrapper.unmount();
   });
 
-  test("centers file nodes between their endpoint blocks without overlap", () => {
-    const sessions = [makeRow(1), makeRow(2), makeRow(3), makeRow(4)];
-    const chain = layoutLineages({ sessions, edges: [
-      lineageEdge("session-1", "session-3", "/tmp/shared.md"),
-      lineageEdge("session-1", "session-4", "/tmp/shared.md"),
-      lineageEdge("session-2", "session-3", "/tmp/other.md"),
-    ] }, LINEAGE_GRAPH_LAYOUT)[0]!;
-    const shared = chain.files.find((file) => file.path === "/tmp/shared.md")!;
-    const other = chain.files.find((file) => file.path === "/tmp/other.md")!;
-    expect(shared.y).toBe(68);
-    expect(other.y).toBe(128);
-    expect(other.y - shared.y).toBeGreaterThanOrEqual(LINEAGE_GRAPH_LAYOUT.fileHeight!);
-  });
-
-  test("expands the canvas when collision avoidance pushes file nodes down", () => {
-    const sessions = Array.from({ length: 12 }, (_, index) => makeRow(index));
-    const edges = [
-      ...sessions.slice(1, 11).map((session) => lineageEdge("session-0", session.id, "/tmp/shared.md")),
-      ...Array.from({ length: 10 }, (_, index) => lineageEdge("session-10", "session-11", `/tmp/${index}.md`)),
-    ];
-    const chain = layoutLineages({ sessions, edges }, LINEAGE_GRAPH_LAYOUT)[0]!;
-    const lowestFileBottom = Math.max(...chain.files.map((file) => file.y + LINEAGE_GRAPH_LAYOUT.fileHeight!));
-    expect(chain.height).toBeGreaterThanOrEqual(lowestFileBottom + LINEAGE_GRAPH_LAYOUT.y);
-  });
-
-  test("adds a manual upstream from Session detail and refreshes the graph", async () => {
-    const sessions = [makeRow(1), makeRow(2)];
-    let added = false;
-    fetchMock.mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
-      const url = String(input);
-      if (url.startsWith("/api/sessions")) return response({ generatedAt: new Date(0).toISOString(), home: "/home/fixture", sessions });
-      if (url.startsWith("/api/session")) {
-        const id = new URL(url, "http://local").searchParams.get("id")!;
-        return response({ ...sessions.find((row) => row.id === id)!, messages: [] } satisfies TranscriptView);
-      }
-      if (url === "/api/lineage/manual" && init?.method === "POST") {
-        expect(JSON.parse(String(init.body))).toEqual({ upstream_id: "session-1", downstream_id: "session-2" });
-        added = true;
-        return response({ ok: true });
-      }
-      if (url === "/api/lineage/manual" && init?.method === "DELETE") {
-        expect(JSON.parse(String(init.body))).toEqual({ upstream_id: "session-1", downstream_id: "session-2" });
-        added = false;
-        return response({ ok: true });
-      }
-      const edge = { relation: "manual" as const, upstream_id: "session-1", downstream_id: "session-2", created_at: 1 };
-      if (url.startsWith("/api/lineage?id=")) return response(added ? { sessions, edges: [edge] } : { sessions: [sessions[1]], edges: [] });
-      if (url === "/api/lineages") return response(added ? { sessions, edges: [edge] } : { sessions: [], edges: [] });
-      return response({ ok: true });
-    });
-    const wrapper = mount(App);
-    await flushPromises();
-    await wrapper.findAll("[aria-label='打开详情页']")[0]!.trigger("click");
-    await flushPromises();
-
-    await wrapper.get("#addManualLineage").trigger("click");
-    expect(wrapper.findAll("#manualUpstreamOptions option")).toHaveLength(1);
-    await wrapper.get<HTMLInputElement>("#manualUpstream").setValue("session-1");
-    await wrapper.get("#manualLineageForm").trigger("submit");
-    await flushPromises();
-
-    expect(added).toBe(true);
-    expect(wrapper.get("[aria-label='Session 关系链'] .dag-file").text()).toContain("MANUAL");
-    expect(wrapper.get("[aria-label='Session 关系链'] .dag-file").text()).toContain("手动关联");
-    expect(wrapper.get("#toast").text()).toContain("已添加手动上游");
-
-    await wrapper.get(".remove-manual-lineage").trigger("click");
-    await flushPromises();
-    expect(wrapper.find("[aria-label='Session 关系链'] .dag-file").exists()).toBe(false);
-    expect(wrapper.get("#toast").text()).toContain("已取消手动关联");
-    wrapper.unmount();
-  });
-
-  test("loads chain badges from one cached request, filters them, previews on hover, and refreshes after analysis", async () => {
-    vi.useFakeTimers();
-    const allRows = Array.from({ length: 101 }, (_, index) => makeRow(index));
-    let lineageLoads = 0;
-    fetchMock.mockImplementation(async (input: RequestInfo | URL) => {
-      const url = String(input);
-      if (url.startsWith("/api/sessions")) return response({ generatedAt: new Date(0).toISOString(), home: "/home/fixture", sessions: allRows });
-      if (url === "/api/lineage/index") return response({ sessions: 101, scanned: 101, unchanged: 0, removed: 0, writes: 3, references: 3, edges: 2, elapsed_ms: 12 });
-      if (url === "/api/lineages") {
-        lineageLoads++;
-        const sessions = lineageLoads === 1 ? [makeRow(99), makeRow(100)] : [makeRow(98), makeRow(99), makeRow(100)];
-        const edges = lineageLoads === 1 ? [lineageEdge("session-99", "session-100")] : [lineageEdge("session-98", "session-99"), lineageEdge("session-99", "session-100")];
-        return response({ sessions, edges });
-      }
-      if (url.startsWith("/api/session")) {
-        const id = new URL(url, "http://local").searchParams.get("id")!;
-        return response({ ...allRows.find((row) => row.id === id)!, messages: [{ role: "user", text: "preview", timestamp: "" }] } satisfies TranscriptView);
-      }
-      return response({ ok: true });
-    });
-    const wrapper = mount(App, { attachTo: document.body });
-    await flushPromises();
-    expect(fetchMock.mock.calls.filter(([input]) => String(input) === "/api/lineages")).toHaveLength(1);
-    expect(wrapper.findAll(".chainbtn")).toHaveLength(2);
-    expect(wrapper.get(".chainbtn").text()).toBe("2");
-    const noChainRow = wrapper.findAll("tbody tr.row").find((row) => row.find(".name-text").text() === "Session 98")!;
-    expect(noChainRow.find(".chainbtn").exists()).toBe(false);
-
-    const message = wrapper.get(".line2.msg");
-    await message.trigger("mouseenter");
-    await vi.advanceTimersByTimeAsync(181); await flushPromises();
-    expect(wrapper.find("#tip").exists()).toBe(true);
-    const chip = wrapper.get(".chainbtn");
-    await chip.trigger("mouseenter");
-    expect(wrapper.find("#tip").exists()).toBe(false);
-    await vi.advanceTimersByTimeAsync(181);
-    expect(wrapper.get("#lineage-preview").attributes("role")).toBe("dialog");
-    expect(wrapper.findAll("#lineage-preview .lineage-mini-node")).toHaveLength(2);
-    expect(wrapper.findAll("#lineage-preview .mini-edge")).toHaveLength(1);
-    expect(wrapper.find("#lineage-preview .lineage-mini-node.current").exists()).toBe(true);
-    expect(wrapper.get("#lineage-preview .mini-edge").attributes("marker-end")).toContain("mini-arrow-");
-    expect(wrapper.get("#lineage-preview .mini-label").text()).toBe("handoff.md");
-    expect(wrapper.get("#lineage-preview .mini-label").element.tagName).toBe("SPAN");
-    expect(wrapper.get("#lineage-preview .mini-label").attributes("title")).toBe("/tmp/handoff.md");
-    await wrapper.get("#lineage-preview .mini-scroll").trigger("scroll");
-    expect(wrapper.find("#lineage-preview").exists()).toBe(true);
-    expect(fetchMock.mock.calls.filter(([input]) => String(input) === "/api/lineages")).toHaveLength(1);
-    await chip.trigger("mouseleave");
-    await vi.advanceTimersByTimeAsync(101);
-    expect(wrapper.find("#lineage-preview").exists()).toBe(false);
-
-    const chainTab = wrapper.findAll(".tabs button").find((button) => button.text().startsWith("⛓ 有链"))!;
-    expect(chainTab.attributes("data-count")).toBe("2");
-    await chainTab.trigger("click");
-    expect(wrapper.findAll("tbody tr.row")).toHaveLength(2);
-    await wrapper.get("#showLineages").trigger("click");
-    await wrapper.get("#lineageIndex").trigger("click");
-    await flushPromises();
-    expect(fetchMock.mock.calls.filter(([input]) => String(input) === "/api/lineages")).toHaveLength(2);
-    await wrapper.get("#showSessions").trigger("click");
-    const refreshedTab = wrapper.findAll(".tabs button").find((button) => button.text().startsWith("⛓ 有链"))!;
-    expect(refreshedTab.attributes("data-count")).toBe("3");
-    expect(wrapper.get(".chainbtn").text()).toBe("3");
-    wrapper.unmount();
-  });
-
-  test("pins the chain preview with keyboard focus, traps Tab, restores focus on Escape, and opens a node", async () => {
-    vi.useFakeTimers();
-    const wrapper = mount(App, { attachTo: document.body });
-    await flushPromises();
-    const chip = wrapper.get<HTMLButtonElement>(".chainbtn");
-    chip.element.focus();
-    await flushPromises();
-    expect(chip.attributes("aria-expanded")).toBe("true");
-    expect(chip.attributes("aria-controls")).toBe("lineage-preview");
-    await chip.trigger("keydown", { key: "Enter" });
-    expect(navigator.clipboard.writeText).not.toHaveBeenCalled();
-
-    await chip.trigger("click", { detail: 0 });
-    await flushPromises();
-    expect(wrapper.get("#lineage-preview").text()).toContain("已固定 · Esc 关闭");
-    expect(document.activeElement?.classList.contains("current")).toBe(true);
-    await chip.trigger("mouseleave");
-    await vi.advanceTimersByTimeAsync(101);
-    expect(wrapper.find("#lineage-preview").exists()).toBe(true);
-    const controls = wrapper.get("#lineage-preview").findAll<HTMLButtonElement>("button");
-    controls.at(-1)!.element.focus();
-    await controls.at(-1)!.trigger("keydown", { key: "Tab" });
-    expect(document.activeElement).toBe(controls[0]!.element);
-    await controls[0]!.trigger("keydown", { key: "Tab", shiftKey: true });
-    expect(document.activeElement).toBe(controls.at(-1)!.element);
-    await controls.at(-1)!.trigger("keydown", { key: "Escape" });
-    await flushPromises();
-    expect(wrapper.find("#lineage-preview").exists()).toBe(false);
-    expect(document.activeElement).toBe(chip.element);
-    expect(chip.attributes("aria-expanded")).toBe("false");
-
-    await chip.trigger("click", { detail: 1 });
-    expect(document.activeElement).toBe(chip.element);
-    await chip.trigger("keydown", { key: "Escape" });
-    await flushPromises();
-    expect(wrapper.find("#lineage-preview").exists()).toBe(false);
-    await chip.trigger("click", { detail: 1 });
-    await wrapper.get("#lineage-preview .lineage-mini-node.current").trigger("click");
-    await flushPromises();
-    expect(location.search).toBe("?session=session-100");
-    wrapper.unmount();
-  });
-
-  test("hides chain controls when the cached graph has no edges", async () => {
-    fetchMock.mockImplementation(async (input: RequestInfo | URL) => {
-      const url = String(input);
-      if (url.startsWith("/api/sessions")) return response({ generatedAt: new Date(0).toISOString(), home: "/home/fixture", sessions: [makeRow(1), makeRow(2)] });
-      if (url === "/api/lineages") return response({ sessions: [], edges: [] });
-      return response({ ok: true });
-    });
-    const wrapper = mount(App, { attachTo: document.body });
-    await flushPromises();
-    expect(wrapper.find(".chainbtn").exists()).toBe(false);
-    expect(wrapper.findAll(".tabs button").some((button) => button.text().startsWith("⛓ 有链"))).toBe(false);
-    wrapper.unmount();
-  });
-
-  test("clips large chains to direct neighbors with disjoint upstream, downstream, and branch counts", async () => {
-    vi.useFakeTimers();
-    const ids = ["a", "u1", "u2", "u3", "u4", "u5", "current", "d1", "d2", "d3", "d4", "d5", "z", "b1", "b2"];
-    const sessions = ids.map((id, index) => ({ ...makeRow(index), id, name: id, birth: index + 1, mtime: index + 1 }));
-    const edges = [
-      lineageEdge("a", "u1"), ...[1, 2, 3, 4, 5].map((index) => lineageEdge(`u${index}`, "current")),
-      ...[1, 2, 3, 4, 5].map((index) => lineageEdge("current", `d${index}`)), lineageEdge("d1", "z"),
-      lineageEdge("u1", "b1"), lineageEdge("b1", "b2"),
-    ];
-    fetchMock.mockImplementation(async (input: RequestInfo | URL) => {
-      const url = String(input);
-      if (url.startsWith("/api/sessions")) return response({ generatedAt: new Date(0).toISOString(), home: "/home/fixture", sessions });
-      if (url === "/api/lineages") return response({ sessions, edges });
-      return response({ ok: true });
-    });
-    const wrapper = mount(App, { attachTo: document.body });
-    await flushPromises();
-    const row = wrapper.findAll("tbody tr.row").find((item) => item.get(".name-text").text() === "current")!;
-    expect(row.get(".chainbtn").text()).toBe("15");
-    await row.get(".chainbtn").trigger("mouseenter");
-    await vi.advanceTimersByTimeAsync(181);
-    const dialog = wrapper.get("#lineage-preview");
-    expect(dialog.text()).toContain("仅显示相邻一层");
-    expect(dialog.findAll(".lineage-mini-node")).toHaveLength(9);
-    expect(dialog.get(".mini-fold.upstream").attributes("data-count")).toBe("2");
-    expect(dialog.get(".mini-fold.downstream").attributes("data-count")).toBe("2");
-    expect(dialog.get(".mini-fold.branch").attributes("data-count")).toBe("2");
-    const hidden = dialog.findAll(".mini-fold").reduce((total, fold) => total + Number(fold.attributes("data-count")), 0);
-    expect(dialog.findAll(".lineage-mini-node").length + hidden).toBe(15);
-    await dialog.get(".mini-fold.branch").trigger("click");
-    await flushPromises();
-    expect(wrapper.find("#lineageOverview .dag-node.focus").exists()).toBe(true);
-    expect(fetchMock.mock.calls.filter(([input]) => String(input) === "/api/lineages")).toHaveLength(1);
-    wrapper.unmount();
-  });
-
-  test("commits star, note, status, and archive only after success", async () => {
+  test("commits star, note, and archive only after success", async () => {
     const wrapper = mount(App);
     await flushPromises();
     const row = wrapper.get("tbody tr");
@@ -542,10 +320,6 @@ describe("dashboard", () => {
     expect(wrapper.get("[role='alert']").text()).toBe("改名失败");
     expect(row.get(".name-text").text()).toBe("Session 100");
 
-    await row.get(".statusbtn").trigger("click");
-    await wrapper.findAll(".menu-option").find((option) => option.text().startsWith("done"))!.trigger("click");
-    await flushPromises();
-    expect(row.get(".statusbtn").text()).toBe("done");
     expect(fetchMock).toHaveBeenCalledWith("/star", expect.objectContaining({ method: "POST" }));
     await row.get("[aria-label='归档']").trigger("click");
     await flushPromises();
@@ -553,6 +327,37 @@ describe("dashboard", () => {
     await wrapper.findAll(".tabs button").find((button) => button.text().startsWith("归档"))!.trigger("click");
     expect(wrapper.get("tbody .name-text").text()).toBe("Session 100");
     wrapper.unmount();
+  });
+
+  test.each([
+    { first_msg: "First pi message", label: "First pi message" },
+    { first_msg: "", label: "session-1" },
+  ])("previews unnamed pi Sessions in compact mode ($label)", async ({ first_msg, label }) => {
+    localStorage.setItem("compact", "1");
+    vi.useFakeTimers();
+    const row: SessionView = { ...makeRow(1), tool: "pi", name: "", first_msg };
+    fetchMock.mockImplementation(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.startsWith("/api/sessions")) return response({ generatedAt: new Date(0).toISOString(), home: "/home/fixture", sessions: [row] });
+      if (url.startsWith("/api/session?")) return response({ ...row, messages: [
+        { role: "user", text: "Pi user message", timestamp: "" },
+        { role: "assistant", text: "Pi assistant reply", timestamp: "" },
+      ] } satisfies TranscriptView);
+      return response({ sessions: [], edges: [] });
+    });
+    const wrapper = mount(App, { attachTo: document.body });
+    try {
+      await flushPromises();
+      const name = wrapper.get(".name-text");
+      expect(name.text()).toBe(label);
+      await name.trigger("mouseenter");
+      await vi.advanceTimersByTimeAsync(501); await flushPromises();
+      expect(wrapper.get("#tip").text()).toContain("Pi user message");
+      expect(wrapper.get("#tip").text()).toContain("Pi assistant reply");
+      expect(wrapper.findAll("#tip .tipmsg")).toHaveLength(2);
+    } finally {
+      wrapper.unmount();
+    }
   });
 
   test("restores preferences, keyboard shortcuts, and hover Transcript preview", async () => {
@@ -572,7 +377,7 @@ describe("dashboard", () => {
     expect(wrapper.get<HTMLInputElement>("#q").element.value).toBe("");
 
     await wrapper.find(".line2.msg").trigger("mouseenter");
-    await vi.advanceTimersByTimeAsync(181); await flushPromises();
+    await vi.advanceTimersByTimeAsync(501); await flushPromises();
     expect(wrapper.get("#tip").text()).toContain("Readable fixture");
     expect(wrapper.get("#tip .markdown h2").text()).toBe("Readable fixture");
 
@@ -583,7 +388,7 @@ describe("dashboard", () => {
     expect(wrapper.get("table").classes()).toContain("compact");
     // 首条消息藏起来后，Transcript 预览改从名称格进入
     await wrapper.get(".name-text").trigger("mouseenter");
-    await vi.advanceTimersByTimeAsync(181); await flushPromises();
+    await vi.advanceTimersByTimeAsync(501); await flushPromises();
     expect(wrapper.get("#tip").text()).toContain("Readable fixture");
     await wrapper.get("#density").trigger("click");
     expect(localStorage.getItem("compact")).toBe("0");
@@ -592,6 +397,12 @@ describe("dashboard", () => {
     window.dispatchEvent(new PointerEvent("pointermove", { clientX: 130 }));
     window.dispatchEvent(new PointerEvent("pointerup"));
     expect(JSON.parse(localStorage.getItem("colw7") || "[]")[0]).toBeGreaterThanOrEqual(36);
+    const sortedBefore = wrapper.findAll("th.s-asc, th.s-desc").length;
+    await wrapper.findAll("thead th")[3]!.trigger("click");
+    expect(wrapper.findAll("th.s-asc, th.s-desc").length).toBe(sortedBefore);
+    await vi.advanceTimersByTimeAsync(1);
+    await wrapper.findAll("thead th")[3]!.trigger("click");
+    expect(wrapper.findAll("th.s-asc, th.s-desc").length).toBe(1);
     wrapper.unmount();
   });
 
@@ -610,9 +421,9 @@ describe("dashboard", () => {
     const wrapper = mount(App, { attachTo: document.body });
     await flushPromises();
     const target = wrapper.get(".name-text");
-    expect(target.text()).toBe("未命名会话");
+    expect(target.text()).toBe(compact ? session.first_msg : "未命名会话");
     await target.trigger("mouseenter");
-    await vi.advanceTimersByTimeAsync(181); await flushPromises();
+    await vi.advanceTimersByTimeAsync(501); await flushPromises();
     expect(wrapper.get("#tip").text()).toContain("Pi preview text");
     await target.trigger("click"); await flushPromises();
     const input = wrapper.get<HTMLInputElement>("input[aria-label='名称']");
@@ -639,11 +450,11 @@ describe("dashboard", () => {
     const message = wrapper.get(".line2.msg");
 
     await message.trigger("mouseenter");
-    await vi.advanceTimersByTimeAsync(181);
+    await vi.advanceTimersByTimeAsync(501);
     await message.trigger("mouseleave");
-    await vi.advanceTimersByTimeAsync(101);
+    await vi.advanceTimersByTimeAsync(151);
     await message.trigger("mouseenter");
-    await vi.advanceTimersByTimeAsync(181);
+    await vi.advanceTimersByTimeAsync(501);
 
     expect(fetchMock.mock.calls.filter(([input]) => String(input).startsWith("/api/session?id=")).length).toBe(1);
     finishDetail(response({ ...makeRow(1), messages: [] } satisfies TranscriptView));
@@ -659,7 +470,6 @@ describe("dashboard", () => {
       if (url.startsWith("/api/sessions") && sessionLoads++ === 0)
         return response({ generatedAt: new Date(0).toISOString(), home: "/home/fixture", sessions: [makeRow(1)] });
       if (url.startsWith("/api/sessions")) return new Promise<Response>((resolve) => { finishRefresh = resolve; });
-      if (url === "/api/lineages") return response({ sessions: [], edges: [] });
       return response({ ok: true });
     });
     const wrapper = mount(App, { attachTo: document.body });
@@ -685,14 +495,13 @@ describe("dashboard", () => {
         return response({ generatedAt: new Date().toISOString(), home: "/home/fixture", sessions: [makeRow(1)] });
       if (url.startsWith("/api/session"))
         return response({ ...makeRow(1), messages: [{ role: "user", text: ++detailLoads === 1 ? "before refresh" : "after refresh", timestamp: "" }] } satisfies TranscriptView);
-      if (url.startsWith("/api/lineage")) return response({ sessions: [], edges: [] });
       return response({ ok: true });
     });
     const wrapper = mount(App, { attachTo: document.body });
     await flushPromises();
 
     await wrapper.get(".line2.msg").trigger("mouseenter");
-    await vi.advanceTimersByTimeAsync(181);
+    await vi.advanceTimersByTimeAsync(501);
     await flushPromises();
     expect(wrapper.get("#tip").text()).toContain("before refresh");
     await wrapper.get("#reload").trigger("click");
@@ -712,11 +521,12 @@ describe("dashboard", () => {
     const message = wrapper.get(".line2.msg");
 
     await message.trigger("mouseenter");
-    await vi.advanceTimersByTimeAsync(100);
+    await vi.advanceTimersByTimeAsync(350);
     await message.trigger("mouseleave");
-    await vi.advanceTimersByTimeAsync(200);
+    await vi.advanceTimersByTimeAsync(300);
 
     expect(fetchMock.mock.calls.filter(([input]) => String(input).startsWith("/api/session?id=")).length).toBe(0);
+    expect(wrapper.find("#tip").exists()).toBe(false);
     wrapper.unmount();
   });
 
@@ -727,15 +537,52 @@ describe("dashboard", () => {
     const messages = wrapper.findAll(".line2.msg");
 
     await messages[0]!.trigger("mouseenter");
-    await vi.advanceTimersByTimeAsync(181);
+    await vi.advanceTimersByTimeAsync(501);
     await flushPromises();
     expect(fetchMock.mock.calls.filter(([input]) => String(input).startsWith("/api/session?id=")).length).toBe(1);
+    expect(wrapper.find("#tip").exists()).toBe(true);
 
     await messages[1]!.trigger("mouseenter");
-    await vi.advanceTimersByTimeAsync(179);
+    expect(wrapper.find("#tip").exists()).toBe(false);
+    await vi.advanceTimersByTimeAsync(499);
     expect(fetchMock.mock.calls.filter(([input]) => String(input).startsWith("/api/session?id=")).length).toBe(1);
     await vi.advanceTimersByTimeAsync(1);
     expect(fetchMock.mock.calls.filter(([input]) => String(input).startsWith("/api/session?id=")).length).toBe(2);
+    wrapper.unmount();
+  });
+
+  test("dismisses and suppresses hover previews when starting to rename, and supports agy tab and rename toast", async () => {
+    vi.useFakeTimers();
+    const agyRow: SessionView = { ...makeRow(1), id: "agy-1", tool: "agy", model: "gemini-4-neon-high" };
+    fetchMock.mockImplementation(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.startsWith("/api/sessions")) return response({ generatedAt: new Date(0).toISOString(), home: "/home/fixture", sessions: [agyRow] });
+      if (url.startsWith("/api/session?")) return response({ ...agyRow, messages: [{ role: "user", text: "hi", timestamp: "" }] });
+      return response({ ok: true });
+    });
+    const wrapper = mount(App, { attachTo: document.body });
+    await flushPromises();
+    expect(wrapper.findAll(".tabs button").some((button) => button.text().startsWith("agy"))).toBe(true);
+    expect(wrapper.get(".tool-pill.agy").text()).toBe("agy");
+
+    const row = wrapper.get("tbody tr.row");
+    await row.get(".line2.msg").trigger("mouseenter");
+    await vi.advanceTimersByTimeAsync(501);
+    await flushPromises();
+    expect(wrapper.find("#tip").exists()).toBe(true);
+
+    await row.get(".nm").trigger("mousedown");
+    expect(wrapper.find("#tip").exists()).toBe(false);
+    await row.get(".nm").trigger("click");
+    await row.get(".line2.msg").trigger("mouseenter");
+    await vi.advanceTimersByTimeAsync(600);
+    expect(wrapper.find("#tip").exists()).toBe(false);
+
+    const input = row.get<HTMLInputElement>("input[aria-label='名称']");
+    await input.setValue("Renamed Agy");
+    await input.trigger("keydown", { key: "Enter" });
+    await flushPromises();
+    expect(wrapper.get("#toast").text()).toBe("已同步 agy Session 名称");
     wrapper.unmount();
   });
 
@@ -771,7 +618,7 @@ describe("dashboard", () => {
     Object.defineProperty(nameText.element, "scrollWidth", { configurable: true, value: 200 });
     Object.defineProperty(nameText.element, "clientWidth", { configurable: true, value: 50 });
     await nameText.trigger("mouseenter");
-    await vi.advanceTimersByTimeAsync(181);
+    await vi.advanceTimersByTimeAsync(501);
     expect(wrapper.get("#tip").text()).toBe("Session 100");
     wrapper.unmount();
   });
@@ -788,6 +635,40 @@ describe("dashboard", () => {
     await missing.findAll("button").find((button) => button.text() === "返回")!.trigger("click");
     expect(location.pathname + location.search).toBe("/");
     missing.unmount();
+  });
+
+  test("opens file:// local document links in the preview dialog without auto-linking bare filenames", async () => {
+    const row = { ...makeRow(1), id: "agy-doc", tool: "agy" as const };
+    const docHref = "file:///Users/fixture/%E8%AF%A6%E7%BB%86%E8%A7%A3%E8%AF%BB%E8%AE%BF%E8%B0%88%E6%BC%94%E8%AE%B2.md#L10-L20";
+    fetchMock.mockImplementation(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.startsWith("/api/sessions")) return response({ generatedAt: new Date(0).toISOString(), home: "/home/fixture", sessions: [row] });
+      if (url.startsWith("/api/session?")) {
+        return response({
+          ...row,
+          messages: [{ role: "assistant", text: "读完 [详细解读访谈演讲.md](file:///Users/fixture/详细解读访谈演讲.md#L10-L20) 和 详细解读访谈演讲.md", timestamp: "" }],
+        } satisfies TranscriptView);
+      }
+      if (url.startsWith("/api/file-preview?")) {
+        return response({ path: "/Users/fixture/详细解读访谈演讲.md", extension: ".md", content: "# 访谈正文\n\n预览成功" });
+      }
+      return response({ ok: true });
+    });
+
+    const wrapper = mount(App, { attachTo: document.body });
+    await flushPromises();
+    await wrapper.get("[aria-label='打开详情页']").trigger("click");
+    await flushPromises();
+
+    const links = wrapper.findAll(".bubble .markdown a");
+    expect(links).toHaveLength(1);
+    expect(links[0]!.attributes("href")).toBe(docHref);
+
+    await links[0]!.trigger("click", { button: 0 });
+    await flushPromises();
+    expect(fetchMock).toHaveBeenCalledWith(`/api/file-preview?${new URLSearchParams({ id: "agy-doc", href: docHref })}`);
+    expect(wrapper.get(".file-preview").text()).toContain("访谈正文");
+    wrapper.unmount();
   });
 });
 
