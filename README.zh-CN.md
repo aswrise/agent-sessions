@@ -100,6 +100,19 @@ Session ID 可以缩写为任意不重复的前缀。
 （未归类、部分命中、仅注入、不可读、孤儿子线程），并列出前几个孤儿和不可读路径。
 CLI 默认只往 stderr 打印来源错误，`-v` 另外打印各来源的统计。
 
+## Agent skill
+
+`skills/sessions-recall/` 是配套的 Agent Skill，教 agent 用 `sessions` 回忆过去的会话。
+把它软链到共享的 `~/.agents/skills/`，各工具的 skill 目录再链到那里：
+
+```bash
+ln -s "$PWD/skills/sessions-recall" ~/.agents/skills/sessions-recall
+ln -s ../../.agents/skills/sessions-recall ~/.claude/skills/sessions-recall
+ln -s ../../.agents/skills/sessions-recall ~/.codex/skills/sessions-recall
+```
+
+软链最终指向仓库，`git pull` 后 skill 随之更新。
+
 ## 登记旧会话来源
 
 本机三套默认会话目录无需配置。额外旧目录登记在应用数据目录的

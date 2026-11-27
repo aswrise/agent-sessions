@@ -107,6 +107,20 @@ injected-only, unreadable, orphan child threads), listing the first orphans and
 unreadable paths. The CLI prints only source errors to stderr; `-v` adds
 per-source counts.
 
+## Agent skill
+
+`skills/sessions-recall/` is the companion Agent Skill that teaches an agent to
+recall past sessions with `sessions`. Link it into the shared `~/.agents/skills/`,
+then link each tool's skill directory to that entry:
+
+```bash
+ln -s "$PWD/skills/sessions-recall" ~/.agents/skills/sessions-recall
+ln -s ../../.agents/skills/sessions-recall ~/.claude/skills/sessions-recall
+ln -s ../../.agents/skills/sessions-recall ~/.codex/skills/sessions-recall
+```
+
+The links resolve to the checkout, so `git pull` updates the skill.
+
 ## Additional archive sources
 
 The three default live roots work without configuration. To read additional
